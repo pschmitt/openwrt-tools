@@ -104,6 +104,10 @@ then
   set -e
 
   case "$1" in
+    -h|--help|--usage|-?)
+      usage
+      exit 0
+      ;;
     nb|netbird*)
       fetze_netbird
       ;;
@@ -111,8 +115,8 @@ then
       fetze_tailscale
       ;;
     *)
-      usage >&2
-      exit 2
+      fetze_netbird
+      fetze_tailscale
       ;;
   esac
 fi
