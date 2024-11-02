@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+
+# shellcheck disable=SC2317
+get_wan_interfaces() {
+  local uci_path
+  uci_path="$(uci show firewall | awk "/name=[\"']wan[\"']/" | sed -r "s#.name=[\"']wan['\"]##")"
+
+  if [[ -z "$uci_path" ]]
+  then
+    echo "Failed to find wan firewall config path" >&2
+    return 1
+  fi
+
+  # Remove any ipv6 interfaces
+  local intf
+  for intf in $(uci get "${uci_path}.network" | sed -r 's#[^ ]+6##g')
+  do
+    get_interface "$intf"
+  done
+}
+
+get_interface() {
+  local uci_name="$1"
+  local value
+  value="$(uci get "network.${uci_name}.device" 2>/dev/null)"
+
+  if grep -qE '^/' <<< "$value"
+  then
+    # NOTE modemmanager devices are addressed via real fs paths:
+    # /sys/devices/platform/soc/soc:internal-regs/f1058000.usb/usb1/1-1
+    mmcli -m any 2>/dev/null | sed -nr 's#.*, ([^ ]+) \(net\)#\1#p'
+  else
+    echo "$value"
+  fi
+}
+
+# mapfile -t WAN_INTERFACES < <(get_wan_interfaces)
+# echo "WAN_INTERFACES: ${WAN_INTERFACES[*]}" >&2
+
+WAN=$(get_interface wan)
+LTE=$(get_interface wwan)
+LTE_INT=$(get_interface wwan_ext)
+# shellcheck disable=SC2206
+INTERFACES=($WAN $LTE)
+
+resolve() {
+  local host="$1"
+  local type="A"
+
+  if [[ -n "$IPV6" ]]
+  then
+    type="AAAA"
+  fi
+
+  curl --http2 -fsSL \
+    -H "accept: application/dns-json" \
+    "https://1.1.1.1/dns-query?name=${host}&type=${type}" 2>/dev/null | \
+    jq -er '.Answer[0].data'
+}
+
+provider_resolve() {
+  local ip_addr
+
+  # ipinfo.io is reachable via ipv6, but on a differnent host
+  # https://ipinfo.io/faq/article/133-do-you-support-ipv6
+  case "$PROVIDER" in
+    ipinfo.io)
+      if [[ -n "$IPV6" ]]
+      then
+        PROVIDER=v6.ipinfo.io
+      fi
+      ;;
+  esac
+
+  ip_addr="$(resolve "$PROVIDER")"
+
+  if [[ -n "$ip_addr" && "$ip_addr" != "null" ]]
+  then
+    echo "$ip_addr"
+    return 0
+  fi
+
+  if [[ -n "$IPV6" ]]
+  then
+    case "$PROVIDER" in
+      ipinfo.io|v6.ipinfo.io)
+        # dig AAAA +short v6.ipinfo.io
+        ip_addr="2600:1901:0:13e0::"
+        ;;
+      ip.guide)
+        # dig AAAA +short ip.guide
+        ip_addr="2a06:98c1:3120::3"
+        ;;
+      myip.wtf)
+        # dig AAAA +short myip.wtf
+        ip_addr="2a01:4f9:6b:4b55::acab:f001"
+        ;;
+      *)
+        echo "Unknown provider: $PROVIDER" >&2
+        return 1
+        ;;
+    esac
+  else
+    case "$PROVIDER" in
+      ipinfo.io|v6.ipinfo.io)
+        # dig AAAA +short ipinfo.io
+        ip_addr="34.117.59.81"
+        ;;
+      ip.guide)
+        # dig A +short ip.guide
+        ip_addr="188.114.97.3"
+        ;;
+      myip.wtf)
+        # dig A +short myip.wtf
+        ip_addr="65.108.75.112"
+        ;;
+      *)
+        echo "Unknown provider: $PROVIDER" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  echo "$ip_addr"
+}
+
+# NOTE as of 2024-10-25 ip.guide yields a 404 error..!
+PROVIDER="${PROVIDER:-ipinfo.io}"
+NO_COLOR="${NO_COLOR:-}"
+CURL_ARGS=()
+
+# Disable colors by default if run via monit
+if [[ -n "$MONIT_SERVICE" ]]
+then
+  NO_COLOR=1
+fi
+
+CURL_TIMEOUT=20
+
+while [[ -n "$*" ]]
+do
+  case "$1" in
+    -4|--ipv4)
+      # Nothing to do here, IPv4 is the default
+      shift
+      ;;
+    -6|--ipv6)
+      IPV6=1
+      shift
+      ;;
+    --provider|-p)
+      PROVIDER="$2"
+      shift 2
+      ;;
+    --no-color|-nocolor)
+      NO_COLOR=1
+      shift
+      ;;
+    -t|--timeout)
+      CURL_TIMEOUT="$2"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# Only process a particular interface if requested by the user
+case "$1" in
+  lte|wwan*)
+    INTERFACES=("$LTE")
+    ;;
+  mm|quectel|qectel)
+    INTERFACES=("$LTE_INT")
+    ;;
+  wan|cable|vodafone)
+    INTERFACES=("$WAN")
+    ;;
+esac
+
+PROVIDER_IP="$(provider_resolve "$PROVIDER")"
+
+if [[ -z "$PROVIDER_IP" ]]
+then
+  echo "Failed to resolve provider $PROVIDER" >&2
+  exit 1
+fi
+
+if [[ -n "$IPV6" ]]
+then
+  PROVIDER_IP="[${PROVIDER_IP}]"
+  CURL_ARGS=("-6")
+else
+  CURL_ARGS=("-4")
+fi
+
+case "$PROVIDER" in
+  myip.wtf)
+    CURL_LOCATION="/json"
+    ;;
+esac
+
+RC=0
+
+for i in "${INTERFACES[@]}"
+do
+  if [[ -n "$NO_COLOR" ]]
+  then
+    echo "Interface: $i"
+  else
+    echo -e "\e[34mInterface: $i\e[0m"
+  fi
+
+  # TODO Try multiple providers!
+  # shellcheck disable=SC2086
+  if ! DATA="$(curl -fsSL --max-time "$CURL_TIMEOUT" --interface "$i" -H "Host: $PROVIDER" \
+    "${CURL_ARGS[@]}" "${PROVIDER_IP}${CURL_LOCATION}")" || \
+    [[ -z "$DATA" ]]
+  then
+    echo "Failed to reach $PROVIDER on interface $i" >&2
+    RC=1
+    continue
+  fi
+
+  case "$PROVIDER" in
+    ipinfo.io)
+      jq -er --arg provider "$PROVIDER" '
+        "isp: " + .org + "\n" +
+        "ip: " + .ip + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$DATA"
+      ;;
+    ip.guide)
+      jq -er --arg provider "$PROVIDER" '
+        "isp: " + .network.autonomous_system.organization + "\n" +
+        "hostname: " + .network.autonomous_system.name + "\n" +
+        "ip: " + .ip + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$DATA"
+      ;;
+    myip.wtf)
+      jq -er --arg provider "$PROVIDER" '
+        "isp: " + .YourFuckingISP + "\n" +
+        "ip: " + .YourFuckingIPAddress + "\n" +
+        "location: " + .YourFuckingLocation + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$DATA"
+      ;;
+  esac
+done
+
+exit "$RC"

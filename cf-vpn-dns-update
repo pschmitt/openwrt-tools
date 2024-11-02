@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+
+usage() {
+  echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX]"
+}
+
+echo_dry_run() {
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo -e "\e[35;1mDRY RUN\e[0m $*"
+  fi
+}
+
+# Output format: <HOSTNAME> <IPV4> <IPV6>
+get_nb_hosts() {
+  # FIXME The .netbirdIp field for the current host includes the network cidr
+  # eg: 100.54.232.1/16
+  netbird status --json | \
+    jq -er '
+      [{fqdn: .fqdn, netbirdIp: .netbirdIp}, .peers.details[]] |
+      sort_by(.fqdn)[] |
+        (.fqdn | split(".")[0])
+        + "\t" +
+        .netbirdIp
+    ' | sed -E 's#(.+)/(.+)#\1#g' # strip the CIDR suffix
+}
+
+# Output format: <HOSTNAME> <IPV4> <IPV6>
+get_ts_hosts() {
+  # NOTE Here we extract the hostname from the DNS name to avoid having to deal
+  # with multi-word hostnames (eg: Xiaomi Mi Mix 2S)
+  # Also, we do filter out items that have an empty DNSName which allows us to
+  # skip services (eg: hello.ipn.dev)
+  tailscale status --json | \
+    jq -er '
+      [.Self, .Peer[]] |
+      sort_by(.DNSName)[] |
+      select(.DNSName != "") |
+        ((.DNSName | split("."))[0])
+        + "\t" +
+        (.TailscaleIPs | join("\t"))
+    '
+}
+
+zt_token() {
+  if [[ -n "$ZEROTIER_API_TOKEN" ]]
+  then
+    echo "$ZEROTIER_API_TOKEN"
+    return 0
+  fi
+
+  if [[ -n "$ZEROTIER_API_TOKEN_FILE" && -r "$ZEROTIER_API_TOKEN_FILE" ]]
+  then
+    cat "$ZEROTIER_API_TOKEN_FILE"
+    return 0
+  fi
+
+  # try a token file next to the script
+  cat "$(cd "$(dirname "$0")" >/dev/null 2>&1; pwd -P)/token" || return 1
+}
+
+zt_api() {
+  local api_host=${ZEROTIER_API_ENDPOINT:-https://api.zerotier.com/api/v1}
+  local token
+  token="$(zt_token)"
+
+  if [[ -z "$token" ]]
+  then
+    echo "No API token set" >&2
+    return 1
+  fi
+
+  local endpoint="$1"
+
+  curl -fsSL \
+    --header "Authorization: token $token" \
+    "${api_host}/${endpoint}"
+}
+
+zt_network() {
+  zt_api "network"
+}
+
+zt_first_network_id() {
+  zt_network | jq -r '.[0].id'
+}
+
+zt_network_id() {
+  local network_name="${1:-$ZEROTIER_NETWORK_NAME}"
+  zt_network | jq -er --arg name "$network_name" '
+    .[] | select(.config.name == $name) | .id'
+}
+
+zt_network_members() {
+  local network_id="${1:-$(zt_first_network_id)}"
+  zt_api "network/${network_id}/member"
+}
+
+# shellcheck disable=SC2120
+get_zt_hosts() {
+  local network_name="${1:-$ZEROTIER_NETWORK_NAME}"
+  local network_id
+
+  if [[ -n "$network_name" ]]
+  then
+    network_id=$(zt_network_id "$network_name")
+    if [[ -z "$network_id" ]]
+    then
+      echo "Failed to find network with name '$network_name'" >&2
+      exit 1
+    fi
+  else
+    network_id=$(zt_first_network_id)
+  fi
+
+  if [[ -z "$network_id" ]]
+  then
+    echo "Failed to find zt network ID" >&2
+    return 1
+  fi
+
+  zt_network_members "$network_id" | jq -er '
+    sort_by(.name) | .[] |
+    select(.hidden == false) |
+    .name + " " + .config.ipAssignments[0]
+  '
+}
+
+get_hosts() {
+  local hosts
+
+  case "$VPN_TYPE" in
+    netbird)
+      hosts=$(get_nb_hosts)
+      ;;
+    tailscale)
+      hosts=$(get_ts_hosts)
+      ;;
+    zerotier)
+      hosts=$(get_zt_hosts)
+      ;;
+    *)
+      echo "Missing --netbird, --tailscale or --zerotier" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ -n "$STRIP_HOSTNAMES" ]]
+  then
+    # Remove the trailing number from the hostnames (if any)
+    # these typically get assigned when multiple hosts have the same name
+    # eg: "myhost-1", "myhost-2", etc.
+    hosts=$(sed -E 's/^([a-zA-Z0-9\-]+)-([0-9])\b/\1/' <<< "$hosts")
+  fi
+
+  printf '%s' "$hosts"
+}
+
+cf() {
+  if [[ -n "$DEBUG" ]]
+  then
+    echo "\$ flarectl $*" >&2
+  fi
+  export CF_API_TOKEN CF_API_EMAIL CF_API_KEY
+  command flarectl "$@"
+}
+
+cf_record_update() {
+  local zone="${ZONE_NAME:-heimat.dev}"
+
+  local name="$1"
+  local type="$2"
+  local content="$3"
+
+  local fqdn="${name}.${zone}"
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_dry_run "Create/update record: $type $fqdn $content"
+    return 0
+  fi
+
+  echo "Set record: $type $fqdn $content"
+
+  local -a args=(
+    --zone "$zone" --type "$type" --content "$content" --name "$name"
+  )
+
+  # local fqdn="$name"
+  # if [[ -n "${HOST_SUFFIX}" ]]
+  # then
+  #   fqdn="$(sed "s/${HOST_SUFFIX}\$//g" <<< "${name}")"
+  # fi
+  # fqdn="${fqdn}.${zone}"
+
+  local record_id
+  record_id="$(cf_get_record_id "$type" "$fqdn")"
+
+  if [[ -z "$record_id" ]]
+  then
+    echo "🆕 Create record: $type $fqdn $content"
+    cf dns create "${args[@]}"
+    local rc="$?"
+    # Update records
+    RECORDS="$(cf_get_records "$ZONE_NAME")"
+    return "$rc"
+  fi
+
+  # Update record
+  local record_content
+  record_content="$(cf_get_record_content "$record_id")"
+  if [[ "$record_content" == "$content" ]]
+  then
+    echo "✅ DNS record already up to date: $fqdn $type $content"
+    return 0
+  fi
+
+  echo "🆙 Updating record: $fqdn $type $content"
+  args+=(--id "$record_id")
+  cf dns update "${args[@]}"
+}
+
+cf_delete_record() {
+  local record_id="$1"
+  # echo "☠️ Deleting record: $record_id"
+  cf dns delete --zone "$ZONE_NAME" --id "$record_id"
+}
+
+cf_get_records() {
+  local zone="${1:-${ZONE_NAME:-heimat.dev}}"
+  cf --json dns list --zone="${zone}"
+}
+
+cf_get_record_id() {
+  local type="$1"
+  local name="$2"
+
+  <<< "$RECORDS" jq -r --arg type "${type}" --arg name "${name}" '
+    .[] | select(.Type == $type and .Name == $name) |
+    .ID'
+}
+
+cf_get_record_content() {
+  local record_id="$1"
+
+  <<< "$RECORDS" jq -er --arg record_id "${record_id}" '
+    .[] | select(.ID == $record_id) |
+    .Content'
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  set -eu -o pipefail
+
+  # flarectl resides in /srv/bin
+  export PATH="$PATH:/srv/bin"
+
+  DEBUG="${DEBUG:-}"
+  DRY_RUN="${DRY_RUN:-}"
+  CLEAN="${CLEAN:-}"
+  VPN_TYPE="${VPN_TYPE:-}"
+  ZEROTIER_NETWORK_NAME="${ZEROTIER_NETWORK_NAME:-}"
+  ZEROTIER_API_TOKEN="${ZEROTIER_API_TOKEN:-}"
+  ZEROTIER_API_TOKEN_FILE="${ZEROTIER_API_TOKEN_FILE:-/etc/zerotier/api-token}"
+
+  CF_CREDENTIALS_FILE="${CF_CREDENTIALS_FILE:-/etc/cloudflare-credentials.json}"
+  CF_API_KEY="${CF_API_KEY:-}"
+  CF_API_EMAIL="${CF_API_EMAIL:-}"
+  CF_API_TOKEN="${CF_API_TOKEN:-}"
+  ZONE_NAME="${ZONE_NAME:-brkn.lol}"
+  HOST_SUFFIX="${HOST_SUFFIX:-}"
+  HOST_WILDCARD="${HOST_WILDCARD:-}"
+
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      help|h|-h|--help)
+        usage
+        exit 0
+        ;;
+      -d|--debug)
+        DEBUG=1
+        shift
+        ;;
+      -k|--dry-run|--dryrun)
+        DRY_RUN=1
+        shift
+        ;;
+      --netbird)
+        VPN_TYPE=netbird
+        shift
+        ;;
+      --tailscale)
+        VPN_TYPE=tailscale
+        shift
+        ;;
+      --zerotier|zt)
+        VPN_TYPE=zerotier
+        shift
+        ;;
+      --clean*)
+        CLEAN=1
+        shift
+        ;;
+      -S|--strip)
+        STRIP_HOSTNAMES=1
+        shift
+        ;;
+      -e|--email|--cloudflare-email)
+        CF_API_EMAIL="$2"
+        shift 2
+        ;;
+      -K|--key|--api-key|--cloudflare-api-key)
+        CF_API_KEY="$2"
+        shift 2
+        ;;
+      -t|--cf|--token|--cloudflare-api-token)
+        CF_API_TOKEN="$2"
+        shift 2
+        ;;
+      -s|--suffix)
+        HOST_SUFFIX="$2"
+        shift 2
+        ;;
+      -w|--wildcard)
+        HOST_WILDCARD=1
+        shift
+        ;;
+      -z|-zn|--zn|--zone*)
+        ZONE_NAME="$2"
+        shift 2
+        ;;
+      -Z|--zt-api-token|--zerotier-api-token)
+        ZEROTIER_API_TOKEN="$2"
+        shift 2
+        ;;
+      *)
+        {
+          echo "Unsupported option: $1"
+          usage
+        } >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ -z "$CF_API_KEY" && -z "$CF_API_TOKEN" ]]
+  then
+    if [[ ! -e "$CF_CREDENTIALS_FILE" ]]
+    then
+      echo "$CF_CREDENTIALS_FILE: file does not exist." >&2
+      exit 2
+    fi
+
+    CF_AUTH_TYPE="$(jq -er '.type' "$CF_CREDENTIALS_FILE")"
+    case "$CF_AUTH_TYPE" in
+      key)
+        CF_API_KEY="$(jq -er '.key' "$CF_CREDENTIALS_FILE")"
+        CF_API_EMAIL="$(jq -er '.email' "$CF_CREDENTIALS_FILE")"
+        ;;
+      token)
+        CF_API_TOKEN="$(jq -er '.token' "$CF_CREDENTIALS_FILE")"
+        ;;
+      *)
+        echo "Unknown CF_AUTH_TYPE: $CF_AUTH_TYPE" >&2
+        exit 2
+        ;;
+    esac
+  fi
+
+  RECORDS="$(cf_get_records "$ZONE_NAME")"
+  VPN_RECORDS=()
+
+  mapfile -t VPN_HOSTS < <(get_hosts)
+
+  for line in "${VPN_HOSTS[@]}"
+  do
+    read -r host ipv4 ipv6 <<< "$line"
+    echo -e "\e[34m🖥️  Host: $host - IPv4: $ipv4 - IPv6: ${ipv6:-\e[3;37mN/A}\e[0m"
+
+    record="${host}${HOST_SUFFIX}"
+
+    # store the hostnames for later (cleanup)
+    VPN_RECORDS+=("${record}.${ZONE_NAME}")
+
+    cf_record_update "$record" A "$ipv4"
+
+    if [[ -n "$HOST_WILDCARD" ]]
+    then
+      cf_record_update "*.${record}" A "$ipv4"
+      VPN_RECORDS+=("*.${record}.${ZONE_NAME}")
+    fi
+
+    if [[ -n "$ipv6" ]]
+    then
+      cf_record_update "$record" AAAA "$ipv6"
+      if [[ -n "$HOST_WILDCARD" ]]
+      then
+        cf_record_update "*.$record" AAAA "$ipv6"
+      fi
+    fi
+  done
+  RC="$?"
+
+  # cleanup
+  if [[ -n "$CLEAN" ]]
+  then
+    # remove all records that are not in the list
+    VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
+    RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
+      jq -er \
+        --arg zone "$ZONE_NAME" \
+        --arg suffix "$HOST_SUFFIX" \
+        --argjson hosts "$VPN_RECORDS_JSON" '
+        .[] | select(
+          (.Name | endswith($suffix + "." + $zone))
+          and
+          (.Type == "A" or .Type == "AAAA")
+          and
+          (.Name | IN($hosts[]) | not)
+        )
+      '
+    )
+
+    if [[ -z "$RECORDS_TO_DELETE" ]]
+    then
+      echo "No records to delete"
+      exit "$RC"
+    fi
+
+    while read -r RECORD
+    do
+      read -r RECORD_ID RECORD_NAME <<<"$RECORD"
+      echo "☠️ Deleting record: $RECORD_NAME"
+
+      if [[ -n "$DRY_RUN" ]]
+      then
+        echo_dry_run "Delete record: $RECORD_NAME"
+        continue
+      fi
+
+      cf_delete_record "$RECORD_ID"
+    done < <(<<<"$RECORDS_TO_DELETE" jq -cr '.ID + " " + .Name')
+  fi
+
+  exit "$RC"
+fi

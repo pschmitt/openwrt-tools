@@ -1,0 +1,980 @@
+#!/usr/bin/env bash
+
+WAN_IPV4=wan
+WAN_IPV6=wan6
+LTE_IPV4=wwan
+LTE_IPV6=wwan6
+WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6")
+
+VPN_SERVICES=(netbird tailscale zerotier)
+DNS_SERVICES=(dnsmasq unbound)
+CORE_SERVICES=(odhcpd "${DNS_SERVICES[@]}")
+
+HASS_VODAFONE_WEBHOOK_URL="${HASS_VODAFONE_WEBHOOK_URL:-http://10.5.1.1:8123/api/webhook/vodafone-restart-d90AfKsBPWKhDTT7E9Sfgj-X}"
+
+usage() {
+  echo "Usage: $(basename "$0") ACTION [ARGS]"
+  echo
+  echo "Global flags:"
+  echo "  -4             IPv4 only"
+  echo "  -6             IPv6 only"
+  echo "  -C, --no-color Disable colors"
+  echo "  -d, --debug    Enable debug output"
+  echo "  -f, --force    Force action"
+  echo "  -h, --help     Show this help"
+  echo "  -N, --no-warn  Disable warnings"
+  echo "  -v, --verbose  Enable verbose output"
+  echo "  -y, --yes      Disable confirmation"
+  echo "  -k, --dry-run  Dry run"
+  echo
+  echo "ACTIONS:"
+  echo "  curl [-- ARGS]   Check connectivity (generate_204 by default)"
+  echo "  dig [-- ARGS]    Check DNS resolution (google.com by default)"
+  echo "  exec CMD         Execute a command for every WAN interface"
+  echo "  ifup|infdown     Bring interface(s) up or down"
+  echo "  ip               Show IP addresses"
+  echo "  lte              Failover to LTE"
+  echo "  ping [-- ARGS]   Connectivity debug (ping)"
+  echo "  public-ip        Determine public IP of every WAN interface"
+  echo "  reset [--force]  Reset wan connection (to $WAN_IPV4/$WAN_IPV6)"
+  echo "  status           Show wan connection status"
+  echo "  speedtest        Perform a librespeed speedtest for every WAN interface"
+  echo "  svc-restart SVC  Restart init.d services"
+  echo "              all  *ALL* services: all from below"
+  echo "              core core services: ${CORE_SERVICES[*]}"
+  echo "              dns  DNS services: ${DNS_SERVICES[*]}"
+  echo "              vpn  VPN services: ${VPN_SERVICES[*]}"
+  echo "  upstream-dns     Query upstream DNS server"
+  echo "  vodafone [-y]    Restart Vodafone Station"
+}
+
+echo_info() {
+  echo -e "\e[1m\e[34mINF\e[0m $*" >&2
+}
+
+echo_success() {
+  echo -e "\e[1m\e[32mOK\e[0m $*" >&2
+}
+
+echo_warning() {
+  [[ -n "$NO_WARNING" ]] && return 0
+  echo -e "\e[1m\e[33mWRN\e[0m $*" >&2
+}
+
+echo_error() {
+  echo -e "\e[1m\e[31mERR\e[0m $*" >&2
+}
+
+echo_debug() {
+  [[ -z "${DEBUG}${VERBOSE}" ]] && return 0
+  echo -e "\e[1m\e[35mDBG\e[0m $*" >&2
+}
+
+echo_dryrun() {
+  echo -e "\e[1m\e[35mDRY\e[0m $*" >&2
+}
+
+echo_confirm() {
+  if [[ -n "$NOCONFIRM" ]]
+  then
+    return 0
+  fi
+
+  local msg_pre=$'\e[31mASK\e[0m'
+  local msg="${1:-"Continue?"}"
+  local yn
+  read -r -n1 -p "${msg_pre} ${msg} [y/N] " yn
+  [[ "$yn" =~ ^[yY] ]]
+  local rc="$?"
+  echo # append a NL
+  return "$rc"
+}
+
+ip() {
+  if [[ -n "$NOCOLOR" ]]
+  then
+    command ip "$@"
+    return "$?"
+  fi
+
+  command ip --color=auto "$@"
+}
+
+ifdown() {
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_dryrun "ifdown $*"
+    return 0
+  fi
+  echo_info "ifdown $*"
+  command ifdown "$@"
+}
+
+ifup() {
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_dryrun "ifup $*"
+    return 0
+  fi
+  echo_info "ifup $*"
+  command ifup "$@"
+}
+
+ifup_or_down_multi() {
+  local action="$1"  # ifdown/ifup
+  case "$action" in
+    ifdown|ifup)
+      # valid action
+      ;;
+    *)
+      echo_error "Invalid action: $action"
+      return 1
+      ;;
+  esac
+
+  local target_interfaces=()
+
+  if [[ -z "$2" ]]
+  then
+    echo_error "No target interface(s) specified."
+    return 2
+  fi
+
+  case "$2" in
+    wan|vodafone)
+      if [[ -n "$IPV4_ONLY" ]]
+      then
+        target_interfaces=("$WAN_IPV4")
+      elif [[ -n "$IPV6_ONLY" ]]
+      then
+        target_interfaces=("$WAN_IPV6")
+      else
+        target_interfaces=("$WAN_IPV4" "$WAN_IPV6")
+      fi
+      ;;
+    wan4)
+      if [[ -n "$IPV6_ONLY" ]]
+      then
+        echo_error "Invalid combination: -6 $2"
+        return 1
+      fi
+      target_interfaces=("$WAN_IPV4")
+      ;;
+    wan6)
+      if [[ -n "$IPV4_ONLY" ]]
+      then
+        echo_error "Invalid combination: -4 $2"
+        return 1
+      fi
+      target_interfaces=("$WAN_IPV6")
+      ;;
+    lte|wwan)
+      if [[ -n "$IPV4_ONLY" ]]
+      then
+        target_interfaces=("$LTE_IPV4")
+      elif [[ -n "$IPV6_ONLY" ]]
+      then
+        target_interfaces=("$LTE_IPV6")
+      else
+        target_interfaces=("$LTE_IPV4" "$LTE_IPV6")
+      fi
+      ;;
+    lte4|wwan4)
+      if [[ -n "$IPV6_ONLY" ]]
+      then
+        echo_error "Invalid combination: -6 $2"
+        return 1
+      fi
+      target_interfaces=("$LTE_IPV4")
+      ;;
+    lte6|wwan6)
+      if [[ -n "$IPV4_ONLY" ]]
+      then
+        echo_error "Invalid combination: -4 $2"
+        return 1
+      fi
+      target_interfaces=("$LTE_IPV6")
+      ;;
+    all)
+      target_interfaces=("${WAN_INTERFACES[@]}")
+      ;;
+    *)
+      echo_error "Unknown target interface(s): $2"
+      return 2
+      ;;
+  esac
+
+  if [[ -z "${target_interfaces[*]}" ]]
+  then
+    echo_warning "No interfaces to run $action against."
+    return 1
+  fi
+
+  local intf
+  for intf in "${target_interfaces[@]}"
+  do
+    "$action" "$intf"
+  done
+}
+
+ifup_multi() {
+  ifup_or_down_multi ifup "$@"
+}
+
+ifdown_multi() {
+  ifup_or_down_multi ifdown "$@"
+}
+
+fix-route6() {
+  /srv/bin/ipv6-routes
+}
+
+ping() {
+  if [[ -n "$VERBOSE" ]]
+  then
+    echo_debug "ping $*"
+  fi
+  command ping "$@"
+}
+
+svc_restart() {
+  local svc
+  for svc in "$@"
+  do
+    if [[ -n "$DRY_RUN" ]]
+    then
+      echo_dryrun "/etc/init.d/${svc} restart"
+    else
+      echo_info "Restarting $svc"
+      "/etc/init.d/${svc}" restart
+    fi
+  done
+}
+
+dns_svc_restart() {
+  echo_info "Restarting VPN services: ${DNS_SERVICES[*]}"
+  svc_restart "${DNS_SERVICES[@]}"
+}
+
+core_svc_restart() {
+  echo_info "Restarting core services: ${CORE_SERVICES[*]}"
+  svc_restart "${CORE_SERVICES[@]}"
+}
+
+vpn_svc_restart() {
+  echo_info "Restarting VPN services: ${VPN_SERVICES[*]}"
+  svc_restart "${VPN_SERVICES[@]}"
+}
+
+svc_restart_all() {
+  core_svc_restart
+  dns_svc_restart
+  vpn_svc_restart
+}
+
+mwan3_is_active() {
+  /etc/init.d/mwan3 running 2>/dev/null
+}
+
+wan_status() {
+  local intf
+  for intf in "${WAN_INTERFACES[@]}"
+  do
+    ifstatus "$intf" | jq -er --arg intf "$intf" '
+      $intf + ": " + (
+        if .up
+        then
+          "\u001b[32mup"
+        else
+          "\u001b[31mDOWN"
+        end
+      ) + "\u001b[0m"
+    '
+  done
+}
+
+interface() {
+  local owrt_intf="$1"
+  uci get "network.${owrt_intf}.device"
+  # Below only works if the interface is up
+  # ifstatus "$1" | jq -er '.l3_device'
+}
+
+interface_ipv4() {
+  ifstatus "$1" | jq -er '.["ipv4-address"][].address'
+}
+
+interface_ipv6() {
+  ifstatus "$1" | jq -er '.["ipv6-address"][].address'
+}
+
+interface_dns_server() {
+  # TODO handle multiple DNS servers
+  # TODO handle the case the dns server is actually used (ie not in .inactive?)
+  ifstatus "$1" | jq -er '.inactive["dns-server"][0]'
+}
+
+interface_ip() {
+  local owrt_intf="$1"
+  case "$owrt_intf" in
+    *6)
+      interface_ipv6 "$owrt_intf"
+      ;;
+    *)
+      interface_ipv4 "$owrt_intf"
+      ;;
+  esac
+}
+
+interface_is_up() {
+  ifstatus "$1" | jq -er '.up == true' &>/dev/null
+}
+
+wan_reset() {
+  if [[ -n "$FORCE" ]]
+  then
+    ifdown "$WAN_IPV4"
+    ifdown "$WAN_IPV6"
+  fi
+
+  ifdown "$LTE_IPV6"
+
+  ifup "$WAN_IPV4"
+  ifup "$WAN_IPV6"
+
+  core_svc_restart
+}
+
+lte_failover() {
+  ifdown "$WAN_IPV4"
+  ifdown "$WAN_IPV6"
+
+  ifup "$LTE_IPV4"
+  ifup "$LTE_IPV6"
+
+  core_svc_restart
+}
+
+vodafone_restart() {
+  echo_confirm "Restart the Vodafone Station?" || return 1
+
+  echo_info "Restarting Vodafone Station..." >&2
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_dryrun "curl -fsSL -X POST $HASS_VODAFONE_WEBHOOK_URL"
+  else
+    if ! /srv/bin/poe flip vodafone
+    then
+      echo_error "POE toggle with SNMP failed. Let's try Home Assistant."
+      if ! curl -fsSL -X POST "$HASS_VODAFONE_WEBHOOK_URL"
+      then
+        echo_warning "POE toggle with Home Assistant failed too"
+        return 1
+      fi
+    fi
+  fi
+
+  ifdown "$WAN_IPV4"
+  ifdown "$WAN_IPV6"
+
+  echo_info "Sleeping 5s"
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_dryrun "jk, just pretending to sleep"
+  else
+    sleep 5
+  fi
+
+  ifup "$WAN_IPV4"
+  ifup "$WAN_IPV6"
+  ifup "$LTE_IPV4"
+  ifup "$LTE_IPV6"
+  # fix-route6
+
+  core_svc_restart
+}
+
+intf_loop() {
+  local rc=0
+  local owrt_intf l3_intf args=()
+  local res
+
+  local cmd_name
+  local intf_include=()
+  local intf_exclude=()
+  local args_v4=(-4)
+  local args_v6=(-6)
+  local pipe4_cmd
+  local pipe6_cmd
+  local quiet
+  local stream
+
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      -f|--filter)
+        intf_include+=("$2")
+        shift 2
+        ;;
+      --lte|--wwan)
+        intf_include+=("wwan")
+        shift
+        ;;
+      --wan|--vodafone)
+        intf_exclude+=("wwan")
+        shift
+        ;;
+      --wan6)
+        intf_include+=("wan6")
+        intf_exlude+=("wwan")
+        shift
+        ;;
+      --wan4)
+        intf_include+=("wan")
+        intf_exclude+=("6")
+        intf_exclude+=("wwan")
+        shift
+        ;;
+      --lte6|--wwan6)
+        intf_include+=("wwan6")
+        shift
+        ;;
+      --lte4|--wwan4)
+        intf_include+=("wwan")
+        intf_exclude+=("6")
+        shift
+        ;;
+      -4)
+        intf_exclude+=("6")
+        shift
+        ;;
+      -6)
+        intf_include+=("6")
+        shift
+        ;;
+      --name)
+        cmd_name="$2"
+        shift 2
+        ;;
+      --args4|--arg4)
+        args_v4=("$2")
+        shift 2
+        ;;
+      --args6|--arg6)
+        args_v6=("$2")
+        shift 2
+        ;;
+      --pipe4)
+        pipe4_cmd=("$2")
+        shift 2
+        ;;
+      --pipe6)
+        pipe6_cmd=("$2")
+        shift 2
+        ;;
+      --quiet|-q)
+        quiet=1
+        shift
+        ;;
+      -s|--stream|--tty)
+        stream=1
+        shift
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  # from global flags
+  if [[ -n "$IPV4_ONLY" ]]
+  then
+    intf_exclude+=("6")
+  elif [[ -n "$IPV6_ONLY" ]]
+  then
+    intf_include+=("6")
+  fi
+
+  local cmd=("$@") icmd pipe_cmd
+  local filter
+  cmd_name="${cmd_name:-${cmd[0]}}"
+  local upstream_dns intf_ipv4 intf_ipv6 intf_ip
+
+  for owrt_intf in "${WAN_INTERFACES[@]}"
+  do
+    echo_debug "Processing OpenWRT interface $owrt_intf"
+
+    for filter in "${intf_include[@]}"
+    do
+      if [[ "$owrt_intf" != *"$filter"* ]]
+      then
+        echo_debug "Skipping interface $owrt_intf (not included)"
+        continue 2 # 2 = continue outer loop
+      fi
+    done
+
+    for filter in "${intf_exclude[@]}"
+    do
+      if [[ "$owrt_intf" == *"$filter"* ]]
+      then
+        echo_debug "Skipping interface $owrt_intf (excluded)"
+        continue 2 # 2 = continue outer loop
+      fi
+    done
+
+    if [[ "$owrt_intf" == *6 ]]
+    then
+      args=("${args_v6[@]}")
+      pipe_cmd=("${pipe6_cmd[@]}")
+    else
+      args=("${args_v4[@]}")
+      pipe_cmd=("${pipe4_cmd[@]}")
+    fi
+
+    if ! interface_is_up "$owrt_intf"
+    then
+      echo_warning "Interface $owrt_intf is down."
+      continue
+    fi
+
+    if ! l3_intf="$(interface "$owrt_intf")" || [[ -z "$l3_intf" ]]
+    then
+      echo_warning "Unable to determine L3 interface of $owrt_intf"
+      continue
+    fi
+
+    icmd="${cmd[0]} ${args[*]} ${cmd[*]:1}"
+    # template cmd
+    icmd="${icmd//OWRT_INTF/$owrt_intf}"
+    icmd="${icmd//L3_INTF/$l3_intf}"
+
+    if [[ "$icmd" == *INTF_IP* ]]
+    then
+      intf_ip="$(interface_ip "$owrt_intf")"
+      if [[ -z "$intf_ip" ]] || [[ "$intf_ip" == "null" ]]
+      then
+        echo_warning "Templating failed: No IP address for $owrt_intf"
+        continue
+      fi
+
+      if [[ "$icmd" == *INTF_IPV4* ]]
+      then
+        intf_ipv4="$(interface_ipv4 "$owrt_intf" | head -n 1)"
+        if [[ -z "$intf_ipv4" ]] || [[ "$intf_ipv4" == "null" ]]
+        then
+          echo_warning "Templating failed: No IPv4 address for $owrt_intf"
+          continue
+        fi
+        icmd="${icmd//INTF_IPV4/${intf_ipv4}}"
+      fi
+
+      if [[ "$icmd" == *INTF_IPV6* ]]
+      then
+        intf_ipv6="$(interface_ipv6 "$owrt_intf" | head -n 1)"
+        if [[ -z "$intf_ipv6" ]] || [[ "$intf_ipv6" == "null" ]]
+        then
+          echo_warning "Templating failed: No IPv6 address for $owrt_intf"
+          continue
+        fi
+        icmd="${icmd//INTF_IPV6/${intf_ipv6}}"
+      fi
+
+      # This must be last since INTF_IP matches INTF_IPV4 etc
+      icmd="${icmd//INTF_IP/${intf_ip}}"
+    fi
+
+    if [[ "$icmd" == *INTF_DNS* ]]
+    then
+      upstream_dns="$(interface_dns_server "$owrt_intf")"
+      if [[ -z "$upstream_dns" ]] || [[ "$upstream_dns" == "null" ]]
+      then
+        echo_warning "Templating failed: No upstream DNS server for $owrt_intf"
+        continue
+      fi
+
+      icmd="${icmd//INTF_DNS/$upstream_dns}"
+    fi
+
+    # This must be last since INTF matches INTF_IPV4 etc
+    icmd="${icmd//INTF/$l3_intf}"
+
+    if [[ -n "${pipe_cmd[*]}" ]]
+    then
+      icmd+=" | ${pipe_cmd[*]}"
+    fi
+
+    if mwan3_is_active
+    then
+      echo_warning "mwan3 is active. RC might be always 0"
+      icmd="mwan3 use $owrt_intf $icmd"
+    fi
+
+    if [[ -n "$VERBOSE" ]]
+    then
+      echo_info "exec $icmd # $owrt_intf"
+    fi
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      echo_dryrun "$icmd"
+    else
+      if [[ -n "$stream" ]]
+      then
+        if eval "$icmd"
+        then
+          echo_success "${cmd_name} ($owrt_intf)"
+        else
+          rc=1
+          echo_error "${cmd_name} ($owrt_intf)"
+        fi
+      else
+        if res=$(eval "$icmd" 2>&1)
+        then
+          echo_success "${cmd_name} ($owrt_intf)"
+          [[ -z "$quiet" ]] && echo -e "$res"
+        else
+          rc=1
+          echo_error "${cmd_name} ($owrt_intf)"
+          [[ -z "$quiet" ]] && echo -e "$res"
+        fi
+      fi
+    fi
+
+  done
+
+  return "$rc"
+}
+
+faketty () {
+  # FIXME script is not available on OpenWRT
+  script -qefc "$(printf "%q " "$@")" /dev/null
+}
+
+ip_addr() {
+  local pipe_cmd="jq -er --arg fam inet '.[].addr_info[] | select(.family == \$fam).local'"
+
+  intf_loop \
+    "$@" \
+    --name "ip addr get" \
+    --pipe4 "$pipe_cmd" \
+    --pipe6 "${pipe_cmd//inet/inet6}" \
+    ip -j addr show INTF
+}
+
+ip_addr_show() {
+  intf_loop "$@" ip --color=always addr show INTF
+}
+
+ip_routes() {
+  intf_loop "$@" ip --color=always route show dev INTF
+}
+
+wan_ping() {
+  local args=()
+  [[ -z "${VERBOSE}${DEBUG}" ]] && args=(--quiet)
+
+  intf_loop \
+    "$@" \
+    "${args[@]}" \
+    --arg4 "-4 8.8.8.8" \
+    --arg6 "-6 2001:4860:4860::8888" \
+    ping -c 3 -W 2 -w 3 -I INTF
+}
+
+wan_curl() {
+  local name="curl to generate_204"
+  local cmd=(
+    curl -fsSL \
+      --interface INTF \
+      -w "%{http_code}" \
+      http://www.gstatic.com/generate_204
+  )
+
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      # custom curl command
+      # example:
+      # inet --verbose curl -- -fsSL -o /dev/null https://google.com
+      --)
+        shift
+        name="custom curl"
+        cmd=(curl --interface INTF "$@")
+        set -- # clear all args
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  intf_loop --name "$name" \
+    "$@" \
+    "${cmd[@]}"
+}
+
+wan_dig() {
+  local name="dig google.com"
+  local cmd=(
+    dig +short google.com
+  )
+
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      # custom curl command
+      # example:
+      # inet --verbose dig -- pschmitt.dev
+      --)
+        shift
+        name="custom dig"
+        cmd=(dig "$@")
+        set -- # clear all args
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  intf_loop \
+    "$@" \
+    --arg4 "-b INTF_IPV4 @1.1.1.1 A" \
+    --arg6 "-b INTF_IPV6 @2606:4700:4700::1111 AAAA" \
+    "${cmd[@]}"
+}
+
+# FIXME ipv6 does not seem to be supported by speedtest-cli
+wan_speedtest-cli() {
+  local cmd=(speedtest-cli --secure)
+  intf_loop \
+    "$@" \
+    --stream \
+    --arg4 "--source INTF_IPV4" \
+    --arg6 "--source [INTF_IPV6]" \
+    "${cmd[@]}"
+}
+
+
+# FIXME There does not seem to be a native way to force ookla-speedtest to use
+# a specific interface. The `--source` flag is not supported.
+wan_speedtest-ookla() {
+  local cmd=(ookla-speedtest)
+  intf_loop \
+    "$@" \
+    --stream \
+    --arg4 "--INTF_IPV4" \
+    --arg6 "--source [INTF_IPV6]" \
+    "${cmd[@]}"
+}
+
+wan_speedtest-go() {
+  local cmd=(speedtest-go)
+  intf_loop \
+    "$@" \
+    --stream \
+    --arg4 "--source INTF_IPV4" \
+    --arg6 "--source INTF_IPV6" \
+    "${cmd[@]}"
+}
+
+wan_librespeed() {
+  local cmd=(librespeed-cli --simple --secure --duration 10)
+  intf_loop \
+    "$@" \
+    --arg4 "-4 --source INTF_IPV4" \
+    --arg6 "-6 --source INTF_IPV6" \
+    "${cmd[@]}"
+}
+
+wan_query_ustream_dns() {
+  intf_loop \
+    "$@" \
+    --arg4 "-b INTF_IPV4 @INTF_DNS A" \
+    --arg6 "-b INTF_IPV6 @INTF_DNS AAAA" \
+    dig +short google.com +time=2 +tries=1
+}
+
+__devel_test() {
+  intf_loop "$@" echo INTF "[OWRT_INTF]"
+}
+
+main() {
+  while [[ -n $* ]]
+  do
+    case "$1" in
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      --debug|-d)
+        set -x
+        shift
+        ;;
+      --force|-f)
+        FORCE=1
+        NOCONFIRM=1
+        shift
+        ;;
+      --verbose|-v)
+        VERBOSE=1
+        shift
+        ;;
+      -N|--no-warn*)
+        NO_WARNING=1
+        shift
+        ;;
+      -C|--no-color|--nocolor)
+        NOCOLOR=1
+        shift
+        ;;
+      -y|--yes|--no-confirm|--noconfirm)
+        NOCONFIRM=1
+        shift
+        ;;
+      --dry-run|--dryrun|-k)
+        DRY_RUN=1
+        shift
+        ;;
+      -4)
+        IPV4_ONLY=1
+        shift
+        ;;
+      -6)
+        IPV6_ONLY=1
+        shift
+        ;;
+      *)
+        ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  set -- "${ARGS[@]}"
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_info "Dry run mode is ON. Nothing matters"
+  fi
+
+  case "$1" in
+    curl)
+      shift
+      wan_curl "$@"
+      ;;
+    dig)
+      shift
+      wan_dig "$@"
+      ;;
+    devel*|test*)
+      shift
+      __devel_test "$@"
+      ;;
+    dhcp-dns|upstream-dns)
+      shift
+      wan_query_ustream_dns "$@"
+      ;;
+    exec)
+      shift
+      intf_loop "$@"
+      ;;
+    ifup)
+      shift
+      ifup_multi "$@"
+      ;;
+    ifdown)
+      shift
+      ifdown_multi "$@"
+      ;;
+    ip|i)
+      shift
+      case "$1" in
+        r|route*)
+          shift
+          ip_routes "$@"
+          ;;
+        a*)
+          ip_addr_show "$@"
+          ;;
+        *)
+          ip_addr "$@"
+          ;;
+      esac
+      ;;
+    lte*|failover)
+      shift
+      lte_failover "$@"
+      ;;
+    ping|d|pi|p|check|debug)
+      shift
+      wan_ping "$@"
+      ;;
+    pub*)
+      shift
+      /srv/bin/wm-ip "$@"
+      ;;
+    r|route*) # routes
+      shift
+      ip_routes "$@"
+      ;;
+    reset|rst)
+      shift
+      wan_reset "$@"
+      ;;
+    speedtest|speed)
+      shift
+      # wan_speedtest-cli "$@"
+      # wan_speedtest-ookla "$@"
+      # wan_speedtest-go "$@"
+      wan_librespeed "$@"
+      ;;
+    st*|ifstatus) # status
+      shift
+      wan_status "$@"
+      ;;
+    svc|svc-restart|restart)
+      case "$2" in
+        dns|resolv*)
+          shift
+          dns_svc_restart "$@"
+          ;;
+        vpn*)
+          shift
+          vpn_svc_restart "$@"
+          ;;
+        core)
+          shift
+          core_svc_restart "$@"
+          ;;
+        all)
+          shift
+          svc_restart_all "$@"
+          ;;
+        *)
+          echo "Unknown service: $2" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    up)
+      shift
+      ifup_multi all
+      ;;
+    voda*|vdf*|reboot)
+      shift
+      vodafone_restart "$@"
+      ;;
+    *)
+      echo "Unknown action: $1"
+      exit 2
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  main "$@"
+fi
