@@ -19,7 +19,7 @@ git_latest_version() {
     sed -rn 's|.*refs/tags/v?([^\^]+)(\^\{\})?|\1|p' | \
     grep -E '^v?[0-9]+' | \
     sort -V | \
-    tail -1
+    busybox tail -1
 }
 
 netbird_version() {
@@ -101,9 +101,11 @@ fetze_tailscale() {
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
-  set -e
+  set -eu
 
-  case "$1" in
+  ACTION="${1:-}"
+
+  case "$ACTION" in
     -h|--help|--usage|-?)
       usage
       exit 0
