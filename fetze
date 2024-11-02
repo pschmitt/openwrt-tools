@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+DEST="${DEST:-/usr/bin}"
+NETBIRD_REPO="netbirdio/netbird"
+NETBIRD_ARCH="${NETBIRD_ARCH:-armv6}"
+TAILSCALE_REPO="tailscale/tailscale"
+TAILSCALE_ARCH="${TAILSCALE_ARCH:-arm}"
+
+usage() {
+  echo "Usage: $(basename "$0") REPO"
+  echo
+  echo "Examples:"
+  echo "  $(basename "$0") $NETBIRD_REPO"
+}
+
+git_latest_version() {
+  local gh_repo="$1"
+  git ls-remote --tags "https://github.com/${gh_repo}" | \
+    sed -rn 's|.*refs/tags/v?([^\^]+)(\^\{\})?|\1|p' | \
+    grep -E '^v?[0-9]+' | \
+    sort -V | \
+    tail -1
+}
+
+netbird_version() {
+  netbird version
+}
+
+tailscale_version() {
+  tailscale version | head -1
+}
+
+netbird_latest_version() {
+  git_latest_version "$NETBIRD_REPO"
+}
+
+tailscale_latest_href() {
+  curl -fsSL 'https://pkgs.tailscale.com/stable/#static' | \
+    awk -v arch="$TAILSCALE_ARCH" -F'href="' '
+      $0 ~ "href=\"tailscale_.*_" arch "\\.tgz\"" {split($2, a, "\"");
+      print a[1]}
+    '
+}
+
+tailscale_latest_version() {
+  # DIRTYFIX the tailscale dudes can't be bothered with minor binary releases
+  # More often than not there will not be a static binary for the latest version
+  # git_latest_version "$TAILSCALE_REPO"
+  tailscale_latest_href | sed -r 's#[^_]+_([^_]+)_.*#\1#'
+}
+
+netbird_is_up_to_date() {
+  local latest_version
+  latest_version="$(netbird_latest_version)"
+  echo "$latest_version"  # to avoid another request, we "return" the version
+  [[ "$(netbird_version)" == "$latest_version" ]]
+}
+
+tailscale_is_up_to_date() {
+  local latest_version
+  latest_version="$(tailscale_latest_version)"
+  echo "$latest_version"  # to avoid another request, we "return" the version
+  [[ "$(tailscale_version)" == "$latest_version" ]]
+}
+
+fetze_netbird() {
+  local latest_version
+  if latest_version="$(netbird_is_up_to_date)"
+  then
+    echo "netbird is up-to-date ($latest_version)"
+    return 0
+  fi
+
+  local dest=${NETBIRD_DEST:-$DEST}
+  mkdir -p "$dest"
+  local url="https://github.com/${NETBIRD_REPO}/releases/download/v${latest_version}/netbird_${latest_version}_linux_${NETBIRD_ARCH}.tar.gz"
+  wget -qO- "$url" | tar -xzvf - -C "$dest" netbird
+  /etc/init.d/netbird restart
+}
+
+fetze_tailscale() {
+  local latest_version
+  # DEBUG
+  if latest_version="$(tailscale_is_up_to_date)"
+  then
+    echo "tailscale is up-to-date ($latest_version)"
+    return 0
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  local dest=${TAILSCALE_DEST:-$DEST}
+  mkdir -p "$dest"
+  local url="https://pkgs.tailscale.com/stable/tailscale_${latest_version}_${TAILSCALE_ARCH}.tgz"
+  wget -qO- "$url" | tar xzvf - -C "${tmpdir}"
+  find "${tmpdir}" -type f -perm '+1' -iname 'tailscale*' -exec mv -v '{}' "${TAILSCALE_DEST:-$DEST}" \;
+  /etc/init.d/tailscale restart
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  set -e
+
+  case "$1" in
+    nb|netbird*)
+      fetze_netbird
+      ;;
+    ts|tailsc*)
+      fetze_tailscale
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
