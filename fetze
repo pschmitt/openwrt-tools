@@ -80,7 +80,6 @@ fetze_netbird() {
 
 fetze_tailscale() {
   local latest_version
-  # DEBUG
   if latest_version="$(tailscale_is_up_to_date)"
   then
     echo "tailscale is up-to-date ($latest_version)"
