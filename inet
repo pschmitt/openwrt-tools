@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 
-WAN_IPV4=wan
-WAN_IPV6=wan6
-LTE_IPV4=wwan
-LTE_IPV6=wwan6
+WAN_IPV4="${WAN_IPV4:-wan}"
+WAN_IPV6="${WAN_IPV6:-wan6}"
+LTE_IPV4="${LTE_IPV4:-wwan}"
+LTE_IPV6="${LTE_IPV6:-wwan6}"
 WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6")
 
 VPN_SERVICES=(netbird tailscale zerotier)
 DNS_SERVICES=(dnsmasq unbound)
 CORE_SERVICES=(odhcpd "${DNS_SERVICES[@]}")
 
-HASS_VODAFONE_WEBHOOK_URL="${HASS_VODAFONE_WEBHOOK_URL:-http://10.5.1.1:8123/api/webhook/vodafone-restart-d90AfKsBPWKhDTT7E9Sfgj-X}"
+HASS_HOST="${HASS_HOST:-http://10.5.1.1:8123}"
+HASS_VODAFONE_WEBHOOK_URL="${HASS_VODAFONE_WEBHOOK_URL:-${HASS_HOST}/api/webhook/vodafone-restart-d90AfKsBPWKhDTT7E9Sfgj-X}"
 
 usage() {
   echo "Usage: $(basename "$0") ACTION [ARGS]"
