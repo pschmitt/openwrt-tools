@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+
+# This script requires snmp-utils!
+# $ opkg install snmp-utils
+
+if ! command -v snmpget &>/dev/null
+then
+  echo 'snmpget binary not found. Install it with "opkg update && opkg install snmp-utils"' >&2
+  exit 2
+fi
+
+DRY_RUN="${DRY_RUN:-}"
+POE_SWITCH_HOSTNAME="${POE_SWITCH_HOSTNAME:-switch-dlink.lan}"
+OID_POE_POWER="1.3.6.1.4.1.171.11.170.1000.11.1.2.1.1.1" # append .PORT
+OID_POE_POWER_CONSUMPTION="1.3.6.1.4.1.171.11.170.1000.11.1.2.2.2.1.1"
+SNMP_COMMUNITY="${SNMP_COMMUNITY:-private}"
+SNMP_RETRIES="${SNMP_RETRIES:-3}"
+SNMP_TIMEOUT="${SNMP_RETRIES:-5}"
+
+PORT_ALIASES=(
+  # 1
+  ovm5-ap
+  # 2
+  vodafone
+  # 3
+  wrt1900ac
+  # 4
+  4
+  # 5
+  tesmart
+  # 6
+  pikvm
+  # 7
+  7
+  # 8
+  8
+  # 9
+  9
+  # 10
+  10
+  # 11
+  netgear-lte
+  # 12
+  12
+)
+
+usage() {
+  echo "Usage: $(basename "$0") ACTION [ARGS]"
+  echo
+  echo "on PORT        Turn on POE port"
+  echo "off PORT       Turn off POE port"
+  echo "status [PORT]  Get port status"
+}
+
+echo_info() {
+  echo -e "\e[1m\e[34mINF\e[0m $*" >&2
+}
+
+echo_success() {
+  echo -e "\e[1m\e[32mOK\e[0m $*" >&2
+}
+
+echo_warning() {
+  [[ -n "$NO_WARNING" ]] && return 0
+  echo -e "\e[1m\e[33mWRN\e[0m $*" >&2
+}
+
+echo_error() {
+  echo -e "\e[1m\e[31mERR\e[0m $*" >&2
+}
+
+echo_debug() {
+  [[ -z "${DEBUG}${VERBOSE}" ]] && return 0
+  echo -e "\e[1m\e[35mDBG\e[0m $*" >&2
+}
+
+echo_dryrun() {
+  echo -e "\e[1m\e[35mDRY\e[0m $*" >&2
+}
+
+poe_port_id() {
+  local port_alias="$1"
+  local i
+  for i in "${!PORT_ALIASES[@]}"
+  do
+    if [[ "${PORT_ALIASES[$i]}" == "$port_alias" ]]
+    then
+      echo "$(( i + 1 ))"
+      return 0
+    fi
+  done
+
+  if [[ "$port" =~ [0-9]+ ]]
+  then
+    echo "$port"
+    return 0
+  fi
+
+  return 1
+}
+
+poe_action() {
+  local action="$1" # on|off
+  local action_human
+  # shellcheck disable=SC2155
+  local port="$2"
+  local community="${SNMP_COMMUNITY:-private}"
+
+  case "$action" in
+    on|1|enable)
+      action=1
+      action_human="on"
+      ;;
+    off|2|disable)
+      action=2
+      action_human="off"
+      ;;
+    *)
+      echo_error "Unknown action: $action"
+      return 2
+      ;;
+  esac
+
+  local oid="${OID_POE_POWER}.${port}"
+  local cmd=(
+    snmpset -v2c -r "$SNMP_RETRIES" -t "$SNMP_TIMEOUT" -c "$community"
+    "$POE_SWITCH_HOSTNAME" "$oid" i "$action"
+  )
+
+  if [[ "$DRY_RUN" ]]
+  then
+    echo_dryrun "${cmd[*]}"
+    return 0
+  fi
+
+  # action
+  if [[ -n "${VERBOSE}${DEBUG}" ]]
+  then
+    "${cmd[@]}"
+  else
+    "${cmd[@]}" 2>/dev/null
+  fi
+
+  # verify state
+  local status
+  status=$(poe_status "$port")
+  if [[ "$status" == "$action_human" ]]
+  then
+    echo_success "POE port $port $action_human"
+    return 0
+  fi
+
+  echo_error "POE port $port $action_human failed"
+  return 1
+}
+
+poe_port_on() {
+  local port="$1"
+  poe_action on "$port"
+}
+
+poe_port_off() {
+  local port="$1"
+  poe_action off "$port"
+}
+
+poe_port_toggle() {
+  local port="$1"
+  local status
+  status=$(poe_status "$port")
+  case "$status" in
+    on)
+      poe_port_off "$port"
+      ;;
+    off)
+      poe_port_on "$port"
+      ;;
+    *)
+      echo_error "Unknown status: $status"
+      return 1
+      ;;
+  esac
+}
+
+poe_port_flip_on() {
+  local port="$1"
+  poe_off "$port"
+  poe_on "$port"
+}
+
+poe_port_status() {
+  local port="$1" # zerofill
+  local community="${SNMP_COMMUNITY:-public}"
+
+  local oid="${OID_POE_POWER}.${port}"
+  local cmd=(
+    snmpget -v2c -r "$SNMP_RETRIES" -t "$SNMP_TIMEOUT" -c "$community"
+    "$POE_SWITCH_HOSTNAME" "$oid"
+  )
+
+  if [[ "$DRY_RUN" ]]
+  then
+    echo_dryrun "${cmd[*]}"
+    return 0
+  fi
+
+  local res
+  if [[ -n "${VERBOSE}${DEBUG}" ]]
+  then
+    res=$("${cmd[@]}" | awk '{ print $NF }')
+  else
+    res=$("${cmd[@]}" 2>/dev/null | awk '{ print $NF }')
+  fi
+
+  case "$res" in
+    1)
+      echo "on"
+      ;;
+    2)
+      echo "off"
+      ;;
+    *)
+      echo_warning "UNKNOWN: $res"
+      return 3
+      ;;
+  esac
+
+  return 0
+}
+
+poe_port_power_consumption() {
+  local port="$1" # zerofill
+  local community="${SNMP_COMMUNITY:-public}"
+
+  local oid="${OID_POE_POWER_CONSUMPTION}.${port}"
+  local cmd=(
+    snmpget -v2c -r "$SNMP_RETRIES" -t "$SNMP_TIMEOUT" -c "$community"
+    "$POE_SWITCH_HOSTNAME" "$oid"
+  )
+
+  if [[ "$DRY_RUN" ]]
+  then
+    echo_dryrun "${cmd[*]}"
+    return 0
+  fi
+
+  local res
+  if [[ -n "${VERBOSE}${DEBUG}" ]]
+  then
+    res=$("${cmd[@]}" | awk '{ print $NF }')
+  else
+    res=$("${cmd[@]}" 2>/dev/null | awk '{ print $NF }')
+  fi
+
+  # Convert to Watts
+  awk -v "v=${res}" 'BEGIN {printf "%.1f", v/1000}'
+
+  return 0
+
+}
+
+poe_status() {
+  local port="$1"
+  local port_status
+
+  if [[ -n "$port" ]]
+  then
+    port=$(poe_port_id "$port")
+    if [[ -z "$port" ]]
+    then
+      echo_error "Failed to resolve port alias: $1"
+      echo_info "Available aliases:"
+      local i alias
+      for i in "${!PORT_ALIASES[@]}"
+      do
+        alias="${PORT_ALIASES[$i]}"
+        echo "Port $(printf '%02d' "$(( i + 1 ))"): $alias"
+      done
+      return 1
+    fi
+
+    port_status=$(poe_port_status "$port")
+
+    if [[ -n "$QUIET" ]]
+    then
+      if [[ "$port_status" == "on" ]]
+      then
+        return 0
+      else
+        return 1
+      fi
+    fi
+
+    echo "$port_status"
+    return 0
+  fi
+
+  local bold=$'\e[1m'
+  local red=$'\e[31m'
+  local green=$'\e[32m'
+  local magenta=$'\e[35m'
+  local reset_color=$'\e[0m'
+
+  local port_alias port_zf color port_power_consumption
+  echo -e "${bold}PORT\tSTATUS\tPOWER\tNAME${reset_color}"
+  for port in {1..12}
+  do
+    port_zf=$(printf "%02d" "$port")
+    port_alias="${PORT_ALIASES[$(( port - 1 ))]:-N/A}"
+    port_power_consumption=$(poe_port_power_consumption "$port")
+    port_status=$(poe_port_status "$port" | tr -d '\n')
+    case "$port_status" in
+      on)
+        color="$green"
+        ;;
+      off)
+        port_status="OFF"
+        color="$red"
+        ;;
+      *)
+        color="$magenta"
+        ;;
+    esac
+
+    echo -en "${port_zf}"
+    echo -en "\t"
+    echo -en "${bold}${color}${port_status}${reset_color}"
+    echo -en "\t"
+    echo -en "${port_power_consumption}"
+    echo -en "\t"
+    echo "${port_alias}"
+  # FIXME There is no column binary on OpenWrt
+  # therefore the output is misaligned when the NAME (alias) field is put in
+  # 2nd position (middle)
+  done # | column -t -s '	'
+}
+
+poe_on() {
+  local port="$1"
+  port=$(poe_port_id "$port")
+  if [[ -z "$port" ]]
+  then
+    echo_error "Failed to resolve port alias: $1"
+    return 1
+  fi
+
+  poe_port_on "$port"
+}
+
+poe_off() {
+  local port="$1"
+  port=$(poe_port_id "$port")
+  if [[ -z "$port" ]]
+  then
+    echo_error "Failed to resolve port alias: $1"
+    return 1
+  fi
+
+  poe_port_off "$port"
+}
+
+main() {
+  local args=()
+
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --host*)
+        POE_SWITCH_HOSTNAME="$2"
+        shift 2
+        ;;
+      -c|--community)
+        SNMP_COMMUNITY="$2"
+        shift 2
+        ;;
+      -r|--retries)
+        SNMP_RETRIES="$2"
+        shift 2
+        ;;
+      -t|--timeout)
+        SNMP_TIMEOUT="$2"
+        shift 2
+        ;;
+      -q|--quiet)
+        QUIET=1
+        shift
+        ;;
+      --dryrun|--dry-run|-k)
+        DRY_RUN=1
+        shift
+        ;;
+      -d|--debug)
+        set -x
+        DEBUG=1
+        shift
+        ;;
+      -v|--verbose)
+        VERBOSE=1
+        shift
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  set -- "${args[@]}"
+
+  ACTION=status # default action
+  if [[ -n "$1" ]]
+  then
+    ACTION="$1"
+    shift
+  fi
+
+  case "$ACTION" in
+    on|enable)
+      poe_on "$@"
+      ;;
+    off|disable)
+      poe_off "$@"
+      ;;
+    toggle)
+      poe_port_toggle "$@"
+      ;;
+    flip)
+      poe_port_flip_on "$@"
+      ;;
+    status)
+      poe_status "$@"
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  main "$@"
+fi
