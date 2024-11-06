@@ -414,9 +414,31 @@ main() {
   ACTION=status # default action
   if [[ -n "$1" ]]
   then
-    ACTION="$1"
+    # poe 1 on
+    if [[ "$1" =~ [0-9]+ ]]
+    then
+      PORT="$1"
+    else
+      # poe myport on
+      PORT=$(poe_port_id "$1")
+    fi
+
+    if [[ -n "$PORT" ]]
+    then
+      ACTION="${2:-status}"
+      if [[ -n "$2" ]]
+      then
+        shift
+      fi
+    else
+      ACTION="$1"
+    fi
+
     shift
   fi
+
+  # shellcheck disable=SC2086
+  set -- $PORT "$@"
 
   case "$ACTION" in
     on|enable)
@@ -433,6 +455,10 @@ main() {
       ;;
     status)
       poe_status "$@"
+      ;;
+    *)
+      echo "Unknown action: '$ACTION'" >&2
+      usage >&2
       ;;
   esac
 }
