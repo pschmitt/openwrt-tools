@@ -71,7 +71,7 @@ fetze_netbird() {
     return 0
   fi
 
-  local dest=${NETBIRD_DEST:-$DEST}
+  local dest="${NETBIRD_DEST:-$DEST}"
   mkdir -p "$dest"
   local url="https://github.com/${NETBIRD_REPO}/releases/download/v${latest_version}/netbird_${latest_version}_linux_${NETBIRD_ARCH}.tar.gz"
   wget -qO- "$url" | tar -xzvf - -C "$dest" netbird
@@ -97,7 +97,7 @@ fetze_tailscale() {
   tmpdir=$(mktemp -d)
   trap 'rm -rf "$tmpdir"' EXIT
 
-  local dest=${TAILSCALE_DEST:-$DEST}
+  local dest="${TAILSCALE_DEST:-$DEST}"
   mkdir -p "$dest"
   local url="https://pkgs.tailscale.com/stable/tailscale_${latest_version}_${TAILSCALE_ARCH}.tgz"
   wget -qO- "$url" | tar xzvf - -C "${tmpdir}"
