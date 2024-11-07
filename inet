@@ -7,7 +7,7 @@ LTE_IPV6="${LTE_IPV6:-wwan6}"
 WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6")
 
 VPN_SERVICES=(netbird tailscale zerotier)
-DNS_SERVICES=(dnsmasq unbound)
+DNS_SERVICES=(adguardhome dnsmasq unbound)
 CORE_SERVICES=(odhcpd "${DNS_SERVICES[@]}")
 
 HASS_HOST="${HASS_HOST:-http://10.5.1.1:8123}"
