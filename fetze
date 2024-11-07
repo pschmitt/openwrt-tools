@@ -75,7 +75,14 @@ fetze_netbird() {
   mkdir -p "$dest"
   local url="https://github.com/${NETBIRD_REPO}/releases/download/v${latest_version}/netbird_${latest_version}_linux_${NETBIRD_ARCH}.tar.gz"
   wget -qO- "$url" | tar -xzvf - -C "$dest" netbird
-  /etc/init.d/netbird restart
+  local rc="$?"
+
+  if ! /etc/init.d/netbird restart
+  then
+    echo "Failed to restart netbird service (new install?)" >&2
+  fi
+
+  return "$rc"
 }
 
 fetze_tailscale() {
@@ -95,7 +102,14 @@ fetze_tailscale() {
   local url="https://pkgs.tailscale.com/stable/tailscale_${latest_version}_${TAILSCALE_ARCH}.tgz"
   wget -qO- "$url" | tar xzvf - -C "${tmpdir}"
   find "${tmpdir}" -type f -perm '+1' -iname 'tailscale*' -exec mv -v '{}' "${TAILSCALE_DEST:-$DEST}" \;
-  /etc/init.d/tailscale restart
+  local rc="$?"
+
+  if ! /etc/init.d/tailscale restart
+  then
+    echo "Failed to restart tailscale service (new install?)" >&2
+  fi
+
+  return "$rc"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
