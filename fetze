@@ -50,21 +50,21 @@ tailscale_latest_version() {
 }
 
 netbird_is_up_to_date() {
-  local latest_version
+  local latest_version=""
   latest_version="$(netbird_latest_version)"
   echo "$latest_version"  # to avoid another request, we "return" the version
   [[ "$(netbird_version)" == "$latest_version" ]]
 }
 
 tailscale_is_up_to_date() {
-  local latest_version
+  local latest_version=""
   latest_version="$(tailscale_latest_version)"
   echo "$latest_version"  # to avoid another request, we "return" the version
   [[ "$(tailscale_version)" == "$latest_version" ]]
 }
 
 fetze_netbird() {
-  local latest_version
+  local latest_version=""
   if latest_version="$(netbird_is_up_to_date)"
   then
     echo "netbird is up-to-date ($latest_version)"
@@ -86,7 +86,7 @@ fetze_netbird() {
 }
 
 fetze_tailscale() {
-  local latest_version
+  local latest_version=""
   if latest_version="$(tailscale_is_up_to_date)"
   then
     echo "tailscale is up-to-date ($latest_version)"
