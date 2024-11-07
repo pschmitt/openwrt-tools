@@ -51,14 +51,22 @@ tailscale_latest_version() {
 
 netbird_is_up_to_date() {
   local latest_version=""
-  latest_version="$(netbird_latest_version)"
+  if ! latest_version="$(netbird_latest_version)"
+  then
+    echo "Netbird seems to not be installed at all" >&2
+    return 1
+  fi
   echo "$latest_version"  # to avoid another request, we "return" the version
   [[ "$(netbird_version)" == "$latest_version" ]]
 }
 
 tailscale_is_up_to_date() {
   local latest_version=""
-  latest_version="$(tailscale_latest_version)"
+  if ! latest_version="$(tailscale_latest_version)"
+  then
+    echo "Tailscale seems to not be installed at all" >&2
+    return 1
+  fi
   echo "$latest_version"  # to avoid another request, we "return" the version
   [[ "$(tailscale_version)" == "$latest_version" ]]
 }
@@ -100,7 +108,8 @@ fetze_tailscale() {
     echo "Failed to create temporary directory" >&2
     return 1
   fi
-  trap 'rm -rf "$tmpdir"' EXIT
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" EXIT
 
   local dest="${TAILSCALE_DEST:-$DEST}"
   mkdir -p "$dest"
