@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+mwan3_is_active() {
+  /etc/init.d/mwan3 running 2>/dev/null
+}
+
 # shellcheck disable=SC2317
 get_wan_interfaces() {
   local uci_path
@@ -37,11 +41,11 @@ get_interface() {
 # mapfile -t WAN_INTERFACES < <(get_wan_interfaces)
 # echo "WAN_INTERFACES: ${WAN_INTERFACES[*]}" >&2
 
-WAN=$(get_interface wan)
-LTE=$(get_interface wwan)
-LTE_INT=$(get_interface wwan_ext)
+WAN="wan"
+LTE="wwan"
+LTE_INT="wwan_int"
 # shellcheck disable=SC2206
-INTERFACES=($WAN $LTE)
+UCI_INTERFACES=($WAN $LTE)
 
 resolve() {
   local host="$1"
@@ -125,7 +129,7 @@ provider_resolve() {
 }
 
 # NOTE as of 2024-10-25 ip.guide yields a 404 error..!
-PROVIDER="${PROVIDER:-ipinfo.io}"
+PROVIDER="${PROVIDER:-myip.wtf}"
 NO_COLOR="${NO_COLOR:-}"
 CURL_ARGS=()
 
@@ -135,7 +139,7 @@ then
   NO_COLOR=1
 fi
 
-CURL_TIMEOUT=20
+CURL_TIMEOUT=10
 
 while [[ -n "$*" ]]
 do
@@ -169,13 +173,13 @@ done
 # Only process a particular interface if requested by the user
 case "$1" in
   lte|wwan*)
-    INTERFACES=("$LTE")
+    UCI_INTERFACES=("$LTE")
     ;;
   mm|quectel|qectel)
-    INTERFACES=("$LTE_INT")
+    UCI_INTERFACES=("$LTE_INT")
     ;;
   wan|cable|vodafone)
-    INTERFACES=("$WAN")
+    UCI_INTERFACES=("$WAN")
     ;;
 esac
 
@@ -203,18 +207,30 @@ esac
 
 RC=0
 
-for i in "${INTERFACES[@]}"
+if mwan3_is_active
+then
+  if [[ -z "$MWAN3_PATCHED" ]]
+  then
+    echo_warning "mwan3 is active. RC might be always 0"
+  fi
+  MWAN3_ACTIVE=1
+fi
+
+for uci_intf in "${UCI_INTERFACES[@]}"
 do
+  [[ -n $IPV6 ]] && uci_intf+="6"
+  i=$(get_interface "$uci_intf")
+
   if [[ -n "$NO_COLOR" ]]
   then
-    echo "Interface: $i"
+    echo "Interface: $uci_intf ($i)"
   else
-    echo -e "\e[34mInterface: $i\e[0m"
+    echo -e "\e[34mInterface: $uci_intf ($i)\e[0m"
   fi
 
   # TODO Try multiple providers!
   # shellcheck disable=SC2086
-  if ! DATA="$(curl -fsSL --max-time "$CURL_TIMEOUT" --interface "$i" -H "Host: $PROVIDER" \
+  if ! DATA="$(${MWAN3_ACTIVE:+mwan3 use "$uci_intf"} curl -fsSL --max-time "$CURL_TIMEOUT" --interface "$i" -H "Host:$PROVIDER" \
     "${CURL_ARGS[@]}" "${PROVIDER_IP}${CURL_LOCATION}")" || \
     [[ -z "$DATA" ]]
   then
