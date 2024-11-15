@@ -761,7 +761,6 @@ wan_speedtest-cli() {
     "${cmd[@]}"
 }
 
-
 # FIXME There does not seem to be a native way to force ookla-speedtest to use
 # a specific interface. The `--source` flag is not supported.
 wan_speedtest-ookla() {
