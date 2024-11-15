@@ -606,7 +606,10 @@ intf_loop() {
 
     if mwan3_is_active
     then
-      echo_warning "mwan3 is active. RC might be always 0"
+      if [[ -z "$MWAN3_PATCHED" ]]
+      then
+        echo_warning "mwan3 is active. RC might be always 0"
+      fi
       icmd="mwan3 use $owrt_intf $icmd"
     fi
 
