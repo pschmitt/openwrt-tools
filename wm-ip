@@ -4,6 +4,10 @@ mwan3_is_active() {
   /etc/init.d/mwan3 running 2>/dev/null
 }
 
+mwan3_is_patched() {
+  grep -q "PATCHED BY PSCHMITT" /usr/sbin/mwan3
+}
+
 # shellcheck disable=SC2317
 get_wan_interfaces() {
   local uci_path
@@ -209,7 +213,7 @@ RC=0
 
 if mwan3_is_active
 then
-  if [[ -z "$MWAN3_PATCHED" ]]
+  if ! mwan3_is_patched
   then
     echo_warning "mwan3 is active. RC might be always 0"
   fi
