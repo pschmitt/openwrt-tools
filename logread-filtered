@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# NOTE This requires GNU grep (for --color=auto and --line-buffered)
+
+IGNORED='upnp|ssh|dropbear|tailscaled|crond|hostapd|DHCPOFFER|DHCPREQUEST|DHCPDISCOVER|DHCPRELEASE|dhcp_host_domain_ng.py|ATLAS|A default route is present|Refresh kresd|because the name exists'
+
+read_logs() {
+  echo -e "\e[34m🔹Ignored regex: $IGNORED\e[0m" >&2
+  logread -f | grep --line-buffered -vE "$IGNORED"
+}
+
+FILTER="$1"
+
+if [ -n "$FILTER" ]
+then
+  read_logs | grep --color=auto -iE "$FILTER"
+else
+  read_logs
+fi
