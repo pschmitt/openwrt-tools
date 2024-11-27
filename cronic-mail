@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+
+# cronic-mail - wraps cronic to send output via email when cronic outputs
+# something (ie the job failed)
+# Mainly intended for cron implementations that don't support sending emails on
+# failure.
+# Usage: cronic-mail CMD
+
+if [ $# -eq 0 ]
+then
+  echo "Usage: $0 CMD" >&2
+  exit 2
+fi
+
+USER=$(id -un)
+TMP=$(mktemp)
+
+# Run cronic with the provided command and capture its output
+cronic "$@" > "$TMP"
+
+# Check if cronic produced any output
+if [ -s "$TMP" ]
+then
+  {
+    echo "Subject: Cronic detected failure in cron job: $*"
+    if [ -n "$MAILTO" ]
+    then
+      echo "To: $MAILTO"
+    fi
+    echo ""
+    cat "$TMP"
+  } | sendmail "$USER"
+fi
+
+# Clean up the temporary file
+rm -f "$TMP"
+
+exit 0
