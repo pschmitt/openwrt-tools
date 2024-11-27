@@ -166,7 +166,7 @@ cf() {
 }
 
 cf_record_update() {
-  local zone="${ZONE_NAME:-heimat.dev}"
+  local zone="${ZONE_NAME:-brkn.lol}"
 
   local name="$1"
   local type="$2"
