@@ -428,6 +428,8 @@ then
       exit "$RC"
     fi
 
+    # reset RC
+    RC=0
     while read -r RECORD
     do
       read -r RECORD_ID RECORD_NAME <<<"$RECORD"
@@ -439,7 +441,10 @@ then
         continue
       fi
 
-      cf_delete_record "$RECORD_ID"
+      if ! cf_delete_record "$RECORD_ID"
+      then
+        RC=1
+      fi
     done < <(<<<"$RECORDS_TO_DELETE" jq -cr '.ID + " " + .Name')
   fi
 
