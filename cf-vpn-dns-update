@@ -411,8 +411,9 @@ then
 
   # remove all records that are not in the list
   VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
+  # NOTE Do not use jq -e here as if will lead to a wrong exit code
   RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
-    jq -er \
+    jq -r \
       --arg zone "$ZONE_NAME" \
       --arg suffix "$HOST_SUFFIX" \
       --argjson hosts "$VPN_RECORDS_JSON" '
