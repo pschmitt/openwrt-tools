@@ -227,7 +227,7 @@ cf_delete_record() {
 }
 
 cf_get_records() {
-  local zone="${1:-${ZONE_NAME:-heimat.dev}}"
+  local zone="${1:-${ZONE_NAME:-brkn.lol}}"
   cf --json dns list --zone="${zone}"
 }
 
