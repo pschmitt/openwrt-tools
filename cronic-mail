@@ -12,7 +12,19 @@ then
   exit 2
 fi
 
+resolve_mail_alias() {
+  MAIL_ALIAS="$1"
+  ALIAS_FILE=/etc/aliases
+  [ -z "$MAIL_ALIAS" ] && return 0
+  [ ! -f "$ALIAS_FILE" ] && return 0
+  awk -F ' *: *' -v al="$MAIL_ALIAS" \
+    '$0 ~ "^" al " *:" { print $2; exit }' \
+    "$ALIAS_FILE"
+  unset MAIL_ALIAS
+}
+
 USER=$(id -un)
+MAILTO=${MAILTO:-$(resolve_mail_alias "$USER")}
 TMP=$(mktemp)
 
 # Run cronic with the provided command and capture its output
@@ -29,7 +41,7 @@ then
     fi
     echo ""
     cat "$TMP"
-  } | sendmail "$USER"
+  } | sendmail "${MAILTO:-$USER}"
 fi
 
 # Clean up the temporary file
