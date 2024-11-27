@@ -400,53 +400,56 @@ then
       fi
     fi
   done
+
   RC="$?"
 
   # cleanup
-  if [[ -n "$CLEAN" ]]
+  if [[ -z "$CLEAN" ]]
   then
-    # remove all records that are not in the list
-    VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
-    RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
-      jq -er \
-        --arg zone "$ZONE_NAME" \
-        --arg suffix "$HOST_SUFFIX" \
-        --argjson hosts "$VPN_RECORDS_JSON" '
-        .[] | select(
-          (.Name | endswith($suffix + "." + $zone))
-          and
-          (.Type == "A" or .Type == "AAAA")
-          and
-          (.Name | IN($hosts[]) | not)
-        )
-      '
-    )
+    exit "$RC"
+  fi
 
-    if [[ -z "$RECORDS_TO_DELETE" ]]
+  # remove all records that are not in the list
+  VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
+  RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
+    jq -er \
+      --arg zone "$ZONE_NAME" \
+      --arg suffix "$HOST_SUFFIX" \
+      --argjson hosts "$VPN_RECORDS_JSON" '
+      .[] | select(
+        (.Name | endswith($suffix + "." + $zone))
+        and
+        (.Type == "A" or .Type == "AAAA")
+        and
+        (.Name | IN($hosts[]) | not)
+      )
+    '
+  )
+
+  if [[ -z "$RECORDS_TO_DELETE" ]]
+  then
+    echo "No records to delete"
+    exit "$RC"
+  fi
+
+  # reset RC
+  RC=0
+  while read -r RECORD
+  do
+    read -r RECORD_ID RECORD_NAME <<<"$RECORD"
+    echo "☠️ Deleting record: $RECORD_NAME"
+
+    if [[ -n "$DRY_RUN" ]]
     then
-      echo "No records to delete"
-      exit "$RC"
+      echo_dry_run "Delete record: $RECORD_NAME"
+      continue
     fi
 
-    # reset RC
-    RC=0
-    while read -r RECORD
-    do
-      read -r RECORD_ID RECORD_NAME <<<"$RECORD"
-      echo "☠️ Deleting record: $RECORD_NAME"
-
-      if [[ -n "$DRY_RUN" ]]
-      then
-        echo_dry_run "Delete record: $RECORD_NAME"
-        continue
-      fi
-
-      if ! cf_delete_record "$RECORD_ID"
-      then
-        RC=1
-      fi
-    done < <(<<<"$RECORDS_TO_DELETE" jq -cr '.ID + " " + .Name')
-  fi
+    if ! cf_delete_record "$RECORD_ID"
+    then
+      RC=1
+    fi
+  done < <(<<<"$RECORDS_TO_DELETE" jq -cr '.ID + " " + .Name')
 
   exit "$RC"
 fi
