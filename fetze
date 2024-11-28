@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 DEST="${DEST:-/usr/bin}"
+FLARECTL_REPO="cloudflare/cloudflare-go"
+FLARECTL_ARCH="${FLARECTL_ARCH:-armv6}"
 NETBIRD_REPO="netbirdio/netbird"
 NETBIRD_ARCH="${NETBIRD_ARCH:-armv6}"
 TAILSCALE_REPO="tailscale/tailscale"
@@ -22,12 +24,26 @@ git_latest_version() {
     busybox tail -1
 }
 
+github_latest_release() {
+  local gh_repo="$1"
+  curl -fsSL "https://api.github.com/repos/${gh_repo}/releases/latest" | \
+    jq -er '.tag_name' | sed 's#^v##'
+}
+
+flarectl_version() {
+  flarectl --version | awk '{ print $NF }'
+}
+
 netbird_version() {
   netbird version
 }
 
 tailscale_version() {
   tailscale version | head -1
+}
+
+flarectl_latest_version() {
+  github_latest_release "$FLARECTL_REPO"
 }
 
 netbird_latest_version() {
@@ -47,6 +63,17 @@ tailscale_latest_version() {
   # More often than not there will not be a static binary for the latest version
   # git_latest_version "$TAILSCALE_REPO"
   tailscale_latest_href | sed -r 's#[^_]+_([^_]+)_.*#\1#'
+}
+
+flarectl_is_up_to_date() {
+  local latest_version=""
+  if ! latest_version="$(flarectl_latest_version)"
+  then
+    echo "Flarectl seems to not be installed at all" >&2
+    return 1
+  fi
+  echo "$latest_version"  # to avoid another request, we "return" the version
+  [[ "$(flarectl_version)" == "$latest_version" ]]
 }
 
 netbird_is_up_to_date() {
@@ -69,6 +96,20 @@ tailscale_is_up_to_date() {
   fi
   echo "$latest_version"  # to avoid another request, we "return" the version
   [[ "$(tailscale_version)" == "$latest_version" ]]
+}
+
+fetze_flarectl() {
+  local latest_version=""
+  if latest_version="$(flarectl_is_up_to_date)"
+  then
+    echo "flarectl is up-to-date ($latest_version)"
+    return 0
+  fi
+
+  local dest="${FLARECTL_DEST:-$DEST}"
+  mkdir -p "$dest"
+  local url="https://github.com/${FLARECTL_REPO}/releases/download/v${latest_version}/flarectl_${latest_version}_linux_${FLARECTL_ARCH}.tar.gz"
+  wget -qO- "$url" | tar -xzvf - -C "$dest" flarectl
 }
 
 fetze_netbird() {
@@ -137,6 +178,9 @@ then
       usage
       exit 0
       ;;
+    cf|flarectl*)
+      fetze_flarectl
+      ;;
     nb|netbird*)
       fetze_netbird
       ;;
@@ -144,6 +188,7 @@ then
       fetze_tailscale
       ;;
     *)
+      fetze_flarectl
       fetze_netbird
       fetze_tailscale
       ;;
