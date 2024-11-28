@@ -145,6 +145,12 @@ get_hosts() {
       ;;
   esac
 
+  if [[ -z "$hosts" ]]
+  then
+    echo_warning "No $VPN_TYPE hosts found"
+    return 1
+  fi
+
   if [[ -n "$STRIP_HOSTNAMES" ]]
   then
     # Remove the trailing number from the hostnames (if any)
@@ -371,7 +377,10 @@ then
   RECORDS="$(cf_get_records "$ZONE_NAME")"
   VPN_RECORDS=()
 
-  mapfile -t VPN_HOSTS < <(get_hosts)
+  if ! mapfile -t VPN_HOSTS < <(get_hosts)
+  then
+    exit 1
+  fi
 
   for line in "${VPN_HOSTS[@]}"
   do
