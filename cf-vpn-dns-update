@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 
+# Sample /etc/cloudflare-credentials file:
+# API Key auth:
+# CF_API_EMAIL=you@example.com
+# CF_API_KEY=xxxxxx
+#
+# Token auth:
+# CF_API_TOKEN=xxxxxx
+#
+# For zerotier auth, put the API token in /etc/zerotier/api-token
+
 usage() {
-  echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX]"
+  echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX] [--wildcard] [--clean] [--dry-run] [--debug] [--email EMAIL] [--api-key API_KEY] [--token API_TOKEN] [--zt-api-token API_TOKEN]"
 }
 
 echo_dry_run() {
@@ -269,7 +279,7 @@ then
   ZEROTIER_API_TOKEN="${ZEROTIER_API_TOKEN:-}"
   ZEROTIER_API_TOKEN_FILE="${ZEROTIER_API_TOKEN_FILE:-/etc/zerotier/api-token}"
 
-  CF_CREDENTIALS_FILE="${CF_CREDENTIALS_FILE:-/etc/cloudflare-credentials}"
+  CF_CREDENTIALS_FILE="${CF_CREDENTIALS_FILE:-/etc/cloudflare/credentials}"
   CF_API_KEY="${CF_API_KEY:-}"
   CF_API_EMAIL="${CF_API_EMAIL:-}"
   CF_API_TOKEN="${CF_API_TOKEN:-}"
