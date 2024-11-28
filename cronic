@@ -29,7 +29,7 @@ if [ $RESULT -ne 0 -o -s "$ERR" ]
     echo "Cronic detected failure or error output for the command:"
     echo "$@"
     echo
-    echo "RESULT CODE: $RESULT"
+    echo "RETURN CODE: $RESULT"
     echo
     echo "ERROR OUTPUT:"
     cat "$ERR"
