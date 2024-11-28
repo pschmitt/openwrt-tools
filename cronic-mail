@@ -26,7 +26,7 @@ resolve_mail_alias() {
 
 send_email() {
   {
-    echo "Subject: Cronic detected failure in cron job: $*"
+    echo "Subject: ${SUBJECT:-Cronjob failure}: $*"
     [ -n "$MAILTO" ] && echo "To: $MAILTO"
     echo ""
     cat "$MAILFILE"
@@ -76,8 +76,7 @@ fi
 if [ "$RC" -ne 0 ] || [ -s "$ERRFILE" ]
 then
   {
-    echo "Cronic detected failure or error output for the command:"
-    echo "$*"
+    echo "COMMAND: $*"
     echo
 
     echo "RETURN CODE: $RC"
