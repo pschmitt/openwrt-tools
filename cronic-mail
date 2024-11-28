@@ -84,17 +84,32 @@ then
     echo
 
     echo "STDERR:"
-    cat "$ERRFILE"
+    if [ -s "$ERRFILE" ]
+    then
+      cat "$ERRFILE"
+    else
+      echo "N/A"
+    fi
     echo
 
     echo "STDOUT:"
-    cat "$OUTFILE"
+    if [ -s "$OUTFILE" ]
+    then
+      cat "$OUTFILE"
+    else
+      echo "N/A"
+    fi
     echo
 
     if [ "$TRACEFILE" != "$ERRFILE" ]
     then
       echo "TRACE OUTPUT:"
-      cat "$TRACEFILE"
+      if [ -s "$TRACEFILE" ]
+      then
+        cat "$TRACEFILE"
+      else
+        echo "N/A"
+      fi
       echo
     fi
   } > "$MAILFILE"
