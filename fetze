@@ -3,6 +3,8 @@
 DEST="${DEST:-/usr/bin}"
 FLARECTL_REPO="cloudflare/cloudflare-go"
 FLARECTL_ARCH="${FLARECTL_ARCH:-armv6}"
+FZF_REPO="junegunn/fzf"
+FZF_ARCH="${FZF_ARCH:-armv7}"
 NETBIRD_REPO="netbirdio/netbird"
 NETBIRD_ARCH="${NETBIRD_ARCH:-armv6}"
 TAILSCALE_REPO="tailscale/tailscale"
@@ -34,6 +36,10 @@ flarectl_version() {
   flarectl --version | awk '{ print $NF }'
 }
 
+fzf_version() {
+  fzf --version | awk '{ print $1 }'
+}
+
 netbird_version() {
   netbird version
 }
@@ -44,6 +50,10 @@ tailscale_version() {
 
 flarectl_latest_version() {
   github_latest_release "$FLARECTL_REPO"
+}
+
+fzf_latest_version() {
+  github_latest_release "$FZF_REPO"
 }
 
 netbird_latest_version() {
@@ -63,6 +73,17 @@ tailscale_latest_version() {
   # More often than not there will not be a static binary for the latest version
   # git_latest_version "$TAILSCALE_REPO"
   tailscale_latest_href | sed -r 's#[^_]+_([^_]+)_.*#\1#'
+}
+
+fzf_is_up_to_date() {
+  local latest_version=""
+  if ! latest_version="$(fzf_latest_version)"
+  then
+    echo "fzf seems to not be installed at all" >&2
+    return 1
+  fi
+  echo "$latest_version"  # to avoid another request, we "return" the version
+  [[ "$(fzf_version)" == "$latest_version" ]]
 }
 
 flarectl_is_up_to_date() {
@@ -106,10 +127,28 @@ fetze_flarectl() {
     return 0
   fi
 
+  echo "Updating flarectl to ${latest_version}"
+
   local dest="${FLARECTL_DEST:-$DEST}"
   mkdir -p "$dest"
   local url="https://github.com/${FLARECTL_REPO}/releases/download/v${latest_version}/flarectl_${latest_version}_linux_${FLARECTL_ARCH}.tar.gz"
   wget -qO- "$url" | tar -xzvf - -C "$dest" flarectl
+}
+
+fetze_fzf() {
+  local latest_version=""
+  if latest_version="$(fzf_is_up_to_date)"
+  then
+    echo "fzf is up-to-date ($latest_version)"
+    return 0
+  fi
+
+  echo "Updating fzf to ${latest_version}"
+
+  local dest="${FZF_DEST:-$DEST}"
+  mkdir -p "$dest"
+  local url="https://github.com/${FZF_REPO}/releases/download/v${latest_version}/fzf-${latest_version}-linux_${FLARECTL_ARCH}.tar.gz"
+  wget -qO- "$url" | tar -xzvf - -C "$dest" fzf
 }
 
 fetze_netbird() {
@@ -119,6 +158,8 @@ fetze_netbird() {
     echo "netbird is up-to-date ($latest_version)"
     return 0
   fi
+
+  echo "Updating netbird to ${latest_version}"
 
   local dest="${NETBIRD_DEST:-$DEST}"
   mkdir -p "$dest"
@@ -141,6 +182,8 @@ fetze_tailscale() {
     echo "tailscale is up-to-date ($latest_version)"
     return 0
   fi
+
+  echo "Updating tailscale to ${latest_version}"
 
   local tmpdir=""
   tmpdir="$(mktemp -d)"
@@ -181,6 +224,9 @@ then
     cf|flarectl*)
       fetze_flarectl
       ;;
+    fzf)
+      fetze_fzf
+      ;;
     nb|netbird*)
       fetze_netbird
       ;;
@@ -189,6 +235,7 @@ then
       ;;
     *)
       fetze_flarectl
+      fetze_fzf
       fetze_netbird
       fetze_tailscale
       ;;
