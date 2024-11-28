@@ -102,7 +102,7 @@ then
 
     if [ "$TRACEFILE" != "$ERRFILE" ]
     then
-      echo "TRACE OUTPUT:"
+      echo "TRACE:"
       if [ -s "$TRACEFILE" ]
       then
         cat "$TRACEFILE"
