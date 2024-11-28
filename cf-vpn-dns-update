@@ -269,7 +269,7 @@ then
   ZEROTIER_API_TOKEN="${ZEROTIER_API_TOKEN:-}"
   ZEROTIER_API_TOKEN_FILE="${ZEROTIER_API_TOKEN_FILE:-/etc/zerotier/api-token}"
 
-  CF_CREDENTIALS_FILE="${CF_CREDENTIALS_FILE:-/etc/cloudflare-credentials.json}"
+  CF_CREDENTIALS_FILE="${CF_CREDENTIALS_FILE:-/etc/cloudflare-credentials}"
   CF_API_KEY="${CF_API_KEY:-}"
   CF_API_EMAIL="${CF_API_EMAIL:-}"
   CF_API_TOKEN="${CF_API_TOKEN:-}"
@@ -358,20 +358,9 @@ then
       exit 2
     fi
 
-    CF_AUTH_TYPE="$(jq -er '.type' "$CF_CREDENTIALS_FILE")"
-    case "$CF_AUTH_TYPE" in
-      key)
-        CF_API_KEY="$(jq -er '.key' "$CF_CREDENTIALS_FILE")"
-        CF_API_EMAIL="$(jq -er '.email' "$CF_CREDENTIALS_FILE")"
-        ;;
-      token)
-        CF_API_TOKEN="$(jq -er '.token' "$CF_CREDENTIALS_FILE")"
-        ;;
-      *)
-        echo "Unknown CF_AUTH_TYPE: $CF_AUTH_TYPE" >&2
-        exit 2
-        ;;
-    esac
+    # Attempt to source the file
+    # shellcheck disable=SC1090
+    source "$CF_CREDENTIALS_FILE" || exit 3
   fi
 
   RECORDS="$(cf_get_records "$ZONE_NAME")"
