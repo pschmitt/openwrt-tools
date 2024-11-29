@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+cd "$(cd "$(dirname "$0")" >/dev/null 2>&1; pwd -P)" || exit 9
+source lib/echo.sh
+
 WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
 LTE_IPV4="${LTE_IPV4:-wwan}"
@@ -47,48 +50,6 @@ usage() {
   echo "              vpn  VPN services: ${VPN_SERVICES[*]}"
   echo "  upstream-dns     Query upstream DNS server"
   echo "  vodafone [-y]    Restart Vodafone Station"
-}
-
-echo_info() {
-  echo -e "\e[1m\e[34mINF\e[0m $*" >&2
-}
-
-echo_success() {
-  echo -e "\e[1m\e[32mOK\e[0m $*" >&2
-}
-
-echo_warning() {
-  [[ -n "$NO_WARNING" ]] && return 0
-  echo -e "\e[1m\e[33mWRN\e[0m $*" >&2
-}
-
-echo_error() {
-  echo -e "\e[1m\e[31mERR\e[0m $*" >&2
-}
-
-echo_debug() {
-  [[ -z "${DEBUG}${VERBOSE}" ]] && return 0
-  echo -e "\e[1m\e[35mDBG\e[0m $*" >&2
-}
-
-echo_dryrun() {
-  echo -e "\e[1m\e[35mDRY\e[0m $*" >&2
-}
-
-echo_confirm() {
-  if [[ -n "$NOCONFIRM" ]]
-  then
-    return 0
-  fi
-
-  local msg_pre=$'\e[31mASK\e[0m'
-  local msg="${1:-"Continue?"}"
-  local yn
-  read -r -n1 -p "${msg_pre} ${msg} [y/N] " yn
-  [[ "$yn" =~ ^[yY] ]]
-  local rc="$?"
-  echo # append a NL
-  return "$rc"
 }
 
 ip() {

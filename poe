@@ -3,6 +3,9 @@
 # This script requires snmp-utils!
 # $ opkg install snmp-utils
 
+cd "$(cd "$(dirname "$0")" >/dev/null 2>&1; pwd -P)" || exit 9
+source lib/echo.sh
+
 if ! command -v snmpget &>/dev/null
 then
   echo 'snmpget binary not found. Install it with "opkg update && opkg install snmp-utils"' >&2
@@ -50,32 +53,6 @@ usage() {
   echo "on PORT        Turn on POE port"
   echo "off PORT       Turn off POE port"
   echo "status [PORT]  Get port status"
-}
-
-echo_info() {
-  echo -e "\e[1m\e[34mINF\e[0m $*" >&2
-}
-
-echo_success() {
-  echo -e "\e[1m\e[32mOK\e[0m $*" >&2
-}
-
-echo_warning() {
-  [[ -n "$NO_WARNING" ]] && return 0
-  echo -e "\e[1m\e[33mWRN\e[0m $*" >&2
-}
-
-echo_error() {
-  echo -e "\e[1m\e[31mERR\e[0m $*" >&2
-}
-
-echo_debug() {
-  [[ -z "${DEBUG}${VERBOSE}" ]] && return 0
-  echo -e "\e[1m\e[35mDBG\e[0m $*" >&2
-}
-
-echo_dryrun() {
-  echo -e "\e[1m\e[35mDRY\e[0m $*" >&2
 }
 
 poe_port_id() {
