@@ -120,6 +120,10 @@ then
       fi
       echo
     fi
+
+    echo "ENV:"
+    env
+    echo
   } > "$MAILFILE"
 
   # send mail
