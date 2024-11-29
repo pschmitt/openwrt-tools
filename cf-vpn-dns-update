@@ -10,6 +10,9 @@
 #
 # For zerotier auth, put the API token in /etc/zerotier/api-token
 
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+source lib/echo.sh || exit 2
+
 usage() {
   echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX] [--wildcard] [--clean] [--dry-run] [--debug] [--email EMAIL] [--api-key API_KEY] [--token API_TOKEN] [--zt-api-token API_TOKEN]"
 }

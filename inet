@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-cd "$(cd "$(dirname "$0")" >/dev/null 2>&1; pwd -P)" || exit 9
-source lib/echo.sh
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+source lib/echo.sh || exit 2
 
 WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
