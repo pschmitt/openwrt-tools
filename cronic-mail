@@ -14,6 +14,15 @@ log() {
   echo "$*" >&2
 }
 
+check_result() {
+  if [ -n "$PEDANTIC" ]
+  then
+    [ "$RC" -ne 0 ] || [ -s "$ERRFILE" ]
+  else
+    [ "$RC" -ne 0 ]
+  fi
+}
+
 resolve_mail_alias() {
   MAIL_ALIAS="$1"
   ALIAS_FILE="/etc/aliases"
@@ -73,7 +82,7 @@ else
   ERRFILE="$TRACEFILE"
 fi
 
-if [ "$RC" -ne 0 ] || [ -s "$ERRFILE" ]
+if ! check_result
 then
   {
     echo "COMMAND: $*"
