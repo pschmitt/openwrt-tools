@@ -12,7 +12,7 @@ echo_fancy() {
     return 0
   fi
 
-  echo -e "\e[1m\e[34m${prefix}\e[0m $*" >&2
+  echo -e "${color}${prefix}\e[0m $*" >&2
 }
 
 echo_info() {
