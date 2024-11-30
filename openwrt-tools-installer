@@ -1,13 +1,40 @@
 #!/usr/bin/env sh
 
-cd "$(dirname "$(readlink -f "$0")")" || return 9
+SELF_DIR="$(dirname "$(readlink -f "$0")")"
+
+# NOTE busybox rm does not implement -v, the output will be silent!
+cleanup() {
+  find "$DEST" \
+    -type l \
+    -exec sh -c '
+      self_dir="$1";
+      l="$2";
+      readlink "$l" | grep -qE "^${self_dir}" && rm -fv "$l"
+    ' shell "$SELF_DIR" {} \;
+}
+
+install() {
+  find "$SELF_DIR" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -type f \
+    -perm 755 \
+    -exec sh -c '
+      dest="$1";
+      fn="$(basename "$2")";
+      ln -sfv "$2" "${dest}/${fn}"
+    ' shell "$DEST" {} \;
+}
 
 DEST="${DEST:-/usr/local/bin}"
 mkdir -p "$DEST"
 
-find . \
-  -mindepth 1 \
-  -maxdepth 1 \
-  -type f \
-  -perm 755 \
-  -exec sh -c 'fn="$(basename "$2")"; ln -sfv "$2" "$1/$fn"' shell "$DEST" {} \;
+cleanup
+
+case "$1" in
+  *uninstall*|*remove*|*del*|*rm*)
+    exit "$?"
+    ;;
+esac
+
+install
