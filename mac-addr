@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+source lib/echo.sh || exit 2
+
+usage() {
+  echo "Usage: $(basename "$0") HOST"
+}
+
+is-an-ip-address() {
+  local val="$1"
+  if [[ -z "$val" && ! -t 0 ]]
+  then
+    val="$(cat)"
+  fi
+
+  # ipv4
+  if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  then
+    return 0
+  fi
+
+  # ipv6
+  if [[ "$val" =~ ^[0-9a-fA-F:]+$ ]]
+  then
+    return 0
+  fi
+
+  return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  if [[ "$#" -eq 0 ]]
+  then
+    usage >&2
+    exit 2
+  fi
+
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+
+  TARGET_HOST="$1"
+  TARGET_IP="$TARGET_HOST"
+
+  if ! is-an-ip-address "$TARGET_HOST"
+  then
+    TARGET_IP="$(dig A +short "$TARGET_HOST")"
+    if [[ -z "$TARGET_IP" ]]
+    then
+      echo_error "Failed to resolve $TARGET_HOST"
+      exit 1
+    fi
+  fi
+
+  awk -v ip="$TARGET_IP" '$0 ~ "^" ip " +" { print $4; exit }' /proc/net/arp \
+    | grep --color=never . # for the rc
+fi
