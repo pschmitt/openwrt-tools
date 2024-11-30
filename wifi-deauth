@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+source lib/echo.sh || exit 2
+
+usage() {
+  echo "Usage: $(basename "$0") HOST"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  if [[ "$#" -eq 0 ]]
+  then
+    usage >&2
+    exit 2
+  fi
+
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+
+  MAC_ADDR="$(mac-addr "$1")"
+  if [[ -z "$MAC_ADDR" ]]
+  then
+    echo_error "Failed to determine mac address for '$1'"
+    exit 1
+  fi
+
+  IFACE="${IFACE:-wlan0}"
+
+  # https://forum.archive.openwrt.org/viewtopic.php?id=62543
+  ubus call "hostapd.${IFACE}" del_client '{"addr":"'"${MAC_ADDR}"'", "reason":1, "deauth":true}'
+  # TODO add a ban-time option ("ban_time": 1000)
+fi

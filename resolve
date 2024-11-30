@@ -44,13 +44,21 @@ then
       ;;
   esac
 
-  TARGET_IP="$(resolve "$1")"
+  TARGET_HOST="$1"
+
+  if is-an-ip-address "$TARGET_HOST"
+  then
+    echo "$TARGET_HOST"
+    exit 0
+  fi
+
+  TARGET_IP="$(dig A +short "$TARGET_HOST")"
   if [[ -z "$TARGET_IP" ]]
   then
+    echo_error "Failed to resolve $TARGET_HOST"
     exit 1
   fi
 
-  awk -v ip="$TARGET_IP" \
-    '$0 ~ "^" ip " +" { print $4; exit }' \
-    /proc/net/arp | grep --color=never . # for the rc
+  echo "$TARGET_IP"
+  exit 0
 fi
