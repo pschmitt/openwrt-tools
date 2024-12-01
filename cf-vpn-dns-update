@@ -11,6 +11,7 @@
 # For zerotier auth, put the API token in /etc/zerotier/api-token
 
 cd "$(dirname "$(readlink -f "$0")")" || return 9
+# shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
 usage() {

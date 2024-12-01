@@ -4,6 +4,7 @@
 # $ opkg install snmp-utils
 
 cd "$(dirname "$(readlink -f "$0")")" || return 9
+# shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
 if ! command -v snmpget &>/dev/null

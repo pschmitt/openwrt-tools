@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 cd "$(dirname "$(readlink -f "$0")")" || return 9
+# shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
 mwan3_is_active() {
