@@ -330,7 +330,7 @@ vodafone_restart() {
   then
     echo_dryrun "curl -fsSL -X POST $HASS_VODAFONE_WEBHOOK_URL"
   else
-    if ! /srv/bin/poe flip vodafone
+    if ! /usr/local/bin/poe flip vodafone
     then
       echo_error "POE toggle with SNMP failed. Let's try Home Assistant."
       if ! curl -fsSL -X POST "$HASS_VODAFONE_WEBHOOK_URL"
