@@ -56,6 +56,7 @@ then
 fi
 
 DRY_RUN=${DRY_RUN:-}
+PEDANTIC=${PEDANTIC:-}
 USER=${USER:-$(id -un)}
 MAILTO=${MAILTO:-$(resolve_mail_alias "$USER")}
 
