@@ -122,6 +122,18 @@ then
       echo
     fi
 
+    echo "SETTINGS:"
+    echo "DRY_RUN=$DRY_RUN"
+    echo "PEDANTIC=$PEDANTIC"
+    echo "USER=$USER"
+    echo "MAILTO=$MAILTO"
+    echo "TMPDIR=$TMPDIR"
+    echo "OUTFILE=$OUTFILE"
+    echo "ERRFILE=$ERRFILE"
+    echo "TRACEFILE=$TRACEFILE"
+    echo "MAILFILE=$MAILFILE"
+
+
     echo "ENV:"
     env
     echo
