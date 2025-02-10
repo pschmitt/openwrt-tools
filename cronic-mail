@@ -17,9 +17,9 @@ log() {
 check_result() {
   if [ -n "$PEDANTIC" ]
   then
-    [ "$RC" -ne 0 ] || [ -s "$ERRFILE" ]
+    [ "$RC" -eq 0 ] && [ ! -s "$ERRFILE" ]
   else
-    [ "$RC" -ne 0 ]
+    [ "$RC" -eq 0 ]
   fi
 }
 
@@ -132,7 +132,7 @@ then
     echo "ERRFILE=$ERRFILE"
     echo "TRACEFILE=$TRACEFILE"
     echo "MAILFILE=$MAILFILE"
-
+    echo
 
     echo "ENV:"
     env
