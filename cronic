@@ -11,8 +11,9 @@ OUT="$TMP/cronic.out"
 ERR="$TMP/cronic.err"
 TRACE="$TMP/cronic.trace"
 
+export CRON=1 CRONIC=1
 set +e
-CRON=1 CRONIC=1 "$@" >"$OUT" 2>"$TRACE"
+"$@" >"$OUT" 2>"$TRACE"
 RC="$?"
 set -e
 

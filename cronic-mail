@@ -67,9 +67,10 @@ TRACEFILE="${TMPDIR}/cronic.trace"
 MAILFILE="${TMPDIR}/cronic.mail"
 
 # Execute the command
+export CRON=1 CRONIC=1
 set +e
 {
-  CRON=1 CRONIC=1 "$@" >"$OUTFILE" 2>"$TRACEFILE"
+  "$@" >"$OUTFILE" 2>"$TRACEFILE"
   RC="$?"
 }
 set -e
