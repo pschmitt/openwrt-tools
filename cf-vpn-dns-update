@@ -385,6 +385,12 @@ then
     exit 1
   fi
 
+  if [[ "${#VPN_HOSTS[@]}" -eq 0 ]]
+  then
+    echo "No VPN hosts found. This can't be right. Aborting." >&2
+    exit 1
+  fi
+
   for line in "${VPN_HOSTS[@]}"
   do
     read -r host ipv4 ipv6 <<< "$line"
