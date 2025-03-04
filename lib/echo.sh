@@ -1,12 +1,15 @@
 # vim: set ft=sh:
 # shellcheck shell=bash
 
+CRON="${CRON:-}"
+NO_COLOR="${NO_COLOR:-}"
+
 echo_fancy() {
   local prefix="$1"
   local color="$2"
   shift 2
 
-  if [[ -n "$NO_COLOR" ]]
+  if [[ -n "$NO_COLOR" || -n "$CRON" ]]
   then
     echo "$prefix $*" >&2
     return 0
