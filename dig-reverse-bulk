@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+usage() {
+  echo "Usage: $(basename "$0") IP"
+}
+
+reverse_resolve() {
+  local target_ip="$1"
+
+  # regular
+  dig +short -x "$target_ip" &
+  # netbird
+  resolve_nb "$target_ip" &
+  # tailscale
+  resolve_ts "$target_ip" &
+  # zerotier
+  resolve_zt "$target_ip" &
+
+  wait
+}
+
+# for the right port see:
+# $ jq -er .CustomDNSAddress /etc/netbird/config.json
+resolve_nb() {
+  local target_ip="$1"
+  dig +short @127.0.0.1 -p 11053 -x "$target_ip"
+}
+
+# Tailcale MagicDNS
+# https://tailscale.com/kb/1081/magicdns
+resolve_ts() {
+  local target_ip="$1"
+  dig +short @100.100.100.100 -x "$target_ip"
+}
+
+resolve_zt() {
+  # TODO: We currently lack a local zerotier dns server
+  # local target_ip="$1"
+  # dig +short @127.0.0.1 -p changeme -x "$target_ip"
+  echo "resolve_zt: NOT IMPLEMENTED" >&2
+  return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  IP="$1"
+
+  if [[ -z $IP ]]
+  then
+    usage >&2
+    exit 2
+  fi
+
+  RESULT=$(reverse_resolve "$IP" 2>/dev/null | sort -u)
+
+  if [[ -z $RESULT ]]
+  then
+    echo "Failed to reserve resolve $IP" >&2
+    exit 1
+  fi
+
+  echo "$RESULT"
+  exit 0
+fi
