@@ -189,7 +189,7 @@ cf_record_update() {
 
   if [[ -n "$DRY_RUN" ]]
   then
-    echo_dry_run "Create/update record: $type $fqdn $content"
+    echo_dryrun "Create/update record: $type $fqdn $content"
     return 0
   fi
 
@@ -453,7 +453,7 @@ then
 
     if [[ -n "$DRY_RUN" ]]
     then
-      echo_dry_run "Delete record: $RECORD_NAME"
+      echo_dryrun "Delete record: $RECORD_NAME"
       continue
     fi
 
