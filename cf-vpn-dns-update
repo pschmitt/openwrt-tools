@@ -10,7 +10,7 @@
 #
 # For zerotier auth, put the API token in /etc/zerotier/api-token
 
-cd "$(dirname "$(readlink -f "$0")")" || return 9
+cd "$(dirname "$(readlink -f -- "$0")")" || return 9
 # shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
@@ -315,6 +315,10 @@ then
         CLEAN=1
         shift
         ;;
+      -P|--ptr)
+        PTR=1
+        shift
+        ;;
       -S|--strip)
         STRIP_HOSTNAMES=1
         shift
@@ -371,6 +375,7 @@ then
   fi
 
   RECORDS="$(cf_get_records "$ZONE_NAME")"
+  PTR_RECORDS=()
   VPN_RECORDS=()
 
   if ! mapfile -t VPN_HOSTS < <(get_hosts)
@@ -395,6 +400,13 @@ then
     VPN_RECORDS+=("${record}.${ZONE_NAME}")
 
     cf_record_update "$record" A "$ipv4"
+
+    # Fake PTR record
+    if [[ -n "$PTR" ]]
+    then
+      cf_record_update "$ipv4" PTR "$record"
+      PTR_RECORDS+=("$ipv4")
+    fi
 
     if [[ -n "$HOST_WILDCARD" ]]
     then
@@ -422,19 +434,30 @@ then
 
   # remove all records that are not in the list
   VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
+  PTR_RECORDS_JSON="$(printf '%s\n' "${PTR_RECORDS[@]}" | jq -Rn '[inputs]')"
   # NOTE Do not use jq -e here as if will lead to a wrong exit code
   RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
     jq -r \
       --arg zone "$ZONE_NAME" \
       --arg suffix "$HOST_SUFFIX" \
-      --argjson hosts "$VPN_RECORDS_JSON" '
-      .[] | select(
-        (.Name | endswith($suffix + "." + $zone))
-        and
-        (.Type == "A" or .Type == "AAAA")
-        and
-        (.Name | IN($hosts[]) | not)
-      )
+      --argjson hosts "$VPN_RECORDS_JSON" \
+      --argjson ptrs "$PTR_RECORDS_JSON" \
+      '
+        .[] | select(
+          (
+            (.Name | endswith($suffix + "." + $zone))
+            and
+            (.Type == "A" or .Type == "AAAA")
+            and
+            (.Name | IN($hosts[]) | not)
+          ) or (
+            (.Content | endswith($suffix))
+            and
+            (.Type == "PTR")
+            and
+            ((.Name | gsub(("." + $zone + "$"); "") | IN($ptrs[]) | not))
+          )
+        )
     '
   )
 
