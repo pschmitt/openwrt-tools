@@ -18,6 +18,25 @@ usage() {
   echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX] [--wildcard] [--clean] [--dry-run] [--debug] [--email EMAIL] [--api-key API_KEY] [--token API_TOKEN] [--zt-api-token API_TOKEN]"
 }
 
+reverse_ipv4_record() {
+  local ip="$1"
+  IFS='.' read -r a b c d <<< "$ip"
+  echo "$d.$c.$b.$a"
+}
+
+reverse_ipv6_record() {
+  local ip="${1//:/}"
+  local reversed
+  local i
+  for (( i=${#ip} - 1; i>=0; i-- ))
+  do
+    reversed+="${ip:$i:1}."
+  done
+
+  # Remove the trailing dot
+  echo "${reversed%?}"
+}
+
 # Output format: <HOSTNAME> <IPV4> <IPV6>
 get_nb_hosts() {
   # FIXME The .netbirdIp field for the current host includes the network cidr
@@ -404,8 +423,9 @@ then
     # Fake PTR record
     if [[ -n "$PTR" ]]
     then
-      cf_record_update "$ipv4" PTR "$record"
-      PTR_RECORDS+=("$ipv4")
+      IPV4_REVERSED=$(reverse_ipv4_record "$ipv4")
+      cf_record_update "$IPV4_REVERSED" PTR "$record"
+      PTR_RECORDS+=("$IPV4_REVERSED")
     fi
 
     if [[ -n "$HOST_WILDCARD" ]]
@@ -417,9 +437,17 @@ then
     if [[ -n "$ipv6" ]]
     then
       cf_record_update "$record" AAAA "$ipv6"
+
       if [[ -n "$HOST_WILDCARD" ]]
       then
         cf_record_update "*.$record" AAAA "$ipv6"
+      fi
+
+      if [[ -n "$PTR" ]]
+      then
+        IPV6_REVERSED=$(reverse_ipv6_record "$ipv6")
+        cf_record_update "$IPV6_REVERSED" PTR "$record"
+        PTR_RECORDS+=("$IPV6_REVERSED")
       fi
     fi
   done
