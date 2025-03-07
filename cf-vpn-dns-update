@@ -424,7 +424,7 @@ then
     if [[ -n "$PTR" ]]
     then
       IPV4_REVERSED=$(reverse_ipv4_record "$ipv4")
-      cf_record_update "$IPV4_REVERSED" PTR "$record"
+      cf_record_update "$IPV4_REVERSED" PTR "${record}.${ZONE_NAME}"
       PTR_RECORDS+=("$IPV4_REVERSED")
     fi
 
@@ -446,7 +446,7 @@ then
       if [[ -n "$PTR" ]]
       then
         IPV6_REVERSED=$(reverse_ipv6_record "$ipv6")
-        cf_record_update "$IPV6_REVERSED" PTR "$record"
+        cf_record_update "$IPV6_REVERSED" PTR "${record}.${ZONE_NAME}"
         PTR_RECORDS+=("$IPV6_REVERSED")
       fi
     fi
