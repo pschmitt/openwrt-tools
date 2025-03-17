@@ -368,7 +368,7 @@ vodafone_restart() {
 }
 
 full_reboot() {
-  NO_CALLBACK=1 vodafone_restart && reboot
+  NO_CALLBACK=1 vodafone_restart "$@" && reboot
 }
 
 intf_loop() {
