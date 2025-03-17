@@ -44,6 +44,7 @@ usage() {
   echo "  reset [--force]  Reset wan connection (to $WAN_IPV4/$WAN_IPV6)"
   echo "  status           Show wan connection status"
   echo "  speedtest        Perform a librespeed speedtest for every WAN interface"
+  echo "  reboot           Reboot vodafone station, and the OpenWRT router"
   echo "  svc-restart SVC  Restart init.d services"
   echo "              all  *ALL* services: all from below"
   echo "              core core services: ${CORE_SERVICES[*]}"
@@ -341,6 +342,11 @@ vodafone_restart() {
     fi
   fi
 
+  if [[ -n "$NO_CALLBACK" ]]
+  then
+    return 0
+  fi
+
   ifdown "$WAN_IPV4"
   ifdown "$WAN_IPV6"
 
@@ -359,6 +365,10 @@ vodafone_restart() {
   # fix-route6
 
   core_svc_restart
+}
+
+full_reboot() {
+  NO_CALLBACK=1 vodafone_restart && reboot
 }
 
 intf_loop() {
@@ -893,6 +903,10 @@ main() {
       shift
       wan_reset "$@"
       ;;
+    reboot)
+      shift
+      full_reboot "$@"
+      ;;
     speedtest|speed)
       shift
       # wan_speedtest-cli "$@"
@@ -932,7 +946,7 @@ main() {
       shift
       ifup_multi all
       ;;
-    voda*|vdf*|reboot)
+    voda*|vdf*)
       shift
       vodafone_restart "$@"
       ;;
