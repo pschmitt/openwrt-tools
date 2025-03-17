@@ -21,16 +21,17 @@ usage() {
   echo "Usage: $(basename "$0") ACTION [ARGS]"
   echo
   echo "Global flags:"
-  echo "  -4             IPv4 only"
-  echo "  -6             IPv6 only"
-  echo "  -C, --no-color Disable colors"
-  echo "  -d, --debug    Enable debug output"
-  echo "  -f, --force    Force action"
-  echo "  -h, --help     Show this help"
-  echo "  -N, --no-warn  Disable warnings"
-  echo "  -v, --verbose  Enable verbose output"
-  echo "  -y, --yes      Disable confirmation"
-  echo "  -k, --dry-run  Dry run"
+  echo "  -4                IPv4 only"
+  echo "  -6                IPv6 only"
+  echo "  -C, --no-color    Disable colors"
+  echo "  -d, --debug       Enable debug output"
+  echo "  -f, --force       Force action"
+  echo "  -h, --help        Show this help"
+  echo "  -n, --no-callback Disable callbacks, just do the deed"
+  echo "  -N, --no-warn     Disable warnings"
+  echo "  -v, --verbose     Enable verbose output"
+  echo "  -y, --yes         Disable confirmation"
+  echo "  -k, --dry-run     Dry run"
   echo
   echo "ACTIONS:"
   echo "  curl [-- ARGS]   Check connectivity (generate_204 by default)"
@@ -807,6 +808,10 @@ main() {
         ;;
       -C|--no-color|--nocolor)
         NOCOLOR=1
+        shift
+        ;;
+      -n|--no-callback*|--nocallback*)
+        NO_CALLBACK=1
         shift
         ;;
       -y|--yes|--no-confirm|--noconfirm)
