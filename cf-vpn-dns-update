@@ -153,6 +153,7 @@ get_zt_hosts() {
       and
       # not-yet accept hosts will have no IP assigned
       # to add then you need to accept them first
+      # https://my.zerotier.com/login
       (.config.ipAssignments[] | length > 0)
     )
     | .name + " " + .config.ipAssignments[0]
