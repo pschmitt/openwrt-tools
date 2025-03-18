@@ -146,9 +146,16 @@ get_zt_hosts() {
   fi
 
   zt_network_members "$network_id" | jq -er '
-    sort_by(.name) | .[] |
-    select(.hidden == false) |
-    .name + " " + .config.ipAssignments[0]
+    sort_by(.name)
+    | .[]
+    | select(
+      .hidden == false
+      and
+      # not-yet accept hosts will have no IP assigned
+      # to add then you need to accept them first
+      (.config.ipAssignments[] | length > 0)
+    )
+    | .name + " " + .config.ipAssignments[0]
   '
 }
 
