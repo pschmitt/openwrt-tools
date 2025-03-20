@@ -190,6 +190,24 @@ ifdown_multi() {
   ifup_or_down_multi ifdown "$@"
 }
 
+perma_ignore_interfaces() {
+  local intf
+  for intf in "$@"
+  do
+    uci set "network.${intf}.custom_hotplug_no_default_route=1"
+  done
+  uci commit network
+}
+
+reset_perma_ignore_interfaces() {
+  local intf
+  for intf in "$@"
+  do
+    uci delete "network.${intf}.custom_hotplug_no_default_route"
+  done
+  uci commit network
+}
+
 fix-route6() {
   /srv/bin/ipv6-routes
 }
@@ -311,12 +329,25 @@ wan_reset() {
   ifup "$WAN_IPV4"
   ifup "$WAN_IPV6"
 
+  # TODO How about doing this unconditionally?
+  case "$1" in
+    --perm*)
+      reset_perma_ignore_interfaces "$WAN_IPV4" "$WAN_IPV6"
+      ;;
+  esac
+
   core_svc_restart
 }
 
 lte_failover() {
   ifdown "$WAN_IPV4"
   ifdown "$WAN_IPV6"
+
+  case "$1" in
+    --perm*)
+      perma_ignore_interfaces "$WAN_IPV4" "$WAN_IPV6"
+      ;;
+  esac
 
   ifup "$LTE_IPV4"
   ifup "$LTE_IPV6"
