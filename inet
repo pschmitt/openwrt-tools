@@ -194,6 +194,7 @@ perma_ignore_interfaces() {
   local intf
   for intf in "$@"
   do
+    echo_warning "Permanently disabling interface $intf"
     uci set "network.${intf}.custom_hotplug_no_default_route=1"
   done
   uci commit network
@@ -203,6 +204,7 @@ reset_perma_ignore_interfaces() {
   local intf
   for intf in "$@"
   do
+    echo_info "Re-enabling interface $intf"
     uci delete "network.${intf}.custom_hotplug_no_default_route"
   done
   uci commit network
