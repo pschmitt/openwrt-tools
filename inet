@@ -1112,7 +1112,9 @@ main() {
       ;;
     up)
       shift
-      ifup_multi all
+      local target=(all)
+      [[ -n $* ]] && target=("$@")
+      ifup_multi "${target[@]}"
       ;;
     voda*|vdf*)
       shift
