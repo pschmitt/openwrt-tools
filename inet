@@ -302,6 +302,7 @@ iface_enable_or_disable_multi() {
   fi
 
   "iface_${action}" "${target_interfaces[@]}"
+  ifup_multi "${target_interfaces[@]}"
 }
 
 iface_enable_multi() {
@@ -447,37 +448,29 @@ interface_is_disabled() {
 wan_reset() {
   if [[ -n "$FORCE" ]]
   then
-    ifdown "$WAN_IPV4"
-    ifdown "$WAN_IPV6"
+    ifdown_multi wan
   fi
 
+  # TODO remove this?
   ifdown "$LTE_IPV6"
 
-  ifup "$WAN_IPV4"
-  ifup "$WAN_IPV6"
-
-  # TODO How about doing this unconditionally?
-  case "$1" in
-    --perm*)
-      iface_enable "$WAN_IPV4" "$WAN_IPV6"
-      ;;
-  esac
+  iface_enable_multi wan
+  # NOTE iface_enable_multi already does ifup
+  # ifup_multi wan
 
   core_svc_restart
 }
 
 lte_failover() {
-  ifdown "$WAN_IPV4"
-  ifdown "$WAN_IPV6"
+  ifdown_multi lte
 
   case "$1" in
     --perm*)
-      iface_disable "$WAN_IPV4" "$WAN_IPV6"
+      iface_disable_multi wan
       ;;
   esac
 
-  ifup "$LTE_IPV4"
-  ifup "$LTE_IPV6"
+  ifup_multi lte
 
   core_svc_restart
 }
@@ -506,8 +499,7 @@ vodafone_restart() {
     return 0
   fi
 
-  ifdown "$WAN_IPV4"
-  ifdown "$WAN_IPV6"
+  ifdown_multi wan
 
   echo_info "Sleeping 5s"
   if [[ -n "$DRY_RUN" ]]
@@ -517,10 +509,8 @@ vodafone_restart() {
     sleep 5
   fi
 
-  ifup "$WAN_IPV4"
-  ifup "$WAN_IPV6"
-  ifup "$LTE_IPV4"
-  ifup "$LTE_IPV6"
+  ifup_multi wan
+  ifup_multi lte
   # fix-route6
 
   core_svc_restart
