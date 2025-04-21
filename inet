@@ -670,6 +670,12 @@ intf_loop() {
       continue
     fi
 
+    if interface_is_disabled "$owrt_intf"
+    then
+      echo_warning "Interface $owrt_intf is up, but disabled."
+      continue
+    fi
+
     if ! l3_intf="$(interface "$owrt_intf")" || [[ -z "$l3_intf" ]]
     then
       echo_warning "Unable to determine L3 interface of $owrt_intf"
