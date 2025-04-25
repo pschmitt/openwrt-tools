@@ -462,7 +462,7 @@ wan_reset() {
 }
 
 lte_failover() {
-  ifdown_multi lte
+  ifdown_multi wan
 
   case "$1" in
     --perm*)
