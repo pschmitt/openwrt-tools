@@ -451,9 +451,6 @@ wan_reset() {
     ifdown_multi wan
   fi
 
-  # TODO remove this?
-  ifdown "$LTE_IPV6"
-
   iface_enable_multi wan
   # NOTE iface_enable_multi already does ifup
   # ifup_multi wan
