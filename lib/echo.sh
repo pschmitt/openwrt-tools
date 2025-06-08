@@ -2,8 +2,9 @@
 # shellcheck shell=bash
 
 CRON="${CRON:-}"
-NO_COLOR="${NO_COLOR:-}"
 DEBUG="${DEBUG:-}"
+NO_COLOR="${NO_COLOR:-}"
+NO_WARNING="${NO_WARNING:-}"
 VERBOSE="${VERBOSE:-}"
 
 echo_fancy() {
