@@ -202,21 +202,31 @@ get_hosts() {
 }
 
 get_hosts_to_delete() {
+  local a_records_json ptr_records_json
+  a_records_json="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rnc '[inputs]')"
+  ptr_records_json="$(printf '%s\n' "${PTR_RECORDS[@]}" | jq -Rnc '[inputs]')"
+
   cf_get_records "$ZONE_NAME" | \
     jq -er \
       --arg zone "$ZONE_NAME" \
       --arg suffix "$HOST_SUFFIX" \
       --arg ignore "$IGNORE_REGEX" \
-      --argjson hosts "$VPN_RECORDS_JSON" \
-      --argjson ptrs "$PTR_RECORDS_JSON" \
+      --argjson hosts "$a_records_json" \
+      --argjson ptrs "$ptr_records_json" \
       '
         .[] | select(
+
+          # A/AAAA records
           (
+            # Filter by zone and type
             (.Name | endswith($suffix + "." + $zone))
             and
             (.Type == "A" or .Type == "AAAA")
+
+            # Check if entry is not in the hosts list
             and
             (.Name | IN($hosts[]) | not)
+
             # skip ignored hosts
             and (
               if $ignore == ""
@@ -226,13 +236,21 @@ get_hosts_to_delete() {
                 (.Name | test($ignore) | not)
               end
             )
-          ) or (
-            (.Content | endswith($suffix))
+          )
+
+          # PTR records
+          or (
+            # Filter by zone and type
+            (.Content | endswith($suffix + "." + $zone))
             and
             (.Type == "PTR")
+
             and
             ((.Name | gsub(("." + $zone + "$"); "") | IN($ptrs[]) | not))
-            # TODO skip ignored hosts here as well?
+
+            # TODO Skip ignored hosts here as well?
+            # and
+            # (.Content | test($ignore) | not)
           )
         )
     '
@@ -543,9 +561,6 @@ then
   fi
 
   # remove all records that are not in the list
-  VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
-  PTR_RECORDS_JSON="$(printf '%s\n' "${PTR_RECORDS[@]}" | jq -Rn '[inputs]')"
-  # NOTE Do not use jq -e here as if will lead to a wrong exit code
   RECORDS_TO_DELETE=$(get_hosts_to_delete)
 
   if [[ -z "$RECORDS_TO_DELETE" ]]
