@@ -132,7 +132,7 @@ get_zt_hosts() {
     network_id=$(zt_network_id "$network_name")
     if [[ -z "$network_id" ]]
     then
-      echo "Failed to find network with name '$network_name'" >&2
+      echo_error "Failed to find network with name '$network_name'" >&2
       exit 1
     fi
   else
@@ -141,7 +141,7 @@ get_zt_hosts() {
 
   if [[ -z "$network_id" ]]
   then
-    echo "Failed to find zt network ID" >&2
+    echo_error "Failed to find zt network ID" >&2
     return 1
   fi
 
@@ -174,7 +174,7 @@ get_hosts() {
       hosts=$(get_zt_hosts)
       ;;
     *)
-      echo "Missing --netbird, --tailscale or --zerotier" >&2
+      echo_error "Missing --netbird, --tailscale or --zerotier" >&2
       exit 2
       ;;
   esac
@@ -259,7 +259,7 @@ get_hosts_to_delete() {
 cf() {
   if [[ -n "$DEBUG" ]]
   then
-    echo "\$ flarectl $*" >&2
+    echo_debug "\$ flarectl $*" >&2
   fi
   export CF_API_TOKEN CF_API_EMAIL CF_API_KEY
   command flarectl "$@"
@@ -280,7 +280,7 @@ cf_record_update() {
     return 0
   fi
 
-  echo "Set record: $type $fqdn $content"
+  echo_info "Set record: $type $fqdn $content"
 
   local -a args=(
     --zone "$zone" --type "$type" --content "$content" --name "$name"
@@ -298,7 +298,7 @@ cf_record_update() {
 
   if [[ -z "$record_id" ]]
   then
-    echo "🆕 Create record: $type $fqdn $content"
+    echo_info "🆕 Create record: $type $fqdn $content"
     cf dns create "${args[@]}"
     local rc="$?"
     # Update records
@@ -311,18 +311,18 @@ cf_record_update() {
   record_content="$(cf_get_record_content "$record_id")"
   if [[ "$record_content" == "$content" ]]
   then
-    echo "✅ DNS record already up to date: $fqdn $type $content"
+    echo_success "✅ DNS record already up to date: $fqdn $type $content"
     return 0
   fi
 
-  echo "🆙 Updating record: $fqdn $type $content"
+  echo_info "🆙 Updating record: $fqdn $type $content"
   args+=(--id "$record_id")
   cf dns update "${args[@]}"
 }
 
 cf_delete_record() {
   local record_id="$1"
-  # echo "☠️ Deleting record: $record_id"
+  # echo_warning "☠️ Deleting record: $record_id"
   cf dns delete --zone "$ZONE_NAME" --id "$record_id"
 }
 
@@ -445,7 +445,7 @@ then
         ;;
       *)
         {
-          echo "Unsupported option: $1"
+          echo_error "Unsupported option: $1"
           usage
         } >&2
         exit 2
@@ -457,7 +457,7 @@ then
   then
     if [[ ! -e "$CF_CREDENTIALS_FILE" ]]
     then
-      echo "$CF_CREDENTIALS_FILE: file does not exist." >&2
+      echo_error "$CF_CREDENTIALS_FILE: file does not exist." >&2
       exit 2
     fi
 
@@ -477,7 +477,7 @@ then
 
   if [[ "${#VPN_HOSTS[@]}" -eq 0 ]]
   then
-    echo "No VPN hosts found. This can't be right. Aborting." >&2
+    echo_error "No VPN hosts found. This can't be right. Aborting." >&2
     exit 1
   fi
 
@@ -565,7 +565,7 @@ then
 
   if [[ -z "$RECORDS_TO_DELETE" ]]
   then
-    echo "No records to delete"
+    echo_info "No records to delete"
     exit "$RC"
   fi
 
@@ -574,7 +574,7 @@ then
   while read -r RECORD
   do
     read -r RECORD_ID RECORD_NAME <<<"$RECORD"
-    echo "☠️ Deleting record: $RECORD_NAME"
+    echo_warning "☠️ Deleting record: $RECORD_NAME"
 
     if [[ -n "$DRY_RUN" ]]
     then
