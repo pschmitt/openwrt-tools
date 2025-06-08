@@ -3,6 +3,8 @@
 
 CRON="${CRON:-}"
 NO_COLOR="${NO_COLOR:-}"
+DEBUG="${DEBUG:-}"
+VERBOSE="${VERBOSE:-}"
 
 echo_fancy() {
   local prefix="$1"
