@@ -15,7 +15,7 @@ cd "$(dirname "$(readlink -f -- "$0")")" || return 9
 source lib/echo.sh || exit 2
 
 usage() {
-  echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--suffix SUFFIX] [--wildcard] [--clean] [--dry-run] [--debug] [--email EMAIL] [--api-key API_KEY] [--token API_TOKEN] [--zt-api-token API_TOKEN]"
+  echo "Usage: $(basename "$0") [--netbird|--tailscale|--zerotier] [--zone ZONE_NAME] [--ignore REGEX] [--suffix SUFFIX] [--wildcard] [--clean] [--dry-run] [--debug] [--email EMAIL] [--api-key API_KEY] [--token API_TOKEN] [--zt-api-token API_TOKEN]"
 }
 
 reverse_ipv4_record() {
@@ -193,7 +193,49 @@ get_hosts() {
     hosts=$(sed -E 's/^([a-zA-Z0-9\-]+)-([0-9])\b/\1/' <<< "$hosts")
   fi
 
+  if [[ -n "$IGNORE_REGEX" ]]
+  then
+    hosts=$(grep -vE "$IGNORE_REGEX" <<< "$hosts")
+  fi
+
   printf '%s' "$hosts"
+}
+
+get_hosts_to_delete() {
+  cf_get_records "$ZONE_NAME" | \
+    jq -er \
+      --arg zone "$ZONE_NAME" \
+      --arg suffix "$HOST_SUFFIX" \
+      --arg ignore "$IGNORE_REGEX" \
+      --argjson hosts "$VPN_RECORDS_JSON" \
+      --argjson ptrs "$PTR_RECORDS_JSON" \
+      '
+        .[] | select(
+          (
+            (.Name | endswith($suffix + "." + $zone))
+            and
+            (.Type == "A" or .Type == "AAAA")
+            and
+            (.Name | IN($hosts[]) | not)
+            # skip ignored hosts
+            and (
+              if $ignore == ""
+              then
+                true
+              else
+                (.Name | test($ignore) | not)
+              end
+            )
+          ) or (
+            (.Content | endswith($suffix))
+            and
+            (.Type == "PTR")
+            and
+            ((.Name | gsub(("." + $zone + "$"); "") | IN($ptrs[]) | not))
+            # TODO skip ignored hosts here as well?
+          )
+        )
+    '
 }
 
 cf() {
@@ -290,7 +332,7 @@ cf_get_record_content() {
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
-  set -eu -o pipefail
+  set -u -o pipefail
 
   # flarectl resides in /srv/bin
   export PATH="$PATH:/srv/bin"
@@ -298,6 +340,7 @@ then
   DEBUG="${DEBUG:-}"
   DRY_RUN="${DRY_RUN:-}"
   CLEAN="${CLEAN:-}"
+  IGNORE_REGEX="${IGNORE_REGEX:-}"
   VPN_TYPE="${VPN_TYPE:-}"
   ZEROTIER_NETWORK_NAME="${ZEROTIER_NETWORK_NAME:-}"
   ZEROTIER_API_TOKEN="${ZEROTIER_API_TOKEN:-}"
@@ -341,6 +384,10 @@ then
       --clean*)
         CLEAN=1
         shift
+        ;;
+      -i|--ignore)
+        IGNORE_REGEX="$2"
+        shift 2
         ;;
       -P|--ptr)
         PTR=1
@@ -416,6 +463,7 @@ then
     exit 1
   fi
 
+  ERRORS=0
   for line in "${VPN_HOSTS[@]}"
   do
     read -r host ipv4 ipv6 <<< "$line"
@@ -426,41 +474,67 @@ then
     # store the hostnames for later (cleanup)
     VPN_RECORDS+=("${record}.${ZONE_NAME}")
 
-    cf_record_update "$record" A "$ipv4"
+    if ! cf_record_update "$record" A "$ipv4"
+    then
+      ERRORS=$((ERRORS + 1))
+    fi
 
     # Fake PTR record
     if [[ -n "$PTR" ]]
     then
       IPV4_REVERSED=$(reverse_ipv4_record "$ipv4")
-      cf_record_update "$IPV4_REVERSED" PTR "${record}.${ZONE_NAME}"
+      if ! cf_record_update "$IPV4_REVERSED" PTR "${record}.${ZONE_NAME}"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
       PTR_RECORDS+=("$IPV4_REVERSED")
     fi
 
     if [[ -n "$HOST_WILDCARD" ]]
     then
-      cf_record_update "*.${record}" A "$ipv4"
+      if ! cf_record_update "*.${record}" A "$ipv4"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
       VPN_RECORDS+=("*.${record}.${ZONE_NAME}")
     fi
 
     if [[ -n "$ipv6" ]]
     then
-      cf_record_update "$record" AAAA "$ipv6"
+      if ! cf_record_update "$record" AAAA "$ipv6"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
 
       if [[ -n "$HOST_WILDCARD" ]]
       then
-        cf_record_update "*.$record" AAAA "$ipv6"
+        if ! cf_record_update "*.$record" AAAA "$ipv6"
+        then
+          ERRORS=$((ERRORS + 1))
+        fi
       fi
 
       if [[ -n "$PTR" ]]
       then
         IPV6_REVERSED=$(reverse_ipv6_record "$ipv6")
-        cf_record_update "$IPV6_REVERSED" PTR "${record}.${ZONE_NAME}"
+        if ! cf_record_update "$IPV6_REVERSED" PTR "${record}.${ZONE_NAME}"
+        then
+          ERRORS=$((ERRORS + 1))
+        fi
         PTR_RECORDS+=("$IPV6_REVERSED")
       fi
     fi
   done
 
   RC="$?"
+  if [[ "$ERRORS" -eq 0 ]]
+  then
+    echo_success "There were no errors updating the records."
+    RC=0
+  else
+    echo_error "There were $ERRORS errors updating the records."
+    RC=1
+  fi
 
   # cleanup
   if [[ -z "$CLEAN" ]]
@@ -472,30 +546,7 @@ then
   VPN_RECORDS_JSON="$(printf '%s\n' "${VPN_RECORDS[@]}" | jq -Rn '[inputs]')"
   PTR_RECORDS_JSON="$(printf '%s\n' "${PTR_RECORDS[@]}" | jq -Rn '[inputs]')"
   # NOTE Do not use jq -e here as if will lead to a wrong exit code
-  RECORDS_TO_DELETE=$(cf_get_records "$ZONE_NAME" | \
-    jq -r \
-      --arg zone "$ZONE_NAME" \
-      --arg suffix "$HOST_SUFFIX" \
-      --argjson hosts "$VPN_RECORDS_JSON" \
-      --argjson ptrs "$PTR_RECORDS_JSON" \
-      '
-        .[] | select(
-          (
-            (.Name | endswith($suffix + "." + $zone))
-            and
-            (.Type == "A" or .Type == "AAAA")
-            and
-            (.Name | IN($hosts[]) | not)
-          ) or (
-            (.Content | endswith($suffix))
-            and
-            (.Type == "PTR")
-            and
-            ((.Name | gsub(("." + $zone + "$"); "") | IN($ptrs[]) | not))
-          )
-        )
-    '
-  )
+  RECORDS_TO_DELETE=$(get_hosts_to_delete)
 
   if [[ -z "$RECORDS_TO_DELETE" ]]
   then
