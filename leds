@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+leds_status() {
+  # shellcheck disable=SC1001
+  sort -n /sys/class/leds/rgb\:*/brightness | tail -1
+}
+
+leds_set() {
+  local intensity="${1:-255}"
+  local led
+
+  # shellcheck disable=SC1001
+  for led in /sys/class/leds/rgb\:*/brightness
+  do
+    if [[ "$intensity" -eq 0 ]]
+    then
+      echo "Turning off $led" >&2
+    else
+      echo "Turning on $led (intensity: $intensity)" >&2
+    fi
+    echo "$intensity" > "$led"
+  done
+}
+
+leds_on() {
+  leds_set 255
+}
+
+leds_off() {
+  leds_set 0
+}
+
+case "$1" in
+  on)
+    leds_on "$2"
+    ;;
+  off)
+    leds_off
+    ;;
+  *)
+    leds_status
+    ;;
+esac
