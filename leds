@@ -32,7 +32,7 @@ leds_off() {
 
 case "$1" in
   on)
-    leds_on "$2"
+    leds_set "$2"
     ;;
   off)
     leds_off
