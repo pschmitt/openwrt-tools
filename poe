@@ -43,7 +43,7 @@ PORT_ALIASES=(
   # 10
   10
   # 11
-  netgear-lte
+  netgear-wwan
   # 12
   12
 )
