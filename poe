@@ -23,7 +23,7 @@ SNMP_TIMEOUT="${SNMP_RETRIES:-5}"
 
 PORT_ALIASES=(
   # 1
-  ovm5-ap
+  brkn-ap
   # 2
   vodafone
   # 3
