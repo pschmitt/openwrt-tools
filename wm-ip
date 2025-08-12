@@ -12,7 +12,7 @@ mwan3_is_patched() {
   grep -q "PATCHED BY PSCHMITT" /usr/sbin/mwan3
 }
 
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 get_wan_interfaces() {
   local uci_path
   uci_path="$(uci show firewall | awk "/name=[\"']wan[\"']/" | sed -r "s#.name=[\"']wan['\"]##")"
