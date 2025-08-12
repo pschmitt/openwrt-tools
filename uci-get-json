@@ -5,39 +5,74 @@ usage() {
   echo "Example: $0 network"
 }
 
+uci_list_configs() {
+  uci show | cut -d. -f1 | sort -u
+}
+
 uci_json() {
   local config="$1"
-  ubus call uci get '{"config": "'"${config}"'"}' | jq -e '.'
+  local json_path="$2"
+
+  local request
+  request=$(jq -ncer --arg config "$config" '{ config: $config }')
+
+  ubus call uci get "$request" | \
+    jq -e ${JQ_RAW:+--raw-output} --arg path "$json_path" '
+      .values
+
+      | if ($path | length) > 0
+        then
+          ($path | split(".") | map(select(length > 0))) as $keys
+          | getpath($keys) // empty
+        end
+    '
 }
 
 main() {
+  local args
   while [[ -n "$*" ]]
   do
     case "$1" in
       help|h|-h|--help)
         usage
-        exit 0
+        return 0
+        ;;
+      list|-l|--list)
+        uci_list_configs
+        return 0
+        ;;
+      -r|--raw|--raw-output)
+        JQ_RAW=1
+        shift
         ;;
       --)
         shift
         break
         ;;
       *)
-        break
+        args+=("$1")
+        shift
         ;;
     esac
   done
 
-  config="$1"
+  set -- "${args[@]}"
+
+  local config="$1"
+  local json_path="$2"
 
   if [[ -z "$config" ]]
   then
-    echo "Error: CONFIG_SECTION is required."
-    usage
-    exit 2
+    {
+      echo "Error: CONFIG_path is required."
+      usage
+      echo "Available configurations:"
+      uci_list_configs
+    } >&2
+    return 2
   fi
 
-  uci_json "$config"
+  uci_json "$config" "$json_path"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
