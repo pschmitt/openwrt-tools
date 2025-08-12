@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 
 usage() {
-  echo "Usage: $0 CONFIG_SECTION"
-  echo "Example: $0 network"
+  echo "Usage: $0 [--raw-output] CONFIG_SECTION [JSON_PATH]"
+  echo "Examples:"
+  echo " - $0 --list"
+  echo " - $0 dhcp"
+  echo " - $0 --raw network lan.ipaddr"
 }
 
 uci_list_configs() {
