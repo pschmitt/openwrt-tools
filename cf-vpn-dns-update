@@ -187,10 +187,13 @@ get_hosts() {
 
   if [[ -n "$STRIP_HOSTNAMES" ]]
   then
-    # Remove the trailing number from the hostnames (if any)
+    # Remove the trailing numbers from the hostnames (if any)
     # these typically get assigned when multiple hosts have the same name
-    # eg: "myhost-1", "myhost-2", etc.
-    hosts=$(sed -E 's/^([a-zA-Z0-9\-]+)-([0-9])\b/\1/' <<< "$hosts")
+    # eg: "myhost-01" -> "myhost-01-130-220", etc.
+    # this should be fine with hostnames like myhost-01
+    hosts=$(sed -E 's/^([^-]+)-[0-9]+-[0-9]+$/\1/' <<< "$hosts")
+    # Below is the previous version
+    # hosts=$(sed -E 's/^([a-zA-Z0-9\-]+)-([0-9])\b/\1/' <<< "$hosts")
   fi
 
   if [[ -n "$IGNORE_REGEX" ]]
