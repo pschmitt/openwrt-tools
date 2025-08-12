@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+usage() {
+  echo "Usage: $0 CONFIG_SECTION"
+  echo "Example: $0 network"
+}
+
+uci_json() {
+  local config="$1"
+  ubus call uci get '{"config": "'"${config}"'"}' | jq -e '.'
+}
+
+main() {
+  while [[ -n "$*" ]]
+  do
+    case "$1" in
+      help|h|-h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  config="$1"
+
+  if [[ -z "$config" ]]
+  then
+    echo "Error: CONFIG_SECTION is required."
+    usage
+    exit 2
+  fi
+
+  uci_json "$config"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  main "$@"
+fi
