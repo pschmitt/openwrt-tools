@@ -191,7 +191,7 @@ get_hosts() {
     # these typically get assigned when multiple hosts have the same name
     # eg: "myhost-01" -> "myhost-01-130-220", etc.
     # this should be fine with hostnames like myhost-01
-    hosts=$(sed -E 's/^([^-]+)-[0-9]+-[0-9]+$/\1/' <<< "$hosts")
+    hosts=$(sed -E 's/^([^-]+)-([0-9]+)(-[0-9]+)+$/\1-\2/' <<< "$hosts")
     # Below is the previous version
     # hosts=$(sed -E 's/^([a-zA-Z0-9\-]+)-([0-9])\b/\1/' <<< "$hosts")
   fi
