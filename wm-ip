@@ -41,6 +41,11 @@ get_interface() {
     # NOTE modemmanager devices are addressed via real fs paths:
     # /sys/devices/platform/soc/soc:internal-regs/f1058000.usb/usb1/1-1
     mmcli -m any 2>/dev/null | sed -nr 's#.*, ([^ ]+) \(net\)#\1#p'
+  # default to returning the uci interface name
+  # this is necessary for WG interfaces, such as mullvad
+  elif [[ -z $value ]]
+  then
+    echo "$uci_name"
   else
     echo "$value"
   fi
@@ -52,8 +57,9 @@ get_interface() {
 WAN="wan"
 LTE="wwan"
 LTE_INT="wwan_int"
+VPN="mullvad"
 # shellcheck disable=SC2206
-UCI_INTERFACES=($WAN $LTE)
+UCI_INTERFACES=($WAN $LTE $VPN)
 
 resolve() {
   local host="$1"
