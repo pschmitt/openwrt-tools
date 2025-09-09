@@ -8,7 +8,7 @@ WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
 LTE_IPV4="${LTE_IPV4:-wwan}"
 LTE_IPV6="${LTE_IPV6:-wwan6}"
-WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6")
+WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6" mullvad)
 
 VPN_SERVICES=(netbird tailscale zerotier)
 DNS_SERVICES=(adguardhome dnsmasq unbound)
@@ -403,9 +403,11 @@ wan_status() {
 
 interface() {
   local owrt_intf="$1"
-  uci get "network.${owrt_intf}.device"
-  # Below only works if the interface is up
-  # ifstatus "$1" | jq -er '.l3_device'
+  if ! uci get "network.${owrt_intf}.device" 2>/dev/null
+  then
+    # Below only works if the interface is up
+    ifstatus "$owrt_intf" | jq -er '.l3_device'
+  fi
 }
 
 interface_ipv4() {
