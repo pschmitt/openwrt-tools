@@ -442,8 +442,10 @@ interface_is_up() {
 
 interface_is_disabled() {
   local intf="$1"
+
   local val
   val=$(uci get "network.${intf}.custom_hotplug_no_default_route" 2>/dev/null)
+
   [[ "$val" == "1" ]]
 }
 
