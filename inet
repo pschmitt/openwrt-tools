@@ -4,6 +4,8 @@ cd "$(dirname "$(readlink -f "$0")")" || return 9
 # shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
+export PATH="/srv/bin:$PATH"
+
 WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
 LTE_IPV4="${LTE_IPV4:-wwan}"
