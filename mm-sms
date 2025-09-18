@@ -485,10 +485,13 @@ watch_messages() {
       watch_warn "modem did not report own number"
     fi
   fi
+
   if ! sms_prune_all
   then
     watch_warn "failed to prune existing SMS messages"
   fi
+
+  enable_modem || watch_warn "failed to enable modem"
 
   while IFS= read -r line
   do
