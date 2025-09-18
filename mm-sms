@@ -563,6 +563,7 @@ main() {
       sms_send "$@"
       ;;
     list|ls)
+      # mmcli -m any --messaging-list-sms -J | jq -er '.["modem.messaging.sms"][]'
       mmcli_cmd --messaging-list-sms "$@"
       ;;
     read|get)
