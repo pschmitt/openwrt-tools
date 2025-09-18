@@ -34,7 +34,11 @@ WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 WATCH_CHUNK_SIZE="${CHUNK_SIZE:-140}"
 
-SMS_WHITELIST=()
+# Ensure SMS_WHITELIST is defined as an array if provided by the config
+if ! declare -p SMS_WHITELIST >/dev/null 2>&1
+then
+  SMS_WHITELIST=()
+fi
 
 # Allow overriding the whitelist via SMS_WHITELIST_OVERRIDE (comma or space separated digits)
 if [[ -n "${SMS_WHITELIST_OVERRIDE:-}" ]]
@@ -42,7 +46,10 @@ then
   # shellcheck disable=SC2206
   SMS_WHITELIST=( ${SMS_WHITELIST_OVERRIDE//,/ } )
 else
-  SMS_WHITELIST=("${SMS_WHITELIST_DEFAULT[@]}")
+  if (( ${#SMS_WHITELIST[@]} == 0 )) && declare -p SMS_WHITELIST_DEFAULT >/dev/null 2>&1
+  then
+    SMS_WHITELIST=("${SMS_WHITELIST_DEFAULT[@]}")
+  fi
 fi
 
 WATCH_FIFO=""
@@ -266,10 +273,15 @@ watch_canon_number() {
 watch_in_whitelist() {
   local num
   num="$(watch_canon_number "${1:-}")"
-  local allowed
+  if [[ -z "$num" ]]
+  then
+    return 1
+  fi
+  local allowed canon_allowed
   for allowed in "${SMS_WHITELIST[@]}"
   do
-    if [[ "$num" == "$allowed" ]]
+    canon_allowed="$(watch_canon_number "$allowed")"
+    if [[ -n "$canon_allowed" && "$num" == "$canon_allowed" ]]
     then
       return 0
     fi
@@ -414,23 +426,46 @@ watch_handle_sms() {
       continue
     fi
 
-    if [[ "$text" == "!"* ]] && watch_in_whitelist "$sender"
+    local log_text="$text"
+    log_text=${log_text//$'\r'/}
+    log_text=${log_text//$'\n'/\\n}
+    if [[ -z "$log_text" ]]
     then
-      local cmd="${text#!}"
-      while [[ "$cmd" == " "* ]]
-      do
-        cmd="${cmd# }"
-      done
-      if [[ -z "$cmd" ]]
+      log_text="<empty>"
+    elif (( ${#log_text} > 200 ))
+    then
+      log_text="${log_text:0:200}..."
+    fi
+    watch_log "received id=$id from $sender text='$log_text'"
+
+    local handled=0
+    if [[ "$text" == "!"* ]]
+    then
+      if watch_in_whitelist "$sender"
       then
-        watch_send_reply "$sender" "ERR: empty command"
+        local cmd="${text#!}"
+        while [[ "$cmd" == " "* ]]
+        do
+          cmd="${cmd# }"
+        done
+        if [[ -z "$cmd" ]]
+        then
+          watch_send_reply "$sender" "ERR: empty command"
+        else
+          watch_log "executing command from $sender: $cmd"
+          local output
+          output="$(watch_run_command "$cmd")"
+          watch_log "command from $sender finished rc=$WATCH_CMD_RC reason=${WATCH_CMD_REASON:-exit}"
+          watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
+        fi
+        handled=1
       else
-        watch_log "cmd from $sender: $cmd"
-        local output
-        output="$(watch_run_command "$cmd")"
-        watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
+        watch_log "command from $sender ignored (not whitelisted)"
       fi
-    else
+    fi
+
+    if (( handled == 0 ))
+    then
       local recipient="$OWN_NUMBER"
       if [[ -z "$recipient" ]]
       then
@@ -441,6 +476,7 @@ watch_handle_sms() {
         --arg sender "$sender" \
         --arg text "$text" \
         '{recipient:$recipient, sender:$sender, text:$text}')"
+      watch_log "forwarding id=$id from $sender to webhook"
       if ! curl -sS -m 10 -H 'Content-Type: application/json' \
         -X POST -d "$payload" "$WEBHOOK_URL" >/dev/null
       then
