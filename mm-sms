@@ -34,6 +34,8 @@ WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 WATCH_CHUNK_SIZE="${CHUNK_SIZE:-140}"
 
+QUIET="${QUIET:-}"
+
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
 then
@@ -63,6 +65,7 @@ Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
   -m, --modem MODEM    Modem identifier (default: $MODEM)
+  -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
 Commands:
@@ -71,6 +74,7 @@ Commands:
   read MESSAGE_ID            Show details for a specific SMS
   prune                      Delete all SMS messages from the modem
   enable                     Wait for ModemManager and enable the modem
+  status                     Show modem status summary
   watch                      Monitor incoming SMS and forward/execute actions
 USAGE
 }
@@ -390,6 +394,44 @@ get_smsc_number() {
   printf '%s' "$SMSC_NUMBER"
 }
 
+modem_status() {
+  local json state power reg
+
+  if ! json="$(mmcli_cmd -J 2>/dev/null)"
+  then
+    if [[ -z $QUIET ]]
+    then
+      error "failed to query modem status"
+    fi
+    return 1
+  fi
+
+  state="$(jq -r '(.modem.generic.state // empty)' <<<"$json")"
+  power="$(jq -r '(.modem.generic["power-state"] // empty)' <<<"$json")"
+  reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
+
+  if [[ -z "$state" ]]
+  then
+    state=unknown
+  fi
+  if [[ -z "$power" ]]
+  then
+    power=unknown
+  fi
+  if [[ -z "$reg" ]]
+  then
+    reg=unknown
+  fi
+
+  if [[ -z $QUIET ]]
+  then
+    printf 'modem state: %s, power: %s, reg: %s
+' "$state" "$power" "$reg"
+  fi
+
+  return 0
+}
+
 watch_handle_sms() {
   local id="$1"
   local tries=0
@@ -559,6 +601,10 @@ main() {
         MODEM="$2"
         shift 2
         ;;
+      -q|--quiet)
+        QUIET=1
+        shift
+        ;;
       -h|--help)
         usage
         return 0
@@ -622,6 +668,9 @@ main() {
       ;;
     enable)
       enable_modem
+      ;;
+    status)
+      modem_status
       ;;
     watch)
       watch_messages
