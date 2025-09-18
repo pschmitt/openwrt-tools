@@ -1,0 +1,600 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+
+# shellcheck source=lib/echo.sh
+source lib/echo.sh || exit 2
+
+CONFIG_FILE="${CONFIG_FILE:-/etc/mm-sms.conf}"
+# source configuration file
+# shellcheck source=/etc/mm-sms.conf
+if ! source "$CONFIG_FILE"
+then
+  echo_error "$SCRIPT_NAME: could not read configuration file $CONFIG_FILE"
+  exit 2
+fi
+
+MODEM="${MODEM:-any}"
+DEFAULT_SMSC_NUMBER=""
+OWN_NUMBER="${OWN_NUMBER:-}"
+SMSC_NUMBER="${SMSC_NUMBER:-}"
+SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
+SMS_SEND_RETRY_COUNT="${SMS_SEND_RETRY_COUNT:-2}"
+CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
+
+WEBHOOK_URL="${WEBHOOK_URL:-}"
+WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
+WATCH_MAX_RETRY="${MAX_RETRY:-3}"
+WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
+WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
+WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
+WATCH_CHUNK_SIZE="${CHUNK_SIZE:-140}"
+
+SMS_WHITELIST=()
+
+# Allow overriding the whitelist via SMS_WHITELIST_OVERRIDE (comma or space separated digits)
+if [[ -n "${SMS_WHITELIST_OVERRIDE:-}" ]]
+then
+  # shellcheck disable=SC2206
+  SMS_WHITELIST=( ${SMS_WHITELIST_OVERRIDE//,/ } )
+else
+  SMS_WHITELIST=("${SMS_WHITELIST_DEFAULT[@]}")
+fi
+
+WATCH_FIFO=""
+WATCH_DBUS_PID=""
+WATCH_CMD_RC=0
+WATCH_CMD_REASON="exit"
+
+usage() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
+
+Options:
+  -m, --modem MODEM    Modem identifier (default: $MODEM)
+  -h, --help           Show this help and exit
+
+Commands:
+  send RECIPIENT [TEXT|-]    Send SMS; use '-' to read TEXT from stdin
+  list                       List SMS messages on the modem
+  read MESSAGE_ID            Show details for a specific SMS
+  prune                      Delete all SMS messages from the modem
+  enable                     Wait for ModemManager and enable the modem
+  watch                      Monitor incoming SMS and forward/execute actions
+USAGE
+}
+
+error() {
+  echo_error "$SCRIPT_NAME: $*"
+}
+
+mmcli_cmd() {
+  command mmcli --modem "$MODEM" "$@"
+}
+
+sms_read() {
+  local msg_id="$1"
+  mmcli_cmd --sms "$msg_id"
+}
+
+sms_send() {
+  if [[ $# -lt 2 ]]
+  then
+    usage >&2
+    return 2
+  fi
+
+  local recipient="$1"
+  shift
+  local text
+
+  if [[ "$1" == "-" ]]
+  then
+    shift
+    text="$(cat)"
+  else
+    text="$*"
+  fi
+
+  if [[ -z "$text" ]]
+  then
+    error "no SMS text provided"
+    return 2
+  fi
+
+  text="${text//\"/\\\"}"
+  echo "text=$text" >&2
+
+  # DIRTYFIX For Home Assistant SMS notifications
+  text="$(echo -e "$text")"
+
+  local sms_id
+  local smsc
+  smsc="$(get_smsc_number)"
+  local attempt=1
+  local max_attempts=$((SMS_SEND_RETRY_COUNT + 1))
+
+  while (( attempt <= max_attempts ))
+  do
+    sms_id=""
+    if ! sms_id="$(mmcli_cmd --messaging-create-sms="text=\"$text\",number=$recipient,smsc=$smsc" \
+      | grep -o "[0-9]*$")"
+    then
+      if (( attempt == max_attempts ))
+      then
+        error "failed to create SMS after $max_attempts attempts"
+        return 1
+      fi
+      echo_warning "[mm-sms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    if [[ -z "$sms_id" ]]
+    then
+      if (( attempt == max_attempts ))
+      then
+        error "failed to create SMS after $max_attempts attempts"
+        return 1
+      fi
+      echo_warning "[mm-sms:send] received empty SMS id (attempt $attempt/$max_attempts), retrying"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
+    then
+      return 0
+    fi
+
+    if (( attempt == max_attempts ))
+    then
+      error "failed to send SMS after $max_attempts attempts"
+      return 1
+    fi
+
+    echo_warning "[mm-sms:send] failed to send SMS (attempt $attempt/$max_attempts), retrying"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+sms_prune_all() {
+  local ids
+  if ! ids="$(mmcli_cmd --messaging-list-sms -J 2>/dev/null | jq -r '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null)"
+  then
+    return 0
+  fi
+
+  if [[ -z "$ids" ]]
+  then
+    return 0
+  fi
+
+  while IFS= read -r sms_id
+  do
+    [[ -z "$sms_id" ]] && continue
+    if ! mmcli_cmd --messaging-delete-sms="$sms_id" >/dev/null 2>&1
+    then
+      error "failed to delete SMS $sms_id"
+    fi
+  done <<< "$ids"
+}
+
+enable_log() {
+  echo_info "[mm-sms:enable] $*"
+}
+
+enable_modem() {
+  local max_wait=600
+  local sleep_period=2
+  local elapsed=0
+
+  enable_log "waiting for D-Bus system socket"
+  until [[ -S /var/run/dbus/system_bus_socket ]]
+  do
+    if (( elapsed >= max_wait ))
+    then
+      echo_warning "[mm-sms:enable] timeout waiting for D-Bus socket"
+      return 1
+    fi
+    sleep "$sleep_period"
+    elapsed=$((elapsed + sleep_period))
+  done
+
+  enable_log "waiting for ModemManager"
+  elapsed=0
+  until mmcli -L >/dev/null 2>&1
+  do
+    if (( elapsed >= max_wait ))
+    then
+      echo_warning "[mm-sms:enable] timeout waiting for ModemManager"
+      return 1
+    fi
+    sleep "$sleep_period"
+    elapsed=$((elapsed + sleep_period))
+  done
+
+  if mmcli_cmd --enable >/dev/null 2>&1
+  then
+    enable_log "modem enabled"
+    return 0
+  fi
+
+  echo_warning "[mm-sms:enable] failed to enable modem"
+  return 1
+}
+
+watch_log() {
+  echo_info "[mm-sms:watch] $*"
+}
+
+watch_warn() {
+  echo_warning "[mm-sms:watch] $*"
+}
+
+watch_cleanup() {
+  if [[ -n "$WATCH_DBUS_PID" ]]
+  then
+    if ! kill "$WATCH_DBUS_PID" 2>/dev/null
+    then
+      watch_warn "could not stop dbus-monitor (pid $WATCH_DBUS_PID)"
+    fi
+    WATCH_DBUS_PID=""
+  fi
+  if [[ -n "$WATCH_FIFO" ]]
+  then
+    if ! rm -f "$WATCH_FIFO" 2>/dev/null
+    then
+      watch_warn "could not remove fifo $WATCH_FIFO"
+    fi
+    WATCH_FIFO=""
+  fi
+}
+
+watch_canon_number() {
+  local n="${1:-}"
+  n="${n//[^0-9]/}"
+  printf '%s' "$n"
+}
+
+watch_in_whitelist() {
+  local num
+  num="$(watch_canon_number "${1:-}")"
+  local allowed
+  for allowed in "${SMS_WHITELIST[@]}"
+  do
+    if [[ "$num" == "$allowed" ]]
+    then
+      return 0
+    fi
+  done
+  return 1
+}
+
+watch_send_reply() {
+  local to="$1"
+  local msg="$2"
+  local len=${#msg}
+  local idx=0
+
+  while (( idx < len ))
+  do
+    local part="${msg:idx:WATCH_CHUNK_SIZE}"
+    if ! sms_send "$to" "$part"
+    then
+      watch_warn "failed to send reply chunk to $to"
+      return 1
+    fi
+    idx=$((idx + WATCH_CHUNK_SIZE))
+    sleep 1
+  done
+}
+
+watch_run_command() {
+  local cmd="$1"
+  local output rc reason="exit"
+  rc=0
+
+  if command -v timeout >/dev/null 2>&1
+  then
+    if ! output="$(timeout -k "${WATCH_CMD_KILL_TIMEOUT}s" "${WATCH_CMD_TIMEOUT}s" bash -c "$cmd" 2>&1)"
+    then
+      rc=$?
+    fi
+    if (( rc == 124 ))
+    then
+      reason="timeout"
+    elif (( rc >= 128 ))
+    then
+      reason="killed"
+    fi
+  else
+    if ! output="$(bash -c "$cmd" 2>&1)"
+    then
+      rc=$?
+    fi
+  fi
+
+  WATCH_CMD_RC=$rc
+  WATCH_CMD_REASON=$reason
+
+  output="${output%$'\n'}"
+  if (( ${#output} > CMD_OUTPUT_MAX_LEN ))
+  then
+    output="${output:0:CMD_OUTPUT_MAX_LEN}\n…(truncated)…"
+  fi
+
+  printf '%s' "$output"
+}
+
+load_own_number() {
+  if [[ -n "$OWN_NUMBER" ]]
+  then
+    return 0
+  fi
+
+  local json number
+  if ! json="$(mmcli_cmd -J 2>/dev/null)"
+  then
+    return 1
+  fi
+
+  number="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
+  if [[ -z "$number" ]]
+  then
+    return 2
+  fi
+
+  if [[ "$number" != +* ]]
+  then
+    number="+$number"
+  fi
+
+  OWN_NUMBER="$number"
+  return 0
+}
+
+get_smsc_number() {
+  if [[ -n "$SMSC_NUMBER" ]]
+  then
+    printf '%s' "$SMSC_NUMBER"
+    return 0
+  fi
+
+  if load_own_number
+  then
+    SMSC_NUMBER="$OWN_NUMBER"
+    printf '%s' "$SMSC_NUMBER"
+    return 0
+  fi
+
+  SMSC_NUMBER="$DEFAULT_SMSC_NUMBER"
+  printf '%s' "$SMSC_NUMBER"
+}
+
+watch_handle_sms() {
+  local id="$1"
+  local tries=0
+  local js state pdu sender text payload
+
+  while :
+  do
+    if ! js="$(mmcli_cmd --sms "$id" -J 2>/dev/null)"
+    then
+      return
+    fi
+
+    state="$(jq -r '.sms.properties.state // empty' <<<"$js")"
+    pdu="$(jq -r '.sms.properties."pdu-type" // empty' <<<"$js")"
+    sender="$(jq -r '.sms.content.number // empty' <<<"$js")"
+    text="$(jq -r '.sms.content.text // empty' <<<"$js")"
+
+    if [[ "$state" != "received" && "$pdu" != "deliver" ]]
+    then
+      watch_log "ignore id=$id (state=$state pdu=$pdu)"
+      return
+    fi
+
+    if [[ -n "$OWN_NUMBER" && "$sender" == "$OWN_NUMBER" ]]
+    then
+      watch_log "skip self-sent id=$id"
+      return
+    fi
+
+    if [[ -z "$text" && $tries -lt $WATCH_MAX_RETRY ]]
+    then
+      tries=$((tries + 1))
+      sleep "$WATCH_RETRY_SLEEP"
+      continue
+    fi
+
+    if [[ "$text" == "!"* ]] && watch_in_whitelist "$sender"
+    then
+      local cmd="${text#!}"
+      while [[ "$cmd" == " "* ]]
+      do
+        cmd="${cmd# }"
+      done
+      if [[ -z "$cmd" ]]
+      then
+        watch_send_reply "$sender" "ERR: empty command"
+      else
+        watch_log "cmd from $sender: $cmd"
+        local output
+        output="$(watch_run_command "$cmd")"
+        watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
+      fi
+    else
+      local recipient="$OWN_NUMBER"
+      if [[ -z "$recipient" ]]
+      then
+        recipient="$(get_smsc_number)"
+      fi
+      payload="$(jq -n \
+        --arg recipient "$recipient" \
+        --arg sender "$sender" \
+        --arg text "$text" \
+        '{recipient:$recipient, sender:$sender, text:$text}')"
+      if ! curl -sS -m 10 -H 'Content-Type: application/json' \
+        -X POST -d "$payload" "$WEBHOOK_URL" >/dev/null
+      then
+        watch_warn "webhook delivery failed for id=$id"
+      fi
+    fi
+
+    if (( WATCH_DELETE_AFTER == 1 ))
+    then
+      if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1
+      then
+        watch_warn "failed to delete processed SMS $id"
+      fi
+    fi
+    return
+  done
+}
+
+watch_messages() {
+  export PATH="/usr/local/bin:/srv/bin:$PATH"
+  trap watch_cleanup EXIT INT TERM
+
+  WATCH_FIFO="/tmp/smsbus.$$"
+  mkfifo "$WATCH_FIFO"
+
+  local filter="type='signal',interface='org.freedesktop.ModemManager1.Modem.Messaging',member='Added'"
+  dbus-monitor --system "$filter" >"$WATCH_FIFO" &
+  WATCH_DBUS_PID=$!
+
+  if load_own_number
+  then
+    if [[ -n "$OWN_NUMBER" ]]
+    then
+      watch_log "own number = $OWN_NUMBER"
+    fi
+  else
+    local load_rc=$?
+    if (( load_rc == 1 ))
+    then
+      watch_warn "could not query modem for own number"
+    else
+      watch_warn "modem did not report own number"
+    fi
+  fi
+  if ! sms_prune_all
+  then
+    watch_warn "failed to prune existing SMS messages"
+  fi
+
+  while IFS= read -r line
+  do
+    if [[ "$line" == *"/org/freedesktop/ModemManager1/SMS/"* ]]
+    then
+      local local_path="${line#*\"}"
+      local_path="${local_path%%\"*}"
+      local id="${local_path##*/}"
+      if [[ "$id" =~ ^[0-9]+$ ]]
+      then
+        watch_handle_sms "$id"
+      fi
+    fi
+  done <"$WATCH_FIFO"
+}
+
+main() {
+  local command=""
+
+  while [[ $# -gt 0 ]]
+  do
+    case "$1" in
+      -m|--modem)
+        if [[ $# -lt 2 ]]
+        then
+          error "missing value for $1"
+          return 2
+        fi
+        MODEM="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      send|list|ls|read|get|prune|clear|enable|watch)
+        command="$1"
+        shift
+        break
+        ;;
+      -*)
+        error "unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+      *)
+        command="$1"
+        shift
+        break
+        ;;
+    esac
+  done
+
+  if [[ -z "$command" ]]
+  then
+    if [[ $# -gt 0 ]]
+    then
+      command="$1"
+      shift
+    else
+      usage >&2
+      return 1
+    fi
+  fi
+
+  case "$command" in
+    send)
+      sms_send "$@"
+      ;;
+    list|ls)
+      mmcli_cmd --messaging-list-sms "$@"
+      ;;
+    read|get)
+      if [[ $# -lt 1 ]]
+      then
+        error "No SMS ID/path specified"
+        if ! mmcli_cmd --messaging-list-sms >&2
+        then
+          error "failed to list SMS messages"
+        fi
+        return 1
+      fi
+      sms_read "$@"
+      ;;
+    prune|clear)
+      sms_prune_all
+      ;;
+    enable)
+      enable_modem
+      ;;
+    watch)
+      watch_messages
+      ;;
+    *)
+      error "unknown command: $command"
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]
+then
+  main "$@"
+fi
