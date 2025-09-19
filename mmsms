@@ -87,6 +87,7 @@ Commands:
   restart                   Restart modemmanager, issue quectel reset, re-enable modem
   watch                     Monitor incoming SMS and forward/execute actions
   number|phone              Print modem's own phone number
+  (default: status)
 USAGE
 }
 
@@ -1218,11 +1219,11 @@ main() {
 
   if (( ${#ARGS[@]} == 0 ))
   then
-    usage >&2
-    return 1
+    command="status"
+  else
+    command="${ARGS[0]}"
+    ARGS=("${ARGS[@]:1}")
   fi
-  command="${ARGS[0]}"
-  ARGS=("${ARGS[@]:1}")
 
   case "$command" in
     send|s)
