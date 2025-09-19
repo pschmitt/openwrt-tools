@@ -68,7 +68,7 @@ Options:
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB
   -d, --debug          Enable debug output
-  -j, --json           Output JSON (for list)
+  -j, --json           Output JSON (for list/status)
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
@@ -93,7 +93,7 @@ error() {
 }
 
 # Log and run generic mmcli calls (no implicit --modem)
-mmcli_call() {
+mmcli() {
   echo_debug "[mmcli] mmcli $*"
   command mmcli "$@"
 }
@@ -132,7 +132,7 @@ get_modem_id() {
   sel="${sel_raw,,}"
 
   local list_json ids id json
-  if ! list_json="$(mmcli_call -L -J)"
+  if ! list_json="$(mmcli -L -J)"
   then
     error "could not query modem list via mmcli"
     return 1
@@ -150,7 +150,7 @@ get_modem_id() {
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
-    if ! json="$(mmcli_call -m "$id" -J)"
+    if ! json="$(mmcli -m "$id" -J)"
     then
       continue
     fi
@@ -193,7 +193,7 @@ get_modem_id() {
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
-    if ! json="$(mmcli_call -m "$id" -J)"
+    if ! json="$(mmcli -m "$id" -J)"
     then
       continue
     fi
@@ -402,6 +402,12 @@ sms_list_pretty() {
   mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
   if (( ${#ids[@]} == 0 ))
   then
+    if [[ -n "$JSON_OUTPUT" ]]
+    then
+      printf '[]\n'
+    else
+      echo_info "[mm-sms:list] no SMS messages"
+    fi
     return 0
   fi
 
@@ -475,7 +481,7 @@ enable_modem() {
 
   enable_log "waiting for ModemManager"
   elapsed=0
-  until mmcli_call -L >/dev/null 2>&1
+  until mmcli -L >/dev/null 2>&1
   do
     if (( elapsed >= max_wait ))
     then
@@ -494,7 +500,7 @@ enable_modem() {
   do
     list_json=""
     modem_count=0
-    if list_json="$(mmcli_call -L -J)"
+    if list_json="$(mmcli -L -J)"
     then
       modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
       if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
@@ -744,7 +750,7 @@ get_smsc_number() {
 }
 
 modem_status() {
-  local json state power reg signal carrier
+  local json state power reg signal carrier own smsc
 
   if ! json="$(mmcli_cmd -J)"
   then
@@ -760,6 +766,7 @@ modem_status() {
   reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
   signal="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
   carrier="$(jq -r '(.modem["3gpp"]["operator-name"] // .modem["3gpp"]["operator-code"] // .modem.cdma.sid // empty)' <<<"$json")"
+  own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
 
   if [[ -z "$state" ]]
   then
@@ -783,6 +790,40 @@ modem_status() {
   then
     carrier=unknown
   fi
+  if [[ -n "$own" && "$own" != +* ]]
+  then
+    own="+$own"
+  fi
+  if [[ -z "$own" ]]
+  then
+    own=unknown
+  else
+    OWN_NUMBER="$own"
+  fi
+
+  # Derive SMSC (may use OWN_NUMBER or config); do not fail hard if empty
+  smsc="$(get_smsc_number || true)"
+  if [[ -z "$smsc" ]]
+  then
+    smsc=unknown
+  fi
+
+  # JSON output if requested
+  if [[ -n "$JSON_OUTPUT" ]]
+  then
+    local sig_num_json
+    sig_num_json="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+    jq -n \
+      --arg state "$state" \
+      --arg power "$power" \
+      --arg registered "$reg" \
+      --arg carrier "$carrier" \
+      --arg phone "$own" \
+      --arg smsc "$smsc" \
+      --arg sig "$sig_num_json" \
+      '{state:$state, power:$power, registered:$registered, carrier:$carrier, phone:$phone, smsc:$smsc, signal: ($sig|tonumber?)}'
+    return 0
+  fi
 
   if [[ -z $QUIET ]]
   then
@@ -800,7 +841,7 @@ modem_status() {
     }
 
     # Choose colors
-    local state_color power_color reg_color sig_color carrier_color
+    local state_color power_color reg_color sig_color carrier_color phone_color smsc_color
     case "${state,,}" in
       connected|registered|enabled|online|on) state_color='1;32';;   # bold green
       searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
@@ -841,12 +882,16 @@ modem_status() {
     fi
 
     carrier_color='1;34' # bold blue
+    phone_color='1;34'
+    smsc_color='1;34'
 
     printf 'modem state: %s\n' "$(colorize "$state_color" "$state")"
     printf 'power: %s\n' "$(colorize "$power_color" "$power")"
     printf 'registered: %s\n' "$(colorize "$reg_color" "$reg")"
     printf 'signal: %s\n' "$(colorize "$sig_color" "$signal")"
     printf 'carrier: %s\n' "$(colorize "$carrier_color" "$carrier")"
+    printf 'phone: %s\n' "$(colorize "$phone_color" "$own")"
+    printf 'smsc: %s\n' "$(colorize "$smsc_color" "$smsc")"
   fi
 
   return 0
@@ -1144,7 +1189,7 @@ main() {
       echo_info "[mm-sms] selected modem: any"
     else
       local _mjson _mln
-      _mjson="$(mmcli_call -m "$MODEM" -J || true)"
+      _mjson="$(mmcli -m "$MODEM" -J || true)"
       if [[ -n "$_mjson" ]]
       then
         _mln="$(jq -r '
