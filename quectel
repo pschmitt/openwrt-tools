@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# See also
+# https://openwrt.org/docs/guide-user/network/wan/wwan/ltedongle
+
+usage() {
+  echo "Usage: quectel CMD [ARGS]"
+  echo ""
+  echo "Commands:"
+  echo "  at [CMD]      Execute AT command"
+  echo "  curl ARGS     cURL through lte nic"
+  echo "  ip            IP Status"
+  echo "  status        LTE Status info (uqmi)"
+  echo "  uqmi ARGS     Execute uqmi command"
+  echo "  qmicli ARGS   Execute qmicli command"
+  echo "  reboot        Reboot modem"
+}
+
+echo_info() {
+  echo -e "\e[34m${*}\e[0m" >&2
+}
+
+uqmi() {
+  # local qmi_device="qrtr://0"
+  local qmi_device="/dev/cdc-wdm0"
+  echo_info "\$ uqmi -d $qmi_device $*"
+  command uqmi -d "$qmi_device" "$@"
+}
+
+qmicli() {
+  local qmi_device="/dev/cdc-wdm0"
+  echo_info "\$ qmicli -d $qmi_device $*"
+  command qmicli -d "$qmi_device" "$@"
+}
+
+socat_cmd() {
+  socat - /dev/ttyUSB2,crnl
+}
+
+at_command() {
+  local c="$*"
+  echo_info "Issuing AT command $c"
+  echo -n "$c" | socat_cmd
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  case "$1" in
+    help|h|-h|--help)
+      usage
+      exit 0
+      ;;
+    status)
+      qmicli --uim-get-card-status
+      uqmi --get-imei
+      uqmi --get-signal-info
+      uqmi --get-data-status
+      uqmi --get-current-settings
+      /srv/bin/wm-ip lte
+      ;;
+    ip*)
+      ip a s wwan0
+      ;;
+    curl)
+      shift
+      echo_info \$ curl --interface wwan0 "$@"
+      curl --interface wwan0 "$@"
+      ;;
+    reset|reboot)
+      at_command 'AT+QPOWD=0'
+      ;;
+    at|cmd|socat)
+      shift
+      if [[ -z "$*" ]]
+      then
+        echo_info "Starting interactive socat session"
+        socat_cmd
+        exit "$?"
+      fi
+
+      at_command "$*"
+      ;;
+    qmicli)
+      shift
+      if [[ -z "$*" ]]
+      then
+        {
+          echo "ERROR: Missing command"
+          usage
+        } >&2
+        exit 2
+      fi
+
+      qmicli "$*"
+      ;;
+    *qmi*)
+      shift
+      if [[ -z "$*" ]]
+      then
+        {
+          echo "ERROR: Missing command"
+          usage
+        } >&2
+        exit 2
+      fi
+
+      uqmi "$*"
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
