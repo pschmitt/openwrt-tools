@@ -11,7 +11,7 @@ source lib/echo.sh || exit 2
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/mmsms.conf}"
 # source configuration file
-# shellcheck source=/etc/mm-sms.conf
+# shellcheck disable=SC1090
 if ! source "$CONFIG_FILE"
 then
   echo_error "$SCRIPT_NAME: could not read configuration file $CONFIG_FILE"
