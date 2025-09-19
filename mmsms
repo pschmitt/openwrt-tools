@@ -35,6 +35,7 @@ WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
+RAW_OUTPUT="${RAW_OUTPUT:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -68,7 +69,8 @@ Options:
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB
   -d, --debug          Enable debug output
-  -j, --json           Output JSON (for list/status)
+  -j, --json           Output JSON (for list/status/read)
+      --raw            Read: output mmcli JSON verbatim
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
@@ -233,6 +235,42 @@ sms_read() {
   mmcli_cmd --sms "$msg_id"
 }
 
+sms_read_json() {
+  local msg_id="$1"
+  local js pdu msg_type
+  if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
+  then
+    return 1
+  fi
+
+  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+  case "${pdu,,}" in
+    deliver) msg_type="received" ;;
+    submit) msg_type="sent" ;;
+    status-report) msg_type="report" ;;
+    *) msg_type="$pdu" ;;
+  esac
+
+  jq --arg type "$msg_type" '
+    .sms as $s
+    | {
+        id: ($s["dbus-path"] | split("/")[-1] | tonumber?),
+        sender: ($s.content.number // ""),
+        text: ($s.content.text // ""),
+        class: ($s.properties.class // ""),
+        state: ($s.properties.state // ""),
+        pdu: ($s.properties["pdu-type"] // ""),
+        storage: ($s.properties.storage // ""),
+        smsc: ($s.properties.smsc // ""),
+        timestamp: ($s.properties.timestamp // ""),
+        discharge_timestamp: ($s.properties["discharge-timestamp"] // ""),
+        delivery_state: ($s.properties["delivery-state"] // ""),
+        delivery_report: ($s.properties["delivery-report"] // ""),
+        type: $type
+      }
+  ' <<<"$js" 2>/dev/null
+}
+
 sms_send() {
   if [[ $# -lt 2 ]]
   then
@@ -391,7 +429,7 @@ sms_prune_all() {
 }
 
 sms_list_pretty() {
-  local list_json ids id js sender text msg_class line maxlen=80
+  local list_json ids id js sender text msg_type pdu line maxlen=80
 
   if ! list_json="$(mmcli_cmd --messaging-list-sms -J)"
   then
@@ -422,7 +460,14 @@ sms_list_pretty() {
         then
           continue
         fi
-        jq -c --arg id "$id" '
+        pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+        case "${pdu,,}" in
+          deliver) msg_type="received" ;;
+          submit) msg_type="sent" ;;
+          status-report) msg_type="report" ;;
+          *) msg_type="$pdu" ;;
+        esac
+        jq -c --arg id "$id" --arg type "$msg_type" '
           {
             id: ($id|tonumber),
             sender: (.sms.content.number // ""),
@@ -430,13 +475,27 @@ sms_list_pretty() {
             class: (.sms.content.class // ""),
             state: (.sms.properties.state // ""),
             pdu: (.sms.properties["pdu-type"] // ""),
-            storage: (.sms.properties.storage // "")
+            storage: (.sms.properties.storage // ""),
+            type: $type
           }
         ' <<<"$js" 2>/dev/null || true
       done
     } | jq -s '.'
     return 0
   fi
+
+  # Header for human-readable list (bold, respect NO_COLOR/CRON)
+  local _nocolor=0
+  [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
+  bold() {
+    if (( _nocolor ))
+    then
+      printf '%s' "$1"
+    else
+      printf '\e[1m%s\e[0m' "$1"
+    fi
+  }
+  printf '%-4s %-10s %-18s %s\n' "$(bold ID)" "$(bold TYPE)" "$(bold FROM)" "$(bold MSG)"
 
   for id in "${ids[@]}"
   do
@@ -446,7 +505,13 @@ sms_list_pretty() {
       continue
     fi
     sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
-    msg_class="$(jq -r '.sms.content.class // "--"' <<<"$js" 2>/dev/null)"
+    pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+    case "${pdu,,}" in
+      deliver) msg_type="received" ;;
+      submit) msg_type="sent" ;;
+      status-report) msg_type="report" ;;
+      *) msg_type="$pdu" ;;
+    esac
     text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
     text=${text//$'\r'/}
     text=${text//$'\n'/\\n}
@@ -454,7 +519,7 @@ sms_list_pretty() {
     then
       text="${text:0:maxlen}..."
     fi
-    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_class" "$sender" "$text"
+    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_type" "$sender" "$text"
   done
 }
 
@@ -1100,6 +1165,10 @@ main() {
         JSON_OUTPUT=1
         shift
         ;;
+      --raw)
+        RAW_OUTPUT=1
+        shift
+        ;;
       -q|--quiet|--silent)
         QUIET=1
         shift
@@ -1229,7 +1298,15 @@ main() {
         fi
         return 1
       fi
-      sms_read "${ARGS[@]}"
+      if [[ -n "$RAW_OUTPUT" ]]
+      then
+        mmcli_cmd --sms "${ARGS[0]}" -J | jq
+      elif [[ -n "$JSON_OUTPUT" ]]
+      then
+        sms_read_json "${ARGS[0]}"
+      else
+        sms_read "${ARGS[@]}"
+      fi
       ;;
     prune)
       sms_prune_all
