@@ -677,7 +677,8 @@ watch_handle_sms() {
         --arg recipient "$recipient" \
         --arg sender "$sender" \
         --arg text "$text" \
-        '{recipient:$recipient, sender:$sender, text:$text}')"
+        --arg date "$(date -Iseconds)" \
+        '{recipient:$recipient, sender:$sender, text:$text, date: $date}')"
       watch_log "forwarding id=$id from $sender to webhook"
       if ! curl -sS -m 10 -H 'Content-Type: application/json' \
         -X POST -d "$payload" "$WEBHOOK_URL" >/dev/null
