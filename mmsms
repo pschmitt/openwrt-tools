@@ -240,6 +240,7 @@ sms_prune_all() {
   while IFS= read -r sms_id
   do
     [[ -z "$sms_id" ]] && continue
+    echo_info "[mm-sms:prune] deleting SMS $sms_id"
     if ! mmcli_cmd --messaging-delete-sms="$sms_id" >/dev/null 2>&1
     then
       error "failed to delete SMS $sms_id"
