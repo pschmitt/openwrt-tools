@@ -63,7 +63,9 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
-  -m, --modem MODEM    Modem identifier (default: $MODEM)
+  -m, --modem MODEM    Modem selector or id (default: $MODEM)
+                       Accepts id (e.g. 2), dbus path, 'any', or
+                       a string matching manufacturer/plugin/ttyUSB
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -76,11 +78,137 @@ Commands:
   status                    Show modem status summary
   restart                   Restart modemmanager, issue quectel reset, re-enable modem
   watch                     Monitor incoming SMS and forward/execute actions
+  number|phone              Print modem's own phone number
 USAGE
 }
 
 error() {
   echo_error "$SCRIPT_NAME: $*"
+}
+
+# Resolve a human-friendly modem selector to a concrete modem id
+# - Accepts: numeric id (e.g., 2), D-Bus path, 'any', or a substring
+#   matching manufacturer, plugin, primary-port, or any ttyUSB/wwan port.
+# - On multiple matches, prints a modem list to stderr and returns non-zero.
+# - On no match, reports an error and shows the list.
+get_modem_id() {
+  local sel_raw="${1:-}"
+  local sel
+
+  # Default / passthrough cases
+  if [[ -z "$sel_raw" || "$sel_raw" == any ]]
+  then
+    printf '%s' "any"
+    return 0
+  fi
+
+  # If numeric id
+  if [[ "$sel_raw" =~ ^[0-9]+$ ]]
+  then
+    printf '%s' "$sel_raw"
+    return 0
+  fi
+
+  # If a D-Bus path (/org/.../Modem/N)
+  if [[ "$sel_raw" == */Modem/* ]]
+  then
+    printf '%s' "${sel_raw##*/}"
+    return 0
+  fi
+
+  # Case-insensitive substring match on fields
+  sel="${sel_raw,,}"
+
+  local list_json ids id json
+  if ! list_json="$(mmcli -L -J 2>/dev/null)"
+  then
+    error "could not query modem list via mmcli"
+    return 1
+  fi
+
+  # Collect modem ids
+  mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#ids[@]} == 0 ))
+  then
+    error "no modems detected"
+    return 1
+  fi
+
+  local matches=()
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+    if ! json="$(mmcli -m "$id" -J 2>/dev/null)"
+    then
+      continue
+    fi
+
+    # Extract candidate fields and match case-insensitively in bash
+    local fields
+    fields="$(jq -r '
+      .modem.generic as $g
+      | [
+          ($g.manufacturer // ""),
+          ($g.plugin // ""),
+          ($g["primary-port"] // ""),
+          (($g.ports // [])[]? | (split(" ")[0]))
+        ] | .[]
+    ' <<<"$json" 2>/dev/null || true)"
+    if [[ -n "$fields" ]]
+    then
+      local f lf
+      while IFS= read -r f
+      do
+        lf="${f,,}"
+        if [[ "$lf" == *"$sel"* ]]
+        then
+          matches+=("$id")
+          break
+        fi
+      done <<< "$fields"
+    fi
+  done
+
+  if (( ${#matches[@]} == 1 ))
+  then
+    printf '%s' "${matches[0]}"
+    return 0
+  fi
+
+  # Helper to show available modems for disambiguation
+  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
+  echo_info "Available modems:" >&2
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+    if ! json="$(mmcli -m "$id" -J 2>/dev/null)"
+    then
+      continue
+    fi
+    jq -r '
+      .modem as $m
+      | {
+          id: ($m["dbus-path"] | split("/")[-1]),
+          manufacturer: ($m.generic.manufacturer // "--"),
+          model: ($m.generic.model // "--"),
+          plugin: ($m.generic.plugin // "--"),
+          primary: ($m.generic["primary-port"] // "--"),
+          ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+        }
+      | ("  " + .id + ": " + .manufacturer + " " + .model
+         + " plugin=" + .plugin
+         + " primary=" + .primary
+         + " ports=" + .ports)
+    ' <<<"$json" >&2
+  done
+
+  if (( ${#matches[@]} == 0 ))
+  then
+    return 1
+  fi
+
+  # Ambiguous
+  return 2
 }
 
 mmcli_cmd() {
@@ -241,7 +369,7 @@ sms_prune_all() {
   do
     [[ -z "$sms_id" ]] && continue
     echo_info "[mm-sms:prune] deleting SMS $sms_id"
-    if ! mmcli_cmd --messaging-delete-sms="$sms_id" >/dev/null 2>&1
+    if ! mmcli_cmd --messaging-delete-sms="$sms_id"
     then
       error "failed to delete SMS $sms_id"
     fi
@@ -582,14 +710,81 @@ modem_status() {
 
   if [[ -z $QUIET ]]
   then
-    printf 'modem state: %s\n' "$state"
-    printf 'power: %s\n' "$power"
-    printf 'registered: %s\n' "$reg"
-    printf 'signal: %s\n' "$signal"
-    printf 'carrier: %s\n' "$carrier"
+    # Color helpers (respect NO_COLOR and CRON)
+    local _nocolor=0
+    [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
+
+    colorize() { # $1=colorcode, $2=text
+      if (( _nocolor )); then printf '%s' "$2"; else printf '\e[%sm%s\e[0m' "$1" "$2"; fi
+    }
+
+    # Choose colors
+    local state_color power_color reg_color sig_color carrier_color
+    case "${state,,}" in
+      connected|registered|enabled|online|on) state_color='1;32';;   # bold green
+      searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
+      failed|disabled|off) state_color='1;31';;                      # bold red
+      *) state_color='36';;                                          # cyan
+    esac
+
+    case "${power,,}" in
+      on|full) power_color='1;32';;
+      low) power_color='1;33';;
+      off|unknown) power_color='1;31';;
+      *) power_color='36';;
+    esac
+
+    case "${reg,,}" in
+      home|roaming|registered|attached) reg_color='1;32';;
+      searching|idle|unknown) reg_color='1;33';;
+      denied|unregistered) reg_color='1;31';;
+      *) reg_color='36';;
+    esac
+
+    # Determine signal color based on numeric value when available
+    local sig_num
+    sig_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+    if [[ "$sig_num" =~ ^[0-9]+$ ]]
+    then
+      if (( sig_num >= 70 )); then sig_color='1;32';
+      elif (( sig_num >= 40 )); then sig_color='1;33';
+      else sig_color='1;31'; fi
+    else
+      sig_color='36'
+    fi
+
+    carrier_color='1;34' # bold blue
+
+    printf 'modem state: %s\n' "$(colorize "$state_color" "$state")"
+    printf 'power: %s\n' "$(colorize "$power_color" "$power")"
+    printf 'registered: %s\n' "$(colorize "$reg_color" "$reg")"
+    printf 'signal: %s\n' "$(colorize "$sig_color" "$signal")"
+    printf 'carrier: %s\n' "$(colorize "$carrier_color" "$carrier")"
   fi
 
   return 0
+}
+
+modem_number() {
+  if load_own_number
+  then
+    if [[ -n "$OWN_NUMBER" ]]
+    then
+      printf '%s\n' "$OWN_NUMBER"
+      return 0
+    fi
+    error "modem did not report own number"
+    return 2
+  else
+    local load_rc=$?
+    if (( load_rc == 1 ))
+    then
+      error "could not query modem for own number"
+    else
+      error "modem did not report own number"
+    fi
+    return 1
+  fi
 }
 
 watch_handle_sms() {
@@ -811,6 +1006,9 @@ main() {
     status|stat|st)
       command="status"
       ;;
+    number|phone)
+      command="number"
+      ;;
     reset|rst|restart)
       command="reset"
       ;;
@@ -823,6 +1021,13 @@ main() {
   then
     error "unknown option: $command"
     usage >&2
+    return 2
+  fi
+
+  # Resolve human-friendly modem selector to a concrete id, once
+  if ! MODEM="$(get_modem_id "$MODEM")"
+  then
+    # get_modem_id already printed context and list
     return 2
   fi
 
@@ -854,6 +1059,9 @@ main() {
       ;;
     status)
       modem_status
+      ;;
+    number)
+      modem_number
       ;;
     reset)
       modem_reset
