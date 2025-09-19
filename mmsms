@@ -282,6 +282,34 @@ enable_modem() {
     elapsed=$((elapsed + sleep_period))
   done
 
+  enable_log "waiting for modem detection"
+  elapsed=0
+  local list_json=""
+  local modem_count=0
+  while :
+  do
+    list_json=""
+    modem_count=0
+    if list_json="$(mmcli -L -J 2>/dev/null)"
+    then
+      modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
+      if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
+      then
+        break
+      fi
+    fi
+
+    if (( elapsed >= max_wait ))
+    then
+      echo_warning "[mm-sms:enable] timeout waiting for modem detection"
+      return 1
+    fi
+    sleep "$sleep_period"
+    elapsed=$((elapsed + sleep_period))
+  done
+
+  enable_log "detected $modem_count modem(s)"
+
   if mmcli_cmd --enable >/dev/null 2>&1
   then
     enable_log "modem enabled"
