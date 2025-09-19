@@ -1268,12 +1268,48 @@ main() {
     return 2
   fi
 
+  # Pin 'any' to the actual modem id to avoid races in subsequent calls
+  if [[ "$MODEM" == "any" ]]
+  then
+    local _j _id
+    if _j="$(mmcli_cmd -J || true)"
+    then
+      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j" 2>/dev/null)"
+      if [[ -n "$_id" ]]
+      then
+        MODEM="$_id"
+      fi
+    fi
+  fi
+
   # Informative log about resolved modem selection (guarded to avoid nesting)
   if [[ -z $QUIET ]]
   then
     if [[ "$MODEM" == "any" ]]
     then
-      echo_info "[mm-sms] selected modem: any"
+      # Resolve which modem 'any' targets by querying mmcli -m any -J
+      local _j _ln
+      if _j="$(mmcli_cmd -J 2>/dev/null || true)"
+      then
+        _ln="$(jq -r '
+          .modem as $m
+          | {
+              id: ($m["dbus-path"] | split("/")[-1]),
+              manufacturer: ($m.generic.manufacturer // "--"),
+              model: ($m.generic.model // "--"),
+              plugin: ($m.generic.plugin // "--"),
+              primary: ($m.generic["primary-port"] // "--"),
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+            }
+          | ("[mm-sms] selected modem: " + .id + ": " + .manufacturer + " " + .model
+             + " plugin=" + .plugin
+             + " primary=" + .primary
+             + " ports=" + .ports)
+        ' <<<"$_j" 2>/dev/null || true)"
+        echo_info "${_ln:-[mm-sms] selected modem: any}"
+      else
+        echo_info "[mm-sms] selected modem: any"
+      fi
     else
       local _mjson _mln
       _mjson="$(mmcli -m "$MODEM" -J || true)"
@@ -1310,10 +1346,8 @@ main() {
       if (( ${#ARGS[@]} < 1 ))
       then
         error "No SMS ID/path specified"
-        if ! mmcli_cmd --messaging-list-sms >&2
-        then
-          error "failed to list SMS messages"
-        fi
+        # Show the message list in the same pretty/JSON/raw style
+        sms_list_pretty || error "failed to list SMS messages"
         return 1
       fi
       if [[ -n "$RAW_OUTPUT" ]]
