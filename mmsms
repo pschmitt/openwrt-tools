@@ -352,7 +352,7 @@ sms_send() {
   # text="$(echo -e "$text")"
 
   local tmpfile
-  if ! tmpfile="$(mktemp /tmp/mm-sms-text.XXXXXX)"
+  if ! tmpfile="$(mktemp /tmp/mmsms-text.XXXXXX)"
   then
     error "failed to create temporary file for SMS text"
     return 1
@@ -403,7 +403,7 @@ sms_send() {
         error "failed to create SMS after $max_attempts attempts"
         break
       fi
-      echo_warning "[mm-sms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
+      echo_warning "[mmsms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
       continue
     fi
@@ -420,7 +420,7 @@ sms_send() {
         error "failed to create SMS after $max_attempts attempts"
         break
       fi
-      echo_warning "[mm-sms:send] received empty SMS id (attempt $attempt/$max_attempts), retrying"
+      echo_warning "[mmsms:send] received empty SMS id (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
       continue
     fi
@@ -437,7 +437,7 @@ sms_send() {
       break
     fi
 
-    echo_warning "[mm-sms:send] failed to send SMS (attempt $attempt/$max_attempts), retrying"
+    echo_warning "[mmsms:send] failed to send SMS (attempt $attempt/$max_attempts), retrying"
     attempt=$((attempt + 1))
   done
 
@@ -461,7 +461,7 @@ sms_prune_all() {
   while IFS= read -r sms_id
   do
     [[ -z "$sms_id" ]] && continue
-    echo_info "[mm-sms:prune] deleting SMS $sms_id"
+    echo_info "[mmsms:prune] deleting SMS $sms_id"
     if ! mmcli_cmd --messaging-delete-sms="$sms_id"
     then
       error "failed to delete SMS $sms_id"
@@ -488,7 +488,7 @@ sms_list_pretty() {
       then
         printf '[]\n'
       else
-        echo_info "[mm-sms:list] no SMS messages"
+        echo_info "[mmsms:list] no SMS messages"
       fi
       return 0
     fi
@@ -629,7 +629,7 @@ sms_list_pretty() {
         had_any=1
       done
     done
-    [[ -n "$had_any" ]] || echo_info "[mm-sms:list] no SMS messages"
+    [[ -n "$had_any" ]] || echo_info "[mmsms:list] no SMS messages"
     return 0
   fi
 
@@ -646,7 +646,7 @@ sms_list_pretty() {
     then
       printf '[]\n'
     else
-      echo_info "[mm-sms:list] no SMS messages"
+      echo_info "[mmsms:list] no SMS messages"
     fi
     return 0
   fi
@@ -746,7 +746,7 @@ sms_list_pretty() {
 }
 
 enable_log() {
-  echo_info "[mm-sms:enable] $*"
+  echo_info "[mmsms:enable] $*"
 }
 
 enable_modem() {
@@ -760,7 +760,7 @@ enable_modem() {
   do
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mm-sms:enable] timeout waiting for D-Bus socket"
+      echo_warning "[mmsms:enable] timeout waiting for D-Bus socket"
       return 1
     fi
     sleep "$sleep_period"
@@ -773,7 +773,7 @@ enable_modem() {
   do
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mm-sms:enable] timeout waiting for ModemManager"
+      echo_warning "[mmsms:enable] timeout waiting for ModemManager"
       return 1
     fi
     sleep "$sleep_period"
@@ -813,7 +813,7 @@ enable_modem() {
 
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mm-sms:enable] timeout waiting for modem detection"
+      echo_warning "[mmsms:enable] timeout waiting for modem detection"
       return 1
     fi
     sleep "$sleep_period"
@@ -854,7 +854,7 @@ enable_modem() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms:enable] enabled modem: id=" + .id
+          | ("[mmsms:enable] enabled modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
@@ -870,7 +870,7 @@ enable_modem() {
     return 0
   fi
 
-  echo_warning "[mm-sms:enable] failed to enable modem"
+  echo_warning "[mmsms:enable] failed to enable modem"
   return 1
 }
 
@@ -968,22 +968,22 @@ modem_reset() {
 }
 
 watch_log() {
-  echo_info "[mm-sms:watch] $*"
+  echo_info "[mmsms:watch] $*"
 }
 
 watch_warn() {
-  echo_warning "[mm-sms:watch] $*"
+  echo_warning "[mmsms:watch] $*"
 }
 
 reset_log() {
   if [[ -z $QUIET ]]
   then
-    echo_info "[mm-sms:reset] $*"
+    echo_info "[mmsms:reset] $*"
   fi
 }
 
 reset_warn() {
-  echo_warning "[mm-sms:reset] $*"
+  echo_warning "[mmsms:reset] $*"
 }
 
 watch_cleanup() {
@@ -1628,16 +1628,16 @@ main() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms] selected modem: id=" + .id
+          | ("[mmsms] selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
              + " ports=" + .ports)
         ' <<<"$_j" 2>/dev/null || true)"
-        echo_info "${_ln:-[mm-sms] selected modem: any}"
+        echo_info "${_ln:-[mmsms] selected modem: any}"
       else
-        echo_info "[mm-sms] selected modem: any"
+        echo_info "[mmsms] selected modem: any"
       fi
     else
       local _mjson _mln
@@ -1654,7 +1654,7 @@ main() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms] selected modem: id=" + .id
+          | ("[mmsms] selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
@@ -1662,7 +1662,7 @@ main() {
              + " ports=" + .ports)
         ' <<<"$_mjson" 2>/dev/null || true)"
       fi
-      echo_info "${_mln:-[mm-sms] selected modem: $MODEM}"
+      echo_info "${_mln:-[mmsms] selected modem: $MODEM}"
     fi
   fi
 
