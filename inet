@@ -408,13 +408,24 @@ interface() {
   local l3_intf
 
   # Below only works if the interface is up
-  if l3_intf=$(ifstatus "$owrt_intf" | jq -er '.l3_device // empty') || [[ -z "$l3_intf" ]]
+  if l3_intf=$(ifstatus "$owrt_intf" | jq -er '.l3_device // empty') && [[ -n "$l3_intf" ]]
   then
     echo "$l3_intf"
     return 0
   fi
 
-  uci get "network.${owrt_intf}.device" 2>/dev/null
+  # fall back to uci config
+  l3_intf=$(uci get "network.${owrt_intf}.device" 2>/dev/null)
+
+  # we gotta bail if we get back an interface like
+  # /sys/devices/platform/soc/soc:internal-regs/f1058000.usb/usb1/1-1
+  case "$l3_intf" in
+    /sys/*)
+      return 1
+      ;;
+  esac
+
+  echo "$l3_intf"
 }
 
 interface_ipv4() {
