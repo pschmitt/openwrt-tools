@@ -32,7 +32,6 @@ WATCH_MAX_RETRY="${MAX_RETRY:-3}"
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
-WATCH_CHUNK_SIZE="${CHUNK_SIZE:-140}"
 
 QUIET="${QUIET:-}"
 
@@ -69,13 +68,14 @@ Options:
   -h, --help           Show this help and exit
 
 Commands:
-  send RECIPIENT [TEXT|-]    Send SMS; use '-' to read TEXT from stdin
-  list                       List SMS messages on the modem
-  read MESSAGE_ID            Show details for a specific SMS
-  prune                      Delete all SMS messages from the modem
-  enable                     Wait for ModemManager and enable the modem
-  status                     Show modem status summary
-  watch                      Monitor incoming SMS and forward/execute actions
+  send RECIPIENT [TEXT|-]   Send SMS; use '-' or stdin for TEXT
+  list                      List SMS messages on the modem
+  read MESSAGE_ID           Show details for a specific SMS
+  prune                     Delete all SMS messages from the modem
+  enable                    Wait for ModemManager and enable the modem
+  status                    Show modem status summary
+  restart                   Restart modemmanager, issue quectel reset, re-enable modem
+  watch                     Monitor incoming SMS and forward/execute actions
 USAGE
 }
 
@@ -101,9 +101,18 @@ sms_send() {
 
   local recipient="$1"
   shift
-  local text
+  local text=""
 
-  if [[ "$1" == "-" ]]
+  recipient="${recipient//[[:space:]]/}"
+  if [[ -n "$recipient" && "$recipient" != +* ]]
+  then
+    recipient="+$recipient"
+  fi
+
+  if (( $# == 0 ))
+  then
+    text="$(cat)"
+  elif [[ "$1" == "-" ]]
   then
     shift
     text="$(cat)"
@@ -117,28 +126,42 @@ sms_send() {
     return 2
   fi
 
-  text="${text//\"/\\\"}"
-  echo "text=$text" >&2
+  printf 'text=%q\n' "$text" >&2
 
   # DIRTYFIX For Home Assistant SMS notifications
-  text="$(echo -e "$text")"
+  # text="$(echo -e "$text")"
 
-  local sms_id
+  local tmpfile
+  if ! tmpfile="$(mktemp /tmp/mm-sms-text.XXXXXX)"
+  then
+    error "failed to create temporary file for SMS text"
+    return 1
+  fi
+
+  if ! printf '%s' "$text" >"$tmpfile"
+  then
+    rm -f "$tmpfile" 2>/dev/null || true
+    error "failed to write SMS text to temporary file"
+    return 1
+  fi
+
+  local sms_id=""
   local smsc
   smsc="$(get_smsc_number)"
   local attempt=1
   local max_attempts=$((SMS_SEND_RETRY_COUNT + 1))
+  local rc=1
 
   while (( attempt <= max_attempts ))
   do
     sms_id=""
-    if ! sms_id="$(mmcli_cmd --messaging-create-sms="text=\"$text\",number=$recipient,smsc=$smsc" \
-      | grep -o "[0-9]*$")"
+    if ! sms_id="$(mmcli_cmd --messaging-create-sms="number=$recipient,smsc=$smsc" \
+      --messaging-create-sms-with-text="$tmpfile" | grep -o "[0-9]*$")"
     then
       if (( attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        return 1
+        break
       fi
       echo_warning "[mm-sms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
@@ -150,7 +173,7 @@ sms_send() {
       if (( attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        return 1
+        break
       fi
       echo_warning "[mm-sms:send] received empty SMS id (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
@@ -159,20 +182,22 @@ sms_send() {
 
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
-      return 0
+      rc=0
+      break
     fi
 
     if (( attempt == max_attempts ))
     then
       error "failed to send SMS after $max_attempts attempts"
-      return 1
+      break
     fi
 
     echo_warning "[mm-sms:send] failed to send SMS (attempt $attempt/$max_attempts), retrying"
     attempt=$((attempt + 1))
   done
 
-  return 1
+  rm -f "$tmpfile" 2>/dev/null || true
+  return $rc
 }
 
 sms_prune_all() {
@@ -241,12 +266,88 @@ enable_modem() {
   return 1
 }
 
+modem_reset() {
+  local service="/etc/init.d/modemmanager"
+  local has_service=0
+
+  if [[ -x "$service" ]]
+  then
+    has_service=1
+  else
+    reset_warn "modemmanager init script not found or not executable at $service"
+  fi
+
+  if ! command -v quectel >/dev/null 2>&1
+  then
+    error "quectel command not found in PATH"
+    return 1
+  fi
+
+  if (( has_service ))
+  then
+    reset_log "stopping ModemManager"
+    if ! "$service" stop
+    then
+      error "failed to stop ModemManager service"
+      return 1
+    fi
+  fi
+
+  reset_log "issuing quectel reset"
+  if ! quectel reset
+  then
+    error "quectel reset failed"
+    if (( has_service ))
+    then
+      reset_warn "attempting to restart ModemManager after reset failure"
+      "$service" start || reset_warn "could not restart ModemManager"
+    fi
+    return 1
+  fi
+
+  if (( has_service ))
+  then
+    reset_log "starting ModemManager"
+    if ! "$service" start
+    then
+      error "failed to start ModemManager service"
+      return 1
+    fi
+    sleep 2
+  fi
+
+  reset_log "enabling modem"
+  if ! enable_modem
+  then
+    reset_warn "failed to enable modem after reset, retrying in 5s"
+    sleep 5
+    if ! enable_modem
+    then
+      error "failed to enable modem after reset"
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 watch_log() {
   echo_info "[mm-sms:watch] $*"
 }
 
 watch_warn() {
   echo_warning "[mm-sms:watch] $*"
+}
+
+reset_log() {
+  if [[ -z $QUIET ]]
+  then
+    echo_info "[mm-sms:reset] $*"
+  fi
+}
+
+reset_warn() {
+  echo_warning "[mm-sms:reset] $*"
 }
 
 watch_cleanup() {
@@ -296,20 +397,11 @@ watch_in_whitelist() {
 watch_send_reply() {
   local to="$1"
   local msg="$2"
-  local len=${#msg}
-  local idx=0
-
-  while (( idx < len ))
-  do
-    local part="${msg:idx:WATCH_CHUNK_SIZE}"
-    if ! sms_send "$to" "$part"
-    then
-      watch_warn "failed to send reply chunk to $to"
-      return 1
-    fi
-    idx=$((idx + WATCH_CHUNK_SIZE))
-    sleep 1
-  done
+  if ! sms_send "$to" "$msg"
+  then
+    watch_warn "failed to send reply to $to"
+    return 1
+  fi
 }
 
 watch_run_command() {
@@ -395,7 +487,7 @@ get_smsc_number() {
 }
 
 modem_status() {
-  local json state power reg
+  local json state power reg signal carrier
 
   if ! json="$(mmcli_cmd -J 2>/dev/null)"
   then
@@ -409,6 +501,8 @@ modem_status() {
   state="$(jq -r '(.modem.generic.state // empty)' <<<"$json")"
   power="$(jq -r '(.modem.generic["power-state"] // empty)' <<<"$json")"
   reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
+  signal="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+  carrier="$(jq -r '(.modem["3gpp"]["operator-name"] // .modem["3gpp"]["operator-code"] // .modem.cdma.sid // empty)' <<<"$json")"
 
   if [[ -z "$state" ]]
   then
@@ -422,11 +516,24 @@ modem_status() {
   then
     reg=unknown
   fi
+  if [[ -n "$signal" ]]
+  then
+    signal="${signal}%"
+  else
+    signal=unknown
+  fi
+  if [[ -z "$carrier" ]]
+  then
+    carrier=unknown
+  fi
 
   if [[ -z $QUIET ]]
   then
-    printf 'modem state: %s, power: %s, reg: %s
-' "$state" "$power" "$reg"
+    printf 'modem state: %s\n' "$state"
+    printf 'power: %s\n' "$power"
+    printf 'registered: %s\n' "$reg"
+    printf 'signal: %s\n' "$signal"
+    printf 'carrier: %s\n' "$carrier"
   fi
 
   return 0
@@ -613,19 +720,7 @@ main() {
         shift
         break
         ;;
-      send|list|ls|read|get|prune|clear|enable|watch)
-        command="$1"
-        shift
-        break
-        ;;
-      -*)
-        error "unknown option: $1"
-        usage >&2
-        return 2
-        ;;
       *)
-        command="$1"
-        shift
         break
         ;;
     esac
@@ -644,14 +739,48 @@ main() {
   fi
 
   case "$command" in
+    send|s)
+      command="send"
+      ;;
+    list|ls|l|-l)
+      command="list"
+      ;;
+    read|get|r)
+      command="read"
+      ;;
+    prune|clear|delete)
+      command="prune"
+      ;;
+    enable|en|start)
+      command="enable"
+      ;;
+    status|stat|st)
+      command="status"
+      ;;
+    reset|rst|restart)
+      command="reset"
+      ;;
+    watch|w)
+      command="watch"
+      ;;
+  esac
+
+  if [[ "$command" == -* ]]
+  then
+    error "unknown option: $command"
+    usage >&2
+    return 2
+  fi
+
+  case "$command" in
     send)
       sms_send "$@"
       ;;
-    list|ls)
+    list)
       # mmcli -m any --messaging-list-sms -J | jq -er '.["modem.messaging.sms"][]'
       mmcli_cmd --messaging-list-sms "$@"
       ;;
-    read|get)
+    read)
       if [[ $# -lt 1 ]]
       then
         error "No SMS ID/path specified"
@@ -663,7 +792,7 @@ main() {
       fi
       sms_read "$@"
       ;;
-    prune|clear)
+    prune)
       sms_prune_all
       ;;
     enable)
@@ -671,6 +800,9 @@ main() {
       ;;
     status)
       modem_status
+      ;;
+    reset)
+      modem_reset
       ;;
     watch)
       watch_messages
