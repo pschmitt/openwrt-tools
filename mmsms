@@ -313,7 +313,6 @@ modem_reset() {
       error "failed to start ModemManager service"
       return 1
     fi
-    sleep 2
   fi
 
   reset_log "enabling modem"
