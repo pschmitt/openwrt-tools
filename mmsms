@@ -36,6 +36,7 @@ WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
+HARD_RESET="${HARD_RESET:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -67,13 +68,14 @@ Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 Options:
   -m, --modem MODEM    Modem selector or id (default: $MODEM)
                        Accepts id (e.g. 2), dbus path, 'any', or
-                       a string matching manufacturer/plugin/ttyUSB
+                       a string matching manufacturer/plugin/ttyUSB/phone-number
   -d, --debug          Enable debug output
   -j, --json           Output JSON (for list/status/read)
       --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
+      --hard           Reset: also stop/start modemmanager (hard reset)
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -117,13 +119,6 @@ get_modem_id() {
     return 0
   fi
 
-  # If numeric id
-  if [[ "$sel_raw" =~ ^[0-9]+$ ]]
-  then
-    printf '%s' "$sel_raw"
-    return 0
-  fi
-
   # If a D-Bus path (/org/.../Modem/N)
   if [[ "$sel_raw" == */Modem/* ]]
   then
@@ -149,6 +144,21 @@ get_modem_id() {
     return 1
   fi
 
+  # If pure numeric input, treat as id only if it matches a detected id; otherwise
+  # continue with fuzzy matching (e.g., phone number fragment)
+  if [[ "$sel_raw" =~ ^[0-9]+$ ]]
+  then
+    local _id
+    for _id in "${ids[@]}"
+    do
+      if [[ "$_id" == "$sel_raw" ]]
+      then
+        printf '%s' "$sel_raw"
+        return 0
+      fi
+    done
+  fi
+
   local matches=()
   for id in "${ids[@]}"
   do
@@ -159,7 +169,7 @@ get_modem_id() {
     fi
 
     # Extract candidate fields and match case-insensitively in bash
-    local fields
+    local fields numbers sel_digits
     fields="$(jq -r '
       .modem.generic as $g
       | [
@@ -169,6 +179,10 @@ get_modem_id() {
           (($g.ports // [])[]? | (split(" ")[0]))
         ] | .[]
     ' <<<"$json" 2>/dev/null || true)"
+    numbers="$(jq -r '.modem.generic["own-numbers"][]? // empty' <<<"$json" 2>/dev/null || true)"
+    sel_digits="${sel_raw//[^0-9+]/}"
+
+    local matched=0
     if [[ -n "$fields" ]]
     then
       local f lf
@@ -177,10 +191,34 @@ get_modem_id() {
         lf="${f,,}"
         if [[ "$lf" == *"$sel"* ]]
         then
-          matches+=("$id")
-          break
+          matched=1; break
         fi
       done <<< "$fields"
+    fi
+
+    # Try matching by own phone number(s): substring, digit-substring, or regex
+    if (( matched == 0 )) && [[ -n "$numbers" ]]
+    then
+      local n nd
+      while IFS= read -r n
+      do
+        [[ -z "$n" ]] && continue
+        nd="${n//[^0-9+]/}"
+        if [[ "${n,,}" == *"${sel_raw,,}"* ]] || { [[ -n "$sel_digits" ]] && [[ "$nd" == *"$sel_digits"* ]]; }
+        then
+          matched=1; break
+        fi
+        # Regex match (best-effort). Ignore errors if pattern is invalid.
+        if printf '%s\n' "$n" | grep -Eq -- "$sel_raw" 2>/dev/null
+        then
+          matched=1; break
+        fi
+      done <<< "$numbers"
+    fi
+
+    if (( matched == 1 ))
+    then
+      matches+=("$id")
     fi
   done
 
@@ -518,6 +556,11 @@ sms_list_pretty() {
       continue
     fi
     sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
+    # Normalize sender phone format: ensure leading '+' when present
+    if [[ -n "$sender" && "$sender" != "--" && "$sender" != +* ]]
+    then
+      sender="+$sender"
+    fi
     pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
     case "${pdu,,}" in
       deliver) msg_type="received" ;;
@@ -541,6 +584,7 @@ enable_log() {
 }
 
 enable_modem() {
+  local expect_id="${1:-}"
   local max_wait=600
   local sleep_period=2
   local elapsed=0
@@ -580,10 +624,24 @@ enable_modem() {
     modem_count=0
     if list_json="$(mmcli -L -J)"
     then
-      modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
-      if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
+      if [[ -n "$expect_id" && "$expect_id" =~ ^[0-9]+$ ]]
       then
-        break
+        local present
+        present="$(jq -r --arg id "$expect_id" '
+          (."modem-list" // [])
+          | map(split("/")[-1])
+          | any(. == $id)
+        ' <<<"$list_json" 2>/dev/null || printf 'false')"
+        if [[ "$present" == "true" ]]
+        then
+          break
+        fi
+      else
+        modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
+        if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
+        then
+          break
+        fi
       fi
     fi
 
@@ -596,11 +654,51 @@ enable_modem() {
     elapsed=$((elapsed + sleep_period))
   done
 
-  enable_log "detected $modem_count modem(s)"
+  if [[ -n "$expect_id" && "$expect_id" =~ ^[0-9]+$ ]]
+  then
+    enable_log "detected expected modem id=$expect_id"
+  else
+    enable_log "detected $modem_count modem(s)"
+  fi
 
+  # Use the expected modem id if provided; otherwise rely on MODEM
+  local enable_target="$MODEM"
+  if [[ -n "$expect_id" ]]
+  then
+    enable_target="$expect_id"
+  fi
+  local MODEM="$enable_target"
   if mmcli_cmd --enable >/dev/null 2>&1
   then
     enable_log "modem enabled"
+    # Log enabled modem details similar to selection log
+    if [[ -z $QUIET ]]
+    then
+      local _ej _eln
+      _ej="$(mmcli -m "$enable_target" -J || true)"
+      if [[ -n "$_ej" ]]
+      then
+        _eln="$(jq -r '
+          .modem as $m
+          | {
+              id: ($m["dbus-path"] | split("/")[-1]),
+              manufacturer: ($m.generic.manufacturer // "--"),
+              model: ($m.generic.model // "--"),
+              plugin: ($m.generic.plugin // "--"),
+              primary: ($m.generic["primary-port"] // "--"),
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+            }
+          | ("[mm-sms:enable] enabled modem: " + .id + ": " + .manufacturer + " " + .model
+             + " plugin=" + .plugin
+             + " primary=" + .primary
+             + " ports=" + .ports)
+        ' <<<"$_ej" 2>/dev/null || true)"
+        if [[ -n "$_eln" ]]
+        then
+          echo_info "$_eln"
+        fi
+      fi
+    fi
     return 0
   fi
 
@@ -611,6 +709,7 @@ enable_modem() {
 modem_reset() {
   local service="/etc/init.d/modemmanager"
   local has_service=0
+  local do_service=0
 
   if [[ -x "$service" ]]
   then
@@ -619,50 +718,78 @@ modem_reset() {
     reset_warn "modemmanager init script not found or not executable at $service"
   fi
 
-  if ! command -v quectel >/dev/null 2>&1
+  # Detect modem plugin/manufacturer to decide if Quectel-specific reset applies
+  local j plugin manufacturer is_quectel=0
+  if j="$(mmcli_cmd -J 2>/dev/null)"
   then
-    error "quectel command not found in PATH"
-    return 1
+    plugin="$(jq -r '.modem.generic.plugin // empty' <<<"$j" 2>/dev/null)"
+    manufacturer="$(jq -r '.modem.generic.manufacturer // empty' <<<"$j" 2>/dev/null)"
+    if [[ "${plugin,,}" == quectel || "${manufacturer,,}" == quectel* ]]
+    then
+      is_quectel=1
+    fi
+  else
+    reset_warn "could not query modem to determine vendor; proceeding without Quectel reset"
   fi
 
-  if (( has_service ))
+  if (( is_quectel ))
   then
-    reset_log "stopping ModemManager"
-    if ! "$service" stop
+    if ! command -v quectel >/dev/null 2>&1
     then
-      error "failed to stop ModemManager service"
+      error "quectel command not found in PATH"
       return 1
     fi
-  fi
 
-  reset_log "issuing quectel reset"
-  if ! quectel reset
-  then
-    error "quectel reset failed"
-    if (( has_service ))
+    if [[ -n "$HARD_RESET" ]] && (( has_service ))
     then
-      reset_warn "attempting to restart ModemManager after reset failure"
-      "$service" start || reset_warn "could not restart ModemManager"
+      reset_log "stopping ModemManager"
+      if ! "$service" stop
+      then
+        error "failed to stop ModemManager service"
+        return 1
+      fi
+      do_service=1
     fi
-    return 1
-  fi
 
-  if (( has_service ))
-  then
-    reset_log "starting ModemManager"
-    if ! "$service" start
+    reset_log "issuing quectel reset"
+    if ! quectel reset
     then
-      error "failed to start ModemManager service"
+      error "quectel reset failed"
+      if (( do_service ))
+      then
+        reset_warn "attempting to restart ModemManager after reset failure"
+        "$service" start || reset_warn "could not restart ModemManager"
+      fi
       return 1
+    fi
+
+    if (( do_service ))
+    then
+      reset_log "starting ModemManager"
+      if ! "$service" start
+      then
+        error "failed to start ModemManager service"
+        return 1
+      fi
+    fi
+  else
+    # Non-Quectel: avoid vendor reset; optionally restart ModemManager to nudge detection
+    if [[ -n "$HARD_RESET" ]] && (( has_service ))
+    then
+      reset_log "restarting ModemManager (non-Quectel)"
+      if ! "$service" restart
+      then
+        reset_warn "failed to restart ModemManager service"
+      fi
     fi
   fi
 
   reset_log "enabling modem"
-  if ! enable_modem
+  if ! enable_modem "$MODEM"
   then
     reset_warn "failed to enable modem after reset, retrying in 5s"
     sleep 5
-    if ! enable_modem
+    if ! enable_modem "$MODEM"
     then
       error "failed to enable modem after reset"
       return 1
@@ -1006,6 +1133,17 @@ modem_number() {
 
 watch_handle_sms() {
   local id="$1"
+  local prefer_modem_id="${2:-}"
+  # Ensure replies and operations use the modem that received the message
+  # by shadowing MODEM locally for mmcli_cmd invocations.
+  local MODEM="$MODEM"
+  if [[ -n "$prefer_modem_id" ]]
+  then
+    MODEM="$prefer_modem_id"
+  else
+    watch_warn "no modem hint for SMS $id; defaulting to any"
+    MODEM="any"
+  fi
   local tries=0
   local js state pdu sender text payload
 
@@ -1142,10 +1280,19 @@ watch_messages() {
     watch_warn "failed to prune existing SMS messages"
   fi
 
-  enable_modem || watch_warn "failed to enable modem"
+  enable_modem "$MODEM" || watch_warn "failed to enable modem"
 
+  local current_modem_id=""
   while IFS= read -r line
   do
+    # Track the modem id from the signal's path
+    if [[ "$line" =~ /org/freedesktop/ModemManager1/Modem/([0-9]+) ]]
+    then
+      current_modem_id="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ "/org/freedesktop/ModemManager1/Modem/"([0-9]+) ]]
+    then
+      current_modem_id="${BASH_REMATCH[1]}"
+    fi
     if [[ "$line" == *"/org/freedesktop/ModemManager1/SMS/"* ]]
     then
       local local_path="${line#*\"}"
@@ -1153,7 +1300,7 @@ watch_messages() {
       local id="${local_path##*/}"
       if [[ "$id" =~ ^[0-9]+$ ]]
       then
-        watch_handle_sms "$id"
+        watch_handle_sms "$id" "$current_modem_id"
       fi
     fi
   done <"$WATCH_FIFO"
@@ -1186,6 +1333,10 @@ main() {
         ;;
       --raw)
         RAW_OUTPUT=1
+        shift
+        ;;
+      --hard)
+        HARD_RESET=1
         shift
         ;;
       -q|--quiet|--silent)
@@ -1365,7 +1516,7 @@ main() {
       sms_prune_all
       ;;
     enable)
-      enable_modem
+      enable_modem "$MODEM"
       ;;
     status)
       modem_status
