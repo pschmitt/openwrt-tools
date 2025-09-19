@@ -6,6 +6,7 @@ DEBUG="${DEBUG:-}"
 NO_COLOR="${NO_COLOR:-}"
 NO_WARNING="${NO_WARNING:-}"
 VERBOSE="${VERBOSE:-}"
+QUIET="${QUIET:-}"
 
 echo_fancy() {
   local prefix="$1"
@@ -22,6 +23,11 @@ echo_fancy() {
 }
 
 echo_info() {
+  # Respect QUIET by suppressing info-level logs
+  if [[ -n "$QUIET" ]]
+  then
+    return 0
+  fi
   local prefix="INF"
   local color='\e[1m\e[34m'
 

@@ -34,6 +34,7 @@ WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 
 QUIET="${QUIET:-}"
+JSON_OUTPUT="${JSON_OUTPUT:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -66,6 +67,11 @@ Options:
   -m, --modem MODEM    Modem selector or id (default: $MODEM)
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB
+  -d, --debug          Enable debug output
+  -j, --json           Output JSON (for list)
+  -q, --quiet          Suppress info output (warnings/errors only)
+      --silent         Same as --quiet
+  -x, --trace          Enable shell tracing (set -x)
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -84,6 +90,12 @@ USAGE
 
 error() {
   echo_error "$SCRIPT_NAME: $*"
+}
+
+# Log and run generic mmcli calls (no implicit --modem)
+mmcli_call() {
+  echo_debug "[mmcli] mmcli $*"
+  command mmcli "$@"
 }
 
 # Resolve a human-friendly modem selector to a concrete modem id
@@ -120,7 +132,7 @@ get_modem_id() {
   sel="${sel_raw,,}"
 
   local list_json ids id json
-  if ! list_json="$(mmcli -L -J 2>/dev/null)"
+  if ! list_json="$(mmcli_call -L -J)"
   then
     error "could not query modem list via mmcli"
     return 1
@@ -138,7 +150,7 @@ get_modem_id() {
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
-    if ! json="$(mmcli -m "$id" -J 2>/dev/null)"
+    if ! json="$(mmcli_call -m "$id" -J)"
     then
       continue
     fi
@@ -181,7 +193,7 @@ get_modem_id() {
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
-    if ! json="$(mmcli -m "$id" -J 2>/dev/null)"
+    if ! json="$(mmcli_call -m "$id" -J)"
     then
       continue
     fi
@@ -212,6 +224,7 @@ get_modem_id() {
 }
 
 mmcli_cmd() {
+  echo_debug "[mmcli] mmcli --modem $MODEM $*"
   command mmcli --modem "$MODEM" "$@"
 }
 
@@ -304,7 +317,7 @@ sms_send() {
     local create_json
     create_json=""
     if ! create_json="$(mmcli_cmd -J --messaging-create-sms="number=${recipient}${smsc_params}" \
-      --messaging-create-sms-with-text="$tmpfile" 2>/dev/null)"
+      --messaging-create-sms-with-text="$tmpfile")"
     then
       if (( attempt == max_attempts ))
       then
@@ -355,7 +368,8 @@ sms_send() {
 
 sms_prune_all() {
   local ids
-  if ! ids="$(mmcli_cmd --messaging-list-sms -J 2>/dev/null | jq -r '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null)"
+  if ! ids="$(mmcli_cmd --messaging-list-sms -J | \
+    jq -er '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null)"
   then
     return 0
   fi
@@ -374,6 +388,68 @@ sms_prune_all() {
       error "failed to delete SMS $sms_id"
     fi
   done <<< "$ids"
+}
+
+sms_list_pretty() {
+  local list_json ids id js sender text msg_class line maxlen=80
+
+  if ! list_json="$(mmcli_cmd --messaging-list-sms -J)"
+  then
+    error "failed to list SMS messages"
+    return 1
+  fi
+
+  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#ids[@]} == 0 ))
+  then
+    return 0
+  fi
+
+  if [[ -n "$JSON_OUTPUT" ]]
+  then
+    # Emit one compact JSON object per SMS, then wrap into an array
+    {
+      for id in "${ids[@]}"
+      do
+        [[ -z "$id" ]] && continue
+        if ! js="$(mmcli_cmd --sms "$id" -J)"
+        then
+          continue
+        fi
+        jq -c --arg id "$id" '
+          {
+            id: ($id|tonumber),
+            sender: (.sms.content.number // ""),
+            text: (.sms.content.text // ""),
+            class: (.sms.content.class // ""),
+            state: (.sms.properties.state // ""),
+            pdu: (.sms.properties["pdu-type"] // ""),
+            storage: (.sms.properties.storage // "")
+          }
+        ' <<<"$js" 2>/dev/null || true
+      done
+    } | jq -s '.'
+    return 0
+  fi
+
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+    if ! js="$(mmcli_cmd --sms "$id" -J)"
+    then
+      continue
+    fi
+    sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
+    msg_class="$(jq -r '.sms.content.class // "--"' <<<"$js" 2>/dev/null)"
+    text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
+    text=${text//$'\r'/}
+    text=${text//$'\n'/\\n}
+    if (( ${#text} > maxlen ))
+    then
+      text="${text:0:maxlen}..."
+    fi
+    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_class" "$sender" "$text"
+  done
 }
 
 enable_log() {
@@ -399,7 +475,7 @@ enable_modem() {
 
   enable_log "waiting for ModemManager"
   elapsed=0
-  until mmcli -L >/dev/null 2>&1
+  until mmcli_call -L >/dev/null 2>&1
   do
     if (( elapsed >= max_wait ))
     then
@@ -418,7 +494,7 @@ enable_modem() {
   do
     list_json=""
     modem_count=0
-    if list_json="$(mmcli -L -J 2>/dev/null)"
+    if list_json="$(mmcli_call -L -J)"
     then
       modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
       if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
@@ -629,7 +705,7 @@ load_own_number() {
   fi
 
   local json number
-  if ! json="$(mmcli_cmd -J 2>/dev/null)"
+  if ! json="$(mmcli_cmd -J)"
   then
     return 1
   fi
@@ -670,7 +746,7 @@ get_smsc_number() {
 modem_status() {
   local json state power reg signal carrier
 
-  if ! json="$(mmcli_cmd -J 2>/dev/null)"
+  if ! json="$(mmcli_cmd -J)"
   then
     if [[ -z $QUIET ]]
     then
@@ -715,7 +791,12 @@ modem_status() {
     [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
 
     colorize() { # $1=colorcode, $2=text
-      if (( _nocolor )); then printf '%s' "$2"; else printf '\e[%sm%s\e[0m' "$1" "$2"; fi
+      if (( _nocolor ))
+      then
+        printf '%s' "$2"
+      else
+        printf '\e[%sm%s\e[0m' "$1" "$2"
+      fi
     }
 
     # Choose colors
@@ -746,9 +827,15 @@ modem_status() {
     sig_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
     if [[ "$sig_num" =~ ^[0-9]+$ ]]
     then
-      if (( sig_num >= 70 )); then sig_color='1;32';
-      elif (( sig_num >= 40 )); then sig_color='1;33';
-      else sig_color='1;31'; fi
+      if (( sig_num >= 70 ))
+      then
+        sig_color='1;32'
+      elif (( sig_num >= 40 ))
+      then
+        sig_color='1;33'
+      else
+        sig_color='1;31'
+      fi
     else
       sig_color='36'
     fi
@@ -766,16 +853,8 @@ modem_status() {
 }
 
 modem_number() {
-  if load_own_number
+  if ! load_own_number
   then
-    if [[ -n "$OWN_NUMBER" ]]
-    then
-      printf '%s\n' "$OWN_NUMBER"
-      return 0
-    fi
-    error "modem did not report own number"
-    return 2
-  else
     local load_rc=$?
     if (( load_rc == 1 ))
     then
@@ -785,6 +864,15 @@ modem_number() {
     fi
     return 1
   fi
+
+  if [[ -z "$OWN_NUMBER" ]]
+  then
+    error "modem did not report own number"
+    return 2
+  fi
+
+  printf '%s\n' "$OWN_NUMBER"
+  return 0
 }
 
 watch_handle_sms() {
@@ -794,7 +882,7 @@ watch_handle_sms() {
 
   while :
   do
-    if ! js="$(mmcli_cmd --sms "$id" -J 2>/dev/null)"
+    if ! js="$(mmcli_cmd --sms "$id" -J)"
     then
       return
     fi
@@ -944,12 +1032,14 @@ watch_messages() {
 
 main() {
   local command=""
+  local -a ARGS=()
 
-  while [[ $# -gt 0 ]]
+  # Global options can appear anywhere; collect non-option args into ARGS
+  while (( $# > 0 ))
   do
     case "$1" in
       -m|--modem)
-        if [[ $# -lt 2 ]]
+        if (( $# < 2 ))
         then
           error "missing value for $1"
           return 2
@@ -957,8 +1047,21 @@ main() {
         MODEM="$2"
         shift 2
         ;;
-      -q|--quiet)
+      -d|--debug)
+        DEBUG=1
+        shift
+        ;;
+      -j|--json)
+        JSON_OUTPUT=1
+        shift
+        ;;
+      -q|--quiet|--silent)
         QUIET=1
+        shift
+        ;;
+      -x|--trace)
+        PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+        set -x
         shift
         ;;
       -h|--help)
@@ -967,25 +1070,27 @@ main() {
         ;;
       --)
         shift
+        while (( $# > 0 ))
+        do
+          ARGS+=("$1")
+          shift
+        done
         break
         ;;
       *)
-        break
+        ARGS+=("$1")
+        shift
         ;;
     esac
   done
 
-  if [[ -z "$command" ]]
+  if (( ${#ARGS[@]} == 0 ))
   then
-    if [[ $# -gt 0 ]]
-    then
-      command="$1"
-      shift
-    else
-      usage >&2
-      return 1
-    fi
+    usage >&2
+    return 1
   fi
+  command="${ARGS[0]}"
+  ARGS=("${ARGS[@]:1}")
 
   case "$command" in
     send|s)
@@ -1031,16 +1136,46 @@ main() {
     return 2
   fi
 
+  # Informative log about resolved modem selection (guarded to avoid nesting)
+  if [[ -z $QUIET ]]
+  then
+    if [[ "$MODEM" == "any" ]]
+    then
+      echo_info "[mm-sms] selected modem: any"
+    else
+      local _mjson _mln
+      _mjson="$(mmcli_call -m "$MODEM" -J || true)"
+      if [[ -n "$_mjson" ]]
+      then
+        _mln="$(jq -r '
+          .modem as $m
+          | {
+              id: ($m["dbus-path"] | split("/")[-1]),
+              manufacturer: ($m.generic.manufacturer // "--"),
+              model: ($m.generic.model // "--"),
+              plugin: ($m.generic.plugin // "--"),
+              primary: ($m.generic["primary-port"] // "--"),
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+            }
+          | ("[mm-sms] selected modem: " + .id + ": " + .manufacturer + " " + .model
+             + " plugin=" + .plugin
+             + " primary=" + .primary
+             + " ports=" + .ports)
+        ' <<<"$_mjson" 2>/dev/null || true)"
+      fi
+      echo_info "${_mln:-[mm-sms] selected modem: $MODEM}"
+    fi
+  fi
+
   case "$command" in
     send)
-      sms_send "$@"
+      sms_send "${ARGS[@]}"
       ;;
     list)
-      # mmcli -m any --messaging-list-sms -J | jq -er '.["modem.messaging.sms"][]'
-      mmcli_cmd --messaging-list-sms "$@"
+      sms_list_pretty
       ;;
     read)
-      if [[ $# -lt 1 ]]
+      if (( ${#ARGS[@]} < 1 ))
       then
         error "No SMS ID/path specified"
         if ! mmcli_cmd --messaging-list-sms >&2
@@ -1049,7 +1184,7 @@ main() {
         fi
         return 1
       fi
-      sms_read "$@"
+      sms_read "${ARGS[@]}"
       ;;
     prune)
       sms_prune_all
