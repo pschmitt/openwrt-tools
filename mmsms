@@ -37,6 +37,7 @@ QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
 HARD_RESET="${HARD_RESET:-}"
+LIST_ALL="${LIST_ALL:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -76,6 +77,7 @@ Options:
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
       --hard           Reset: also stop/start modemmanager (hard reset)
+      --all            List: include messages from all modems
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -469,6 +471,167 @@ sms_prune_all() {
 
 sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
+
+  # When listing for all modems, iterate them explicitly
+  if [[ -n "$LIST_ALL" ]]
+  then
+    local mids mid had_any=""
+    if ! list_json="$(mmcli -L -J)"
+    then
+      error "failed to list modems"
+      return 1
+    fi
+    mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+    if (( ${#mids[@]} == 0 ))
+    then
+      if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+      then
+        printf '[]\n'
+      else
+        echo_info "[mm-sms:list] no SMS messages"
+      fi
+      return 0
+    fi
+
+    if [[ -n "$RAW_OUTPUT" ]]
+    then
+      local raw_items
+      raw_items="$(
+        for mid in "${mids[@]}"
+        do
+          [[ -z "$mid" ]] && continue
+          if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
+          then
+            continue
+          fi
+          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+          for id in "${ids[@]}"
+          do
+            [[ -z "$id" ]] && continue
+            js="$(mmcli --modem "$mid" --sms "$id" -J || true)" || true
+            if [[ -n "$js" ]]
+            then
+              jq -c --arg mid "$mid" '{modem_id: ($mid|tonumber), sms: .}' <<<"$js" 2>/dev/null || true
+            fi
+          done
+        done
+      )"
+      if [[ -z "$raw_items" ]]
+      then
+        printf '[]\n'
+      else
+        printf '%s\n' "$raw_items" | jq -s '.'
+      fi
+      return 0
+    fi
+
+    if [[ -n "$JSON_OUTPUT" ]]
+    then
+      local json_items
+      json_items="$(
+        for mid in "${mids[@]}"
+        do
+          [[ -z "$mid" ]] && continue
+          if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
+          then
+            continue
+          fi
+          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+          for id in "${ids[@]}"
+          do
+            [[ -z "$id" ]] && continue
+            if ! js="$(mmcli --modem "$mid" --sms "$id" -J)"
+            then
+              continue
+            fi
+            pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+            case "${pdu,,}" in
+              deliver) msg_type="received" ;;
+              submit) msg_type="sent" ;;
+              status-report) msg_type="report" ;;
+              *) msg_type="$pdu" ;;
+            esac
+            jq -c --arg id "$id" --arg type "$msg_type" --arg mid "$mid" '
+              {
+                modem_id: ($mid|tonumber),
+                id: ($id|tonumber),
+                sender: (.sms.content.number // ""),
+                text: (.sms.content.text // ""),
+                class: (.sms.content.class // ""),
+                state: (.sms.properties.state // ""),
+                pdu: (.sms.properties["pdu-type"] // ""),
+                storage: (.sms.properties.storage // ""),
+                type: $type
+              }
+            ' <<<"$js" 2>/dev/null || true
+          done
+        done
+      )"
+      if [[ -z "$json_items" ]]
+      then
+        printf '[]\n'
+      else
+        printf '%s\n' "$json_items" | jq -s '.'
+      fi
+      return 0
+    fi
+
+    # Pretty output across all modems: add a MID column
+    local _nocolor=""
+    if [[ -n "$NO_COLOR" || -n "$CRON" ]]
+    then
+      _nocolor=1
+    fi
+    local header_line
+    header_line="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'FROM' 'MSG')"
+    if [[ -n "$_nocolor" ]]
+    then
+      printf '%s\n' "$header_line"
+    else
+      printf '\e[1m%s\e[0m\n' "$header_line"
+    fi
+
+    for mid in "${mids[@]}"
+    do
+      [[ -z "$mid" ]] && continue
+      if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
+      then
+        continue
+      fi
+      mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+      for id in "${ids[@]}"
+      do
+        [[ -z "$id" ]] && continue
+        if ! js="$(mmcli --modem "$mid" --sms "$id" -J)"
+        then
+          continue
+        fi
+        sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
+        if [[ -n "$sender" && "$sender" != "--" && "$sender" != +* ]]
+        then
+          sender="+$sender"
+        fi
+        pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+        case "${pdu,,}" in
+          deliver) msg_type="received" ;;
+          submit) msg_type="sent" ;;
+          status-report) msg_type="report" ;;
+          *) msg_type="$pdu" ;;
+        esac
+        text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
+        text=${text//$'\r'/}
+        text=${text//$'\n'/\\n}
+        if (( ${#text} > maxlen ))
+        then
+          text="${text:0:maxlen}..."
+        fi
+        printf '%-4s %-4s %-10s %-18s %s\n' "$mid" "$id" "$msg_type" "$sender" "$text"
+        had_any=1
+      done
+    done
+    [[ -n "$had_any" ]] || echo_info "[mm-sms:list] no SMS messages"
+    return 0
+  fi
 
   if ! list_json="$(mmcli_cmd --messaging-list-sms -J)"
   then
@@ -1345,6 +1508,10 @@ main() {
         ;;
       --hard)
         HARD_RESET=1
+        shift
+        ;;
+      --all)
+        LIST_ALL=1
         shift
         ;;
       -q|--quiet|--silent)
