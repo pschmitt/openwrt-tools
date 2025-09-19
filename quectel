@@ -43,6 +43,30 @@ at_command() {
   echo -n "$c" | socat_cmd
 }
 
+usb_replug() {
+  local vnd="$1"
+  local pid="$2"
+
+  if [[ -z "$vnd" || -z "$pid" ]]
+  then
+    echo "ERROR: Missing vendor or product ID" >&2
+    return 1
+  fi
+
+  local usb_path
+  usb_path=$(find /sys/bus/usb/devices -name idVendor -exec grep -l "$vnd" {} \; | xargs -I{} dirname {} | xargs -I{} grep -l "$pid" {}/idProduct | xargs -I{} dirname {})
+  if [[ -z "$usb_path" ]]
+  then
+    echo "ERROR: Could not find USB device with VID:PID $vnd:$pid" >&2
+    return 1
+  fi
+
+  echo_info "Replugging USB device with VID:PID $vnd:$pid at $usb_path"
+  echo 0 | tee "$usb_path"/authorized >/dev/null
+  sleep 2
+  echo 1 | tee "$usb_path"/authorized >/dev/null
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
   case "$1" in
@@ -68,6 +92,9 @@ then
       ;;
     reset|reboot)
       at_command 'AT+QPOWD=0'
+      ;;
+    replug)
+      usb_replug 2c7c 0306
       ;;
     at|cmd|socat)
       shift
