@@ -278,7 +278,7 @@ sms_read() {
 
 sms_read_json() {
   local msg_id="$1"
-  local js pdu msg_type
+  local js pdu msg_type own=""
   if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
   then
     return 1
@@ -292,7 +292,12 @@ sms_read_json() {
     *) msg_type="$pdu" ;;
   esac
 
-  jq --arg type "$msg_type" '
+  if load_own_number
+  then
+    own="$OWN_NUMBER"
+  fi
+
+  jq --arg type "$msg_type" --arg own "$own" '
     .sms as $s
     | {
         id: ($s["dbus-path"] | split("/")[-1] | tonumber?),
@@ -307,7 +312,8 @@ sms_read_json() {
         discharge_timestamp: ($s.properties["discharge-timestamp"] // ""),
         delivery_state: ($s.properties["delivery-state"] // ""),
         delivery_report: ($s.properties["delivery-report"] // ""),
-        type: $type
+        type: $type,
+        recipient: (if $type == "received" then $own else ($s.content.number // "") end)
       }
   ' <<<"$js" 2>/dev/null
 }
@@ -532,6 +538,17 @@ sms_list_pretty() {
         for mid in "${mids[@]}"
         do
           [[ -z "$mid" ]] && continue
+          # obtain own number per modem
+          local mjs own=""
+          mjs="$(mmcli --modem "$mid" -J 2>/dev/null || true)"
+          if [[ -n "$mjs" ]]
+          then
+            own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$mjs" 2>/dev/null)"
+            if [[ -n "$own" && "$own" != +* ]]
+            then
+              own="+$own"
+            fi
+          fi
           if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
           then
             continue
@@ -551,7 +568,7 @@ sms_list_pretty() {
               status-report) msg_type="report" ;;
               *) msg_type="$pdu" ;;
             esac
-            jq -c --arg id "$id" --arg type "$msg_type" --arg mid "$mid" '
+            jq -c --arg id "$id" --arg type "$msg_type" --arg mid "$mid" --arg own "$own" '
               {
                 modem_id: ($mid|tonumber),
                 id: ($id|tonumber),
@@ -561,7 +578,8 @@ sms_list_pretty() {
                 state: (.sms.properties.state // ""),
                 pdu: (.sms.properties["pdu-type"] // ""),
                 storage: (.sms.properties.storage // ""),
-                type: $type
+                type: $type,
+                recipient: (if $type == "received" then $own else (.sms.content.number // "") end)
               }
             ' <<<"$js" 2>/dev/null || true
           done
@@ -667,6 +685,12 @@ sms_list_pretty() {
   if [[ -n "$JSON_OUTPUT" ]]
   then
     # Emit one compact JSON object per SMS, then wrap into an array
+    # Determine our own number for recipient mapping of received messages
+    local own=""
+    if load_own_number
+    then
+      own="$OWN_NUMBER"
+    fi
     {
       for id in "${ids[@]}"
       do
@@ -682,7 +706,7 @@ sms_list_pretty() {
           status-report) msg_type="report" ;;
           *) msg_type="$pdu" ;;
         esac
-        jq -c --arg id "$id" --arg type "$msg_type" '
+        jq -c --arg id "$id" --arg type "$msg_type" --arg own "$own" '
           {
             id: ($id|tonumber),
             sender: (.sms.content.number // ""),
@@ -691,7 +715,8 @@ sms_list_pretty() {
             state: (.sms.properties.state // ""),
             pdu: (.sms.properties["pdu-type"] // ""),
             storage: (.sms.properties.storage // ""),
-            type: $type
+            type: $type,
+            recipient: (if $type == "received" then $own else (.sms.content.number // "") end)
           }
         ' <<<"$js" 2>/dev/null || true
       done
@@ -1349,6 +1374,13 @@ watch_handle_sms() {
       continue
     fi
 
+    # Determine recipient (our own number, fallback to smsc)
+    local recipient="$OWN_NUMBER"
+    if [[ -z "$recipient" ]]
+    then
+      recipient="$(get_smsc_number)"
+    fi
+
     local log_text="$text"
     log_text=${log_text//$'\r'/}
     log_text=${log_text//$'\n'/\\n}
@@ -1359,7 +1391,7 @@ watch_handle_sms() {
     then
       log_text="${log_text:0:200}..."
     fi
-    watch_log "received id=$id from $sender text='$log_text'"
+    watch_log "received id=$id from $sender to $recipient text='$log_text'"
 
     local handled=0
     if [[ "$text" == "!"* ]]
@@ -1389,11 +1421,6 @@ watch_handle_sms() {
 
     if (( handled == 0 ))
     then
-      local recipient="$OWN_NUMBER"
-      if [[ -z "$recipient" ]]
-      then
-        recipient="$(get_smsc_number)"
-      fi
       payload="$(jq -n \
         --arg recipient "$recipient" \
         --arg sender "$sender" \
@@ -1626,14 +1653,18 @@ main() {
               model: ($m.generic.model // "--"),
               plugin: ($m.generic.plugin // "--"),
               primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+              phone: (($m.generic["own-numbers"][0] // "")
+                      | if . == "" then "--"
+                        else (if startswith("+") then . else "+" + . end) end)
             }
           | ("[mmsms] selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
-             + " ports=" + .ports)
+             + " ports=" + .ports
+             + " phone=" + .phone)
         ' <<<"$_j" 2>/dev/null || true)"
         echo_info "${_ln:-[mmsms] selected modem: any}"
       else
@@ -1652,14 +1683,18 @@ main() {
               model: ($m.generic.model // "--"),
               plugin: ($m.generic.plugin // "--"),
               primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+              phone: (($m.generic["own-numbers"][0] // "")
+                      | if . == "" then "--"
+                        else (if startswith("+") then . else "+" + . end) end)
             }
           | ("[mmsms] selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
-             + " ports=" + .ports)
+             + " ports=" + .ports
+             + " phone=" + .phone)
         ' <<<"$_mjson" 2>/dev/null || true)"
       fi
       echo_info "${_mln:-[mmsms] selected modem: $MODEM}"
