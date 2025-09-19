@@ -70,7 +70,7 @@ Options:
                        a string matching manufacturer/plugin/ttyUSB
   -d, --debug          Enable debug output
   -j, --json           Output JSON (for list/status/read)
-      --raw            Read: output mmcli JSON verbatim
+      --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
@@ -440,12 +440,25 @@ sms_list_pretty() {
   mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
   if (( ${#ids[@]} == 0 ))
   then
-    if [[ -n "$JSON_OUTPUT" ]]
+    if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
     then
       printf '[]\n'
     else
       echo_info "[mm-sms:list] no SMS messages"
     fi
+    return 0
+  fi
+
+  if [[ -n "$RAW_OUTPUT" ]]
+  then
+    # Collect raw mmcli JSON objects and wrap in an array
+    {
+      for id in "${ids[@]}"
+      do
+        [[ -z "$id" ]] && continue
+        mmcli_cmd --sms "$id" -J || true
+      done
+    } | jq -s '.'
     return 0
   fi
 
@@ -484,18 +497,17 @@ sms_list_pretty() {
     return 0
   fi
 
-  # Header for human-readable list (bold, respect NO_COLOR/CRON)
+  # Header for human-readable list (make entire line bold to preserve alignment)
   local _nocolor=0
   [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
-  bold() {
-    if (( _nocolor ))
-    then
-      printf '%s' "$1"
-    else
-      printf '\e[1m%s\e[0m' "$1"
-    fi
-  }
-  printf '%-4s %-10s %-18s %s\n' "$(bold ID)" "$(bold TYPE)" "$(bold FROM)" "$(bold MSG)"
+  local header_line
+  header_line="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'FROM' 'MSG')"
+  if (( _nocolor ))
+  then
+    printf '%s\n' "$header_line"
+  else
+    printf '\e[1m%s\e[0m\n' "$header_line"
+  fi
 
   for id in "${ids[@]}"
   do
@@ -824,6 +836,12 @@ modem_status() {
       error "failed to query modem status"
     fi
     return 1
+  fi
+
+  if [[ -n "$RAW_OUTPUT" ]]
+  then
+    printf '%s\n' "$json" | jq
+    return 0
   fi
 
   state="$(jq -r '(.modem.generic.state // empty)' <<<"$json")"
