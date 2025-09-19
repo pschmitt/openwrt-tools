@@ -9,7 +9,7 @@ cd "$(dirname "$(readlink -f "$0")")" || return 9
 # shellcheck source=lib/echo.sh
 source lib/echo.sh || exit 2
 
-CONFIG_FILE="${CONFIG_FILE:-/etc/mm-sms.conf}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/mmsms.conf}"
 # source configuration file
 # shellcheck source=/etc/mm-sms.conf
 if ! source "$CONFIG_FILE"
