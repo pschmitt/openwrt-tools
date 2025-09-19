@@ -405,10 +405,12 @@ wan_status() {
 
 interface() {
   local owrt_intf="$1"
-  if ! uci get "network.${owrt_intf}.device" 2>/dev/null
+  local l3_intf
+
+  if ! l3_intf=$(ifstatus "$owrt_intf" | jq -er '.l3_device // empty') || [[ -z "$l3_intf" ]]
   then
     # Below only works if the interface is up
-    ifstatus "$owrt_intf" | jq -er '.l3_device'
+    uci get "network.${owrt_intf}.device" 2>/dev/null
   fi
 }
 
