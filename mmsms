@@ -319,7 +319,7 @@ sms_send() {
 
   local recipient="$1"
   shift
-  local text=""
+  local text
 
   recipient="${recipient//[[:space:]]/}"
   if [[ -n "$recipient" && "$recipient" != +* ]]
@@ -364,8 +364,8 @@ sms_send() {
   fi
 
   local sms_id=""
-  local smsc_raw=""
-  local smsc=""
+  local smsc_raw
+  local smsc
   local smsc_params=""
   smsc_raw="$(get_smsc_number)"
   if [[ -n "$smsc_raw" ]]
@@ -537,11 +537,14 @@ sms_list_pretty() {
   fi
 
   # Header for human-readable list (make entire line bold to preserve alignment)
-  local _nocolor=0
-  [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
+  local _nocolor=""
+  if [[ -n "$NO_COLOR" || -n "$CRON" ]]
+  then
+    _nocolor=1
+  fi
   local header_line
   header_line="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'FROM' 'MSG')"
-  if (( _nocolor ))
+  if [[ -n "$_nocolor" ]]
   then
     printf '%s\n' "$header_line"
   else
@@ -616,7 +619,7 @@ enable_modem() {
 
   enable_log "waiting for modem detection"
   elapsed=0
-  local list_json=""
+  local list_json
   local modem_count=0
   while :
   do
@@ -708,8 +711,8 @@ enable_modem() {
 
 modem_reset() {
   local service="/etc/init.d/modemmanager"
-  local has_service=0
-  local do_service=0
+  local has_service=""
+  local do_service=""
 
   if [[ -x "$service" ]]
   then
@@ -719,7 +722,7 @@ modem_reset() {
   fi
 
   # Detect modem plugin/manufacturer to decide if Quectel-specific reset applies
-  local j plugin manufacturer is_quectel=0
+  local j plugin manufacturer is_quectel=""
   if j="$(mmcli_cmd -J 2>/dev/null)"
   then
     plugin="$(jq -r '.modem.generic.plugin // empty' <<<"$j" 2>/dev/null)"
@@ -732,7 +735,7 @@ modem_reset() {
     reset_warn "could not query modem to determine vendor; proceeding without Quectel reset"
   fi
 
-  if (( is_quectel ))
+  if [[ -n "$is_quectel" ]]
   then
     if ! command -v quectel >/dev/null 2>&1
     then
@@ -740,7 +743,7 @@ modem_reset() {
       return 1
     fi
 
-    if [[ -n "$HARD_RESET" ]] && (( has_service ))
+    if [[ -n "$HARD_RESET" ]] && [[ -n "$has_service" ]]
     then
       reset_log "stopping ModemManager"
       if ! "$service" stop
@@ -755,7 +758,7 @@ modem_reset() {
     if ! quectel reset
     then
       error "quectel reset failed"
-      if (( do_service ))
+      if [[ -n "$do_service" ]]
       then
         reset_warn "attempting to restart ModemManager after reset failure"
         "$service" start || reset_warn "could not restart ModemManager"
@@ -763,7 +766,7 @@ modem_reset() {
       return 1
     fi
 
-    if (( do_service ))
+    if [[ -n "$do_service" ]]
     then
       reset_log "starting ModemManager"
       if ! "$service" start
@@ -774,7 +777,7 @@ modem_reset() {
     fi
   else
     # Non-Quectel: avoid vendor reset; optionally restart ModemManager to nudge detection
-    if [[ -n "$HARD_RESET" ]] && (( has_service ))
+    if [[ -n "$HARD_RESET" ]] && [[ -n "$has_service" ]]
     then
       reset_log "restarting ModemManager (non-Quectel)"
       if ! "$service" restart
@@ -1039,11 +1042,14 @@ modem_status() {
   if [[ -z $QUIET ]]
   then
     # Color helpers (respect NO_COLOR and CRON)
-    local _nocolor=0
-    [[ -n "$NO_COLOR" || -n "$CRON" ]] && _nocolor=1
+    local _nocolor=""
+    if [[ -n "$NO_COLOR" || -n "$CRON" ]]
+    then
+      _nocolor=1
+    fi
 
     colorize() { # $1=colorcode, $2=text
-      if (( _nocolor ))
+      if [[ -n "$_nocolor" ]]
       then
         printf '%s' "$2"
       else
@@ -1307,7 +1313,7 @@ watch_messages() {
 }
 
 main() {
-  local command=""
+  local command
   local -a ARGS=()
 
   # Global options can appear anywhere; collect non-option args into ARGS
