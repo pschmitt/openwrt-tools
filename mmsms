@@ -804,7 +804,7 @@ main() {
     prune|clear|delete)
       command="prune"
       ;;
-    enable|en|start)
+    -e|*enable*|en|start)
       command="enable"
       ;;
     status|stat|st)
