@@ -56,7 +56,7 @@ get_interface() {
 
 WAN="wan"
 LTE="wwan"
-LTE_INT="wwan_int"
+LTE_INT="quectel"
 VPN="mullvad"
 # shellcheck disable=SC2206
 UCI_INTERFACES=($WAN $LTE $VPN)

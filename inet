@@ -10,7 +10,7 @@ WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
 LTE_IPV4="${LTE_IPV4:-wwan}"
 LTE_IPV6="${LTE_IPV6:-wwan6}"
-WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6" mullvad)
+WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6" quectel mullvad)
 
 VPN_SERVICES=(netbird tailscale zerotier)
 DNS_SERVICES=(adguardhome dnsmasq unbound)
