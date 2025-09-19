@@ -1374,8 +1374,18 @@ watch_handle_sms() {
       continue
     fi
 
-    # Determine recipient (our own number, fallback to smsc)
-    local recipient="$OWN_NUMBER"
+    # Determine recipient (SIM MSISDN) for the modem that received the SMS
+    # Prefer querying the current modem directly to avoid cross-modem mixups.
+    local recipient=""
+    local om_json
+    if om_json="$(mmcli_cmd -J 2>/dev/null || true)"
+    then
+      recipient="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$om_json" 2>/dev/null)"
+      if [[ -n "$recipient" && "$recipient" != +* ]]
+      then
+        recipient="+$recipient"
+      fi
+    fi
     if [[ -z "$recipient" ]]
     then
       recipient="$(get_smsc_number)"
