@@ -691,7 +691,9 @@ enable_modem() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms:enable] enabled modem: " + .id + ": " + .manufacturer + " " + .model
+          | ("[mm-sms:enable] enabled modem: id=" + .id
+             + " manufacturer=" + .manufacturer
+             + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
              + " ports=" + .ports)
@@ -1459,7 +1461,9 @@ main() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms] selected modem: " + .id + ": " + .manufacturer + " " + .model
+          | ("[mm-sms] selected modem: id=" + .id
+             + " manufacturer=" + .manufacturer
+             + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
              + " ports=" + .ports)
@@ -1483,7 +1487,9 @@ main() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mm-sms] selected modem: " + .id + ": " + .manufacturer + " " + .model
+          | ("[mm-sms] selected modem: id=" + .id
+             + " manufacturer=" + .manufacturer
+             + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
              + " ports=" + .ports)
