@@ -146,8 +146,26 @@ sms_send() {
   fi
 
   local sms_id=""
-  local smsc
-  smsc="$(get_smsc_number)"
+  local smsc_raw=""
+  local smsc=""
+  local smsc_params=""
+  smsc_raw="$(get_smsc_number)"
+  if [[ -n "$smsc_raw" ]]
+  then
+    smsc="${smsc_raw//[[:space:]]/}"
+    if [[ -n "$smsc" && "$smsc" != +* ]]
+    then
+      smsc="+$smsc"
+    fi
+    if [[ -n "$smsc" && "$smsc" =~ ^\+[0-9]+$ ]]
+    then
+      smsc_params=",smsc=$smsc"
+    elif [[ -n "$smsc_raw" ]]
+    then
+      echo_warning "[mmsms:send] invalid smsc '$smsc_raw', skipping"
+      smsc=""
+    fi
+  fi
   local attempt=1
   local max_attempts=$((SMS_SEND_RETRY_COUNT + 1))
   local rc=1
@@ -155,8 +173,10 @@ sms_send() {
   while (( attempt <= max_attempts ))
   do
     sms_id=""
-    if ! sms_id="$(mmcli_cmd --messaging-create-sms="number=$recipient,smsc=$smsc" \
-      --messaging-create-sms-with-text="$tmpfile" | grep -o "[0-9]*$")"
+    local create_json
+    create_json=""
+    if ! create_json="$(mmcli_cmd -J --messaging-create-sms="number=${recipient}${smsc_params}" \
+      --messaging-create-sms-with-text="$tmpfile" 2>/dev/null)"
     then
       if (( attempt == max_attempts ))
       then
@@ -166,6 +186,11 @@ sms_send() {
       echo_warning "[mm-sms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
       continue
+    fi
+
+    if ! sms_id="$(jq -r '.modem.messaging["created-sms"] // empty' <<<"$create_json" 2>/dev/null)"
+    then
+      sms_id=""
     fi
 
     if [[ -z "$sms_id" ]]
