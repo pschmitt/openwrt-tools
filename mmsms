@@ -640,11 +640,11 @@ configure_huawei_modem() {
   echo_info "huawei: configuring modem for SMS text mode"
   local resp
   resp="$(at_command 'AT')"
-  echo_info "huawei: AT -> ${resp:-<no response>}"
+  echo_info "huawei: AT (baseline connectivity check) -> ${resp:-<no response>}"
   resp="$(at_command 'AT+CMEE=2')"
-  echo_info "huawei: AT+CMEE=2 -> ${resp:-<no response>}"
+  echo_info "huawei: AT+CMEE=2 (enable verbose error codes) -> ${resp:-<no response>}"
   resp="$(at_command 'AT+CMGF?')"
-  echo_info "huawei: AT+CMGF? -> ${resp:-<no response>}"
+  echo_info "huawei: AT+CMGF? (query SMS message format) -> ${resp:-<no response>}"
 }
 
 configure_modem_vendor() {
@@ -1846,6 +1846,9 @@ enable_modem() {
         ' <<<"$list_json" || printf 'false')"
         if [[ "$present" == "true" ]]
         then
+          # Capture brief modem details for logging once detection succeeds
+          local _brief
+          _brief="$(modem_info_brief "$expect_id" 2>/dev/null)"
           break
         fi
       else
@@ -1868,7 +1871,37 @@ enable_modem() {
 
   if [[ -n "$expect_id" && "$expect_id" =~ ^[0-9]+$ ]]
   then
-    enable_log "detected expected modem id=$expect_id"
+    if [[ -n "$list_json" ]]
+    then
+      local _detected_info
+      _detected_info="$(jq -r --arg id "$expect_id" '
+        (."modem-list" // [])
+        | map(select(split("/")[-1] == $id))
+        | first
+        | select(. != null)
+        | {
+            id: (split("/")[-1]),
+            manufacturer: "--",
+            model: "--",
+            plugin: "--",
+            primary: "--",
+            ports: "--"
+          }
+        | ("detected expected modem: id=" + .id
+             + " manufacturer=" + .manufacturer
+             + " model=" + .model
+             + " plugin=" + .plugin
+             + " primary=" + .primary
+             + " ports=" + .ports)
+      ' <<<"$list_json")"
+      if [[ -z "$_detected_info" || "$_detected_info" == "null" ]]
+      then
+        _detected_info="detected expected modem id=$expect_id"
+      fi
+      enable_log "$_detected_info"
+    else
+      enable_log "detected expected modem id=$expect_id"
+    fi
   else
     enable_log "detected $modem_count modem(s)"
   fi
@@ -2124,9 +2157,11 @@ watch_canon_number() {
 
 watch_in_whitelist() {
   local num
+  local original="${1:-}"
   num="$(watch_canon_number "${1:-}")"
   if [[ -z "$num" ]]
   then
+    echo_warning "watch: sender '${original}' not whitelisted (empty canonical number); whitelist=${SMS_WHITELIST[*]}"
     return 1
   fi
   local allowed canon_allowed
@@ -2135,9 +2170,11 @@ watch_in_whitelist() {
     canon_allowed="$(watch_canon_number "$allowed")"
     if [[ -n "$canon_allowed" && "$num" == "$canon_allowed" ]]
     then
+      echo_info "watch: sender '${original}' matched whitelist entry '${allowed}'; whitelist=${SMS_WHITELIST[*]}"
       return 0
     fi
   done
+  echo_warning "watch: sender '${original}' not in whitelist; whitelist=${SMS_WHITELIST[*]}"
   return 1
 }
 
