@@ -162,7 +162,7 @@ get_home_cc() {
 
 # Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
 modem_info_brief() {
-  local j info id manufacturer model plugin primary
+  local j info id manufacturer model plugin primary own cc=""
   if j="$(mmcli_cmd -J 2>/dev/null || true)"
   then
     id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j" 2>/dev/null)"
@@ -170,14 +170,63 @@ modem_info_brief() {
     model="$(jq -r '.modem.generic.model // "--"' <<<"$j" 2>/dev/null)"
     plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j" 2>/dev/null)"
     primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j" 2>/dev/null)"
+    own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+    if [[ "$own" == +* ]]
+    then
+      local digits="${own#+}"
+      if [[ "$digits" == 1* ]]
+      then
+        cc="1"
+      else
+        cc="${digits:0:2}"
+      fi
+    fi
     if [[ -n "$id" ]]
     then
       info="id=$id manufacturer=$manufacturer model=$model plugin=$plugin primary=$primary"
+      if [[ -n "$cc" ]]
+      then
+        info+=" cc=$(cc_to_label "$cc")"
+      fi
       printf '%s' "$info"
       return 0
     fi
   fi
   printf '%s' "$MODEM"
+}
+
+# Derive a simple country code from a phone number in +E.164 form
+phone_cc() {
+  local n="$1"
+  if [[ "$n" == +* ]]
+  then
+    local d="${n#+}"
+    if [[ "$d" == 1* ]]
+    then
+      printf '1'
+      return 0
+    fi
+    printf '%s' "${d:0:2}"
+    return 0
+  fi
+  printf '%s' "--"
+}
+
+# Map a numeric country calling code to a short human-readable label
+cc_to_label() {
+  case "$1" in
+    1) printf 'US' ;;
+    33) printf 'FR' ;;
+    49) printf 'DE' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Return a human-readable CC label (US/FR/DE) for a +E.164 phone number
+phone_cc_label() {
+  local cc
+  cc="$(phone_cc "$1")"
+  cc_to_label "$cc"
 }
 
 # Send a line to the system log if `logger` is available
@@ -701,7 +750,7 @@ sms_prune_sent_modems() {
     error "failed to list modems for pruning"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -725,7 +774,7 @@ sms_prune_all_modems() {
     error "failed to list modems for pruning"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -754,7 +803,7 @@ sms_list_pretty() {
       error "failed to list modems"
       return 1
     fi
-    mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+    mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
     if (( ${#mids[@]} == 0 ))
     then
       if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
@@ -1144,14 +1193,26 @@ enable_modem() {
               model: ($m.generic.model // "--"),
               plugin: ($m.generic.plugin // "--"),
               primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+              phone: (($m.generic["own-numbers"][0] // "")
+                      | if . == "" then "--"
+                        else (if startswith("+") then . else "+" + . end) end),
+              cc: ((($m.generic["own-numbers"][0] // "") ) as $p
+                   | if $p|startswith("+1") then "1"
+                     elif $p|startswith("+") then ($p[1:3])
+                     else "--" end)
             }
           | ("enabled modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
              + " primary=" + .primary
-             + " ports=" + .ports)
+             + " ports=" + .ports
+             + " phone=" + .phone
+             + " cc=" + (if .phone|startswith("+1") then "US"
+                         elif .phone|startswith("+33") then "FR"
+                         elif .phone|startswith("+49") then "DE"
+                         else "--" end))
         ' <<<"$_ej" 2>/dev/null || true)"
         if [[ -n "$_eln" ]]
         then
@@ -1173,7 +1234,7 @@ enable_all_modems() {
     error "failed to list modems to enable"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -1760,7 +1821,9 @@ watch_handle_sms() {
     then
       log_recipient="--"
     fi
-    watch_log "received id=$id from $sender to $log_recipient text='$log_text'"
+    local sender_cc
+    sender_cc="$(phone_cc_label "$sender")"
+    watch_log "received id=$id from $sender (cc=$sender_cc) to $log_recipient text='$log_text'"
 
     local handled=0
     if [[ "$text" == "!"* ]]
@@ -1799,10 +1862,44 @@ watch_handle_sms() {
         --arg date "$(date -Iseconds)" \
         '{recipient:$recipient, sender:$sender, text:$text, date: $date}')"
       watch_log "forwarding id=$id from $sender to webhook"
-      if ! curl -sS -m 10 -H 'Content-Type: application/json' \
-        -X POST -d "$payload" "$WEBHOOK_URL" >/dev/null
+      local resp rc code body log_body
+      resp="$(curl -sS -m 10 -H 'Content-Type: application/json' -w $'\n%{http_code}' \
+        -X POST -d "$payload" "$WEBHOOK_URL" 2>&1)"
+      rc=$?
+      if (( rc != 0 ))
       then
-        watch_warn "webhook delivery failed for id=$id"
+        log_body="$resp"
+        log_body=${log_body//$'\r'/}
+        log_body=${log_body//$'\n'/\\n}
+        log_body=${log_body//\\/\\\\}
+        if (( ${#log_body} > 200 ))
+        then
+          log_body="${log_body:0:200}..."
+        fi
+        watch_warn "webhook delivery error rc=$rc output='$log_body'"
+      else
+        code="${resp##*$'\n'}"
+        body="${resp%$'\n'*}"
+        if [[ "$code" =~ ^[0-9]{3}$ ]]
+        then
+          log_body="$body"
+        else
+          code="n/a"
+          log_body="$resp"
+        fi
+        log_body=${log_body//$'\r'/}
+        log_body=${log_body//$'\n'/\\n}
+        log_body=${log_body//\\/\\\\}
+        if (( ${#log_body} > 200 ))
+        then
+          log_body="${log_body:0:200}..."
+        fi
+        if [[ "$code" =~ ^2 ]]
+        then
+          watch_log "webhook response code=$code body='$log_body'"
+        else
+          watch_warn "webhook response code=$code body='$log_body'"
+        fi
       fi
     fi
 
@@ -2026,68 +2123,124 @@ main() {
     fi
   fi
 
-  # Informative log about resolved modem selection (guarded to avoid nesting)
+  # Informative log about modem selection
   if [[ -z $QUIET ]]
   then
-    if [[ "$MODEM" == "any" ]]
+    if [[ "$command" == "watch" && -n "$ALL_MODEMS" ]]
     then
-      # Resolve which modem 'any' targets by querying mmcli -m any -J
-      local _j _ln
-      if _j="$(mmcli_cmd -J 2>/dev/null || true)"
+      # For watch with --all, list all modems explicitly
+      local _list _ids _id _j _ln
+      if _list="$(mmcli -L -J 2>/dev/null)"
       then
-        _ln="$(jq -r '
-          .modem as $m
-          | {
-              id: ($m["dbus-path"] | split("/")[-1]),
-              manufacturer: ($m.generic.manufacturer // "--"),
-              model: ($m.generic.model // "--"),
-              plugin: ($m.generic.plugin // "--"),
-              primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
-              phone: (($m.generic["own-numbers"][0] // "")
-                      | if . == "" then "--"
-                        else (if startswith("+") then . else "+" + . end) end)
-            }
-          | ("selected modem: id=" + .id
-             + " manufacturer=" + .manufacturer
-             + " model=" + .model
-             + " plugin=" + .plugin
-             + " primary=" + .primary
-             + " ports=" + .ports
-             + " phone=" + .phone)
-        ' <<<"$_j" 2>/dev/null || true)"
-        echo_info "${_ln:-selected modem: any}"
+        mapfile -t _ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$_list" 2>/dev/null | sort -n)
+        echo_info "listening on all modems: ${#_ids[@]} detected"
+        for _id in "${_ids[@]}"
+        do
+          [[ -z "$_id" ]] && continue
+          _j="$(mmcli -m "$_id" -J 2>/dev/null || true)"
+          if [[ -n "$_j" ]]
+          then
+            _ln="$(jq -r '
+              .modem as $m
+              | {
+                  id: ($m["dbus-path"] | split("/")[-1]),
+                  manufacturer: ($m.generic.manufacturer // "--"),
+                  model: ($m.generic.model // "--"),
+                  plugin: ($m.generic.plugin // "--"),
+                  primary: ($m.generic["primary-port"] // "--"),
+                  ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+                  phone: (($m.generic["own-numbers"][0] // "")
+                          | if . == "" then "--"
+                            else (if startswith("+") then . else "+" + . end) end)
+                }
+              | ("  id=" + .id
+                 + " manufacturer=" + .manufacturer
+                 + " model=" + .model
+                 + " plugin=" + .plugin
+                 + " primary=" + .primary
+                 + " ports=" + .ports
+                 + " phone=" + .phone
+                 + " cc=" + (if .phone|startswith("+1") then "US"
+                             elif .phone|startswith("+33") then "FR"
+                             elif .phone|startswith("+49") then "DE"
+                             else "--" end))
+            ' <<<"$_j" 2>/dev/null || true)"
+            echo_info "${_ln:-  id=$_id}"
+          else
+            echo_info "  id=$_id"
+          fi
+        done
       else
-        echo_info "selected modem: any"
+        echo_info "listening on all modems"
       fi
     else
-      local _mjson _mln
-      _mjson="$(mmcli -m "$MODEM" -J || true)"
-      if [[ -n "$_mjson" ]]
+      if [[ "$MODEM" == "any" ]]
       then
-        _mln="$(jq -r '
-          .modem as $m
-          | {
-              id: ($m["dbus-path"] | split("/")[-1]),
-              manufacturer: ($m.generic.manufacturer // "--"),
-              model: ($m.generic.model // "--"),
-              plugin: ($m.generic.plugin // "--"),
-              primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
-              phone: (($m.generic["own-numbers"][0] // "")
-                      | if . == "" then "--"
-                        else (if startswith("+") then . else "+" + . end) end)
-            }
-          | ("selected modem: id=" + .id
-             + " manufacturer=" + .manufacturer
-             + " model=" + .model
-             + " plugin=" + .plugin
-             + " primary=" + .primary
-             + " ports=" + .ports
-             + " phone=" + .phone)
-        ' <<<"$_mjson" 2>/dev/null || true)"
+        local _j _ln
+        if _j="$(mmcli_cmd -J 2>/dev/null || true)"
+        then
+          _ln="$(jq -r '
+            .modem as $m
+            | {
+                id: ($m["dbus-path"] | split("/")[-1]),
+                manufacturer: ($m.generic.manufacturer // "--"),
+                model: ($m.generic.model // "--"),
+                plugin: ($m.generic.plugin // "--"),
+                primary: ($m.generic["primary-port"] // "--"),
+                ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+                phone: (($m.generic["own-numbers"][0] // "")
+                        | if . == "" then "--"
+                          else (if startswith("+") then . else "+" + . end) end)
+              }
+            | ("selected modem: id=" + .id
+               + " manufacturer=" + .manufacturer
+               + " model=" + .model
+               + " plugin=" + .plugin
+               + " primary=" + .primary
+               + " ports=" + .ports
+               + " phone=" + .phone
+               + " cc=" + (if .phone|startswith("+1") then "US"
+                           elif .phone|startswith("+33") then "FR"
+                           elif .phone|startswith("+49") then "DE"
+                           else "--" end))
+          ' <<<"_j" 2>/dev/null || true)"
+          echo_info "${_ln:-selected modem: any}"
+        else
+          echo_info "selected modem: any"
+        fi
+      else
+        local _mjson _mln
+        _mjson="$(mmcli -m "$MODEM" -J 2>/dev/null || true)"
+        if [[ -n "$_mjson" ]]
+        then
+          _mln="$(jq -r '
+            .modem as $m
+            | {
+                id: ($m["dbus-path"] | split("/")[-1]),
+                manufacturer: ($m.generic.manufacturer // "--"),
+                model: ($m.generic.model // "--"),
+                plugin: ($m.generic.plugin // "--"),
+                primary: ($m.generic["primary-port"] // "--"),
+                ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
+                phone: (($m.generic["own-numbers"][0] // "")
+                        | if . == "" then "--"
+                          else (if startswith("+") then . else "+" + . end) end)
+              }
+            | ("selected modem: id=" + .id
+               + " manufacturer=" + .manufacturer
+               + " model=" + .model
+               + " plugin=" + .plugin
+               + " primary=" + .primary
+               + " ports=" + .ports
+               + " phone=" + .phone
+               + " cc=" + (if .phone|startswith("+1") then "US"
+                           elif .phone|startswith("+33") then "FR"
+                           elif .phone|startswith("+49") then "DE"
+                           else "--" end))
+          ' <<<"$_mjson" 2>/dev/null || true)"
+        fi
+        echo_info "${_mln:-selected modem: $MODEM}"
       fi
-      echo_info "${_mln:-selected modem: $MODEM}"
     fi
   fi
 
