@@ -1024,6 +1024,7 @@ sms_send() {
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
       rc=0
+      echo_success "message sent with modem={$log_modem} recipient=$recipient"
       break
     fi
 
@@ -1877,8 +1878,8 @@ watch_send_reply() {
   log_text="$(abbrev_text_for_log "$msg")"
   local log_modem
   log_modem="$(modem_info_brief)"
-  watch_log "sending reply modem=$log_modem to $to text='$log_text'"
-  log_sys "sending reply modem=$log_modem to $to text='$log_text'"
+  watch_log "sending reply with modem={$log_modem} recipient=$to text='$log_text'"
+  log_sys "sending reply with modem={$log_modem} recipient=$to text='$log_text'"
   if [[ -n "$FALLBACK" ]]
   then
     if ! sms_send_with_fallback "$to" "$msg"
