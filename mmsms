@@ -886,11 +886,12 @@ sms_send() {
       smsc=""
     fi
   fi
-  local attempt=1
+  local create_attempt=1
   local max_attempts=$((SMS_SEND_RETRY_COUNT + 1))
   local rc=1
 
-  while (( attempt <= max_attempts ))
+  # Create the SMS first (retrying creation only if creation itself fails)
+  while (( create_attempt <= max_attempts ))
   do
     sms_id=""
     local create_json
@@ -898,13 +899,14 @@ sms_send() {
     if ! create_json="$(mmcli_cmd -J --messaging-create-sms="number=${recipient}${smsc_params}" \
       --messaging-create-sms-with-text="$tmpfile")"
     then
-      if (( attempt == max_attempts ))
+      if (( create_attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        break
+        rm -f "$tmpfile" 2>/dev/null || true
+        return 1
       fi
-      echo_warning "failed to create SMS (attempt $attempt/$max_attempts), retrying"
-      attempt=$((attempt + 1))
+      echo_warning "failed to create SMS (attempt $create_attempt/$max_attempts), retrying"
+      create_attempt=$((create_attempt + 1))
       continue
     fi
 
@@ -915,30 +917,36 @@ sms_send() {
 
     if [[ -z "$sms_id" ]]
     then
-      if (( attempt == max_attempts ))
+      if (( create_attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        break
+        rm -f "$tmpfile" 2>/dev/null || true
+        return 1
       fi
-      echo_warning "received empty SMS id (attempt $attempt/$max_attempts), retrying"
-      attempt=$((attempt + 1))
+      echo_warning "received empty SMS id (attempt $create_attempt/$max_attempts), retrying"
+      create_attempt=$((create_attempt + 1))
       continue
     fi
+    break
+  done
 
+  # Now retry only the send step for the created SMS id
+  local send_attempt=1
+  while (( send_attempt <= max_attempts ))
+  do
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
       rc=0
       break
     fi
 
-    if (( attempt == max_attempts ))
+    if (( send_attempt == max_attempts ))
     then
       error "failed to send SMS after $max_attempts attempts"
       break
     fi
-
-    echo_warning "failed to send SMS (attempt $attempt/$max_attempts), retrying"
-    attempt=$((attempt + 1))
+    echo_warning "failed to send SMS (attempt $send_attempt/$max_attempts), retrying"
+    send_attempt=$((send_attempt + 1))
   done
 
   rm -f "$tmpfile" 2>/dev/null || true
@@ -1033,54 +1041,61 @@ sms_send_with_fallback() {
 
 sms_prune_all() {
   local ids
-  if ! ids="$(mmcli_cmd --messaging-list-sms -J | \
-    jq -er '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null)"
+  mapfile -t ids < <(mmcli_cmd --messaging-list-sms -J | \
+    jq -r '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null | sort -n)
+
+  local total=${#ids[@]}
+  if (( total == 0 ))
   then
     return 0
   fi
 
-  if [[ -z "$ids" ]]
-  then
-    return 0
-  fi
-
-  while IFS= read -r sms_id
+  local i=0 sms_id
+  for sms_id in "${ids[@]}"
   do
     [[ -z "$sms_id" ]] && continue
-    echo_info "deleting SMS $sms_id"
+    i=$((i + 1))
+    echo_info "deleting SMS $sms_id ($i/$total)"
     if ! mmcli_cmd --messaging-delete-sms="$sms_id"
     then
       error "failed to delete SMS $sms_id"
     fi
-  done <<< "$ids"
+  done
 }
 
 sms_prune_sent() {
   # Delete only messages that are outgoing and already sent
-  local list ids id js state pdu
+  local list ids id js state pdu sent_ids=()
   if ! list="$(mmcli_cmd --messaging-list-sms -J 2>/dev/null)"
   then
     return 0
   fi
-  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list" 2>/dev/null)
+  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list" 2>/dev/null | sort -n)
   if (( ${#ids[@]} == 0 ))
   then
     return 0
   fi
-  for id in "${ids[@]}"
-  do
+  # First collect sent IDs
+  for id in "${ids[@]}"; do
     [[ -z "$id" ]] && continue
-    if ! js="$(mmcli_cmd --sms "$id" -J 2>/dev/null)"
-    then
-      continue
-    fi
+    if ! js="$(mmcli_cmd --sms "$id" -J 2>/dev/null)"; then continue; fi
     state="$(jq -r '.sms.properties.state // empty' <<<"$js" 2>/dev/null)"
     pdu="$(jq -r '.sms.properties["pdu-type"] // empty' <<<"$js" 2>/dev/null)"
     if [[ "$state" == "sent" && "$pdu" == "submit" ]]
     then
-      echo_info "deleting sent SMS $id"
-      mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1 || true
+      sent_ids+=("$id")
     fi
+  done
+  local total=${#sent_ids[@]}
+  if (( total == 0 ))
+  then
+    return 0
+  fi
+  local i=0
+  for id in "${sent_ids[@]}"; do
+    i=$((i + 1))
+    echo_info "deleting sent SMS $id ($i/$total)"
+    mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1 || true
   done
 }
 
