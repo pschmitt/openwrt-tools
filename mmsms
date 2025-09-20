@@ -32,6 +32,7 @@ SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
+LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -386,6 +387,61 @@ phone_cc_label() {
   cc_to_label "$cc"
 }
 
+# Ensure a phone/MSISDN has leading '+' when it's only digits
+ensure_plus() {
+  local n="${1:-}"
+  if [[ -z "$n" ]]
+  then
+    printf '%s' ""
+    return 0
+  fi
+  if [[ "$n" != +* && "$n" =~ ^[0-9]+$ ]]
+  then
+    printf '+%s' "$n"
+  else
+    printf '%s' "$n"
+  fi
+}
+
+# Abbreviate text for logs: strip CR, escape newlines/backslashes, and truncate
+abbrev_text_for_log() {
+  local s="${1:-}"
+  local maxlen="${2:-$LOG_ABBREV_LEN}"
+  s=${s//$'\r'/}
+  s=${s//$'\n'/\\n}
+  s=${s//\\/\\\\}
+  if [[ -z "$s" ]]
+  then
+    s="<empty>"
+  fi
+  if (( ${#s} > maxlen ))
+  then
+    s="${s:0:maxlen}..."
+  fi
+  printf '%s' "$s"
+}
+
+# Map mmcli SMS pdu-type to a friendly type label
+pdu_to_type() {
+  local pdu="${1,,}"
+  case "$pdu" in
+    deliver) printf 'received' ;;
+    submit) printf 'sent' ;;
+    status-report) printf 'report' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# List modem ids sorted numerically (one per line)
+list_modem_ids_sorted() {
+  local list_json
+  if ! list_json="$(mmcli -L -J)"
+  then
+    return 1
+  fi
+  jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n
+}
+
 # Resolve default recipient based on modem/country-specific variables.
 # Order:
 #  - DEFAULT_RECIPIENT_<LABEL> (US/FR/DE)
@@ -722,12 +778,7 @@ sms_read_json() {
   fi
 
   pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-  case "${pdu,,}" in
-    deliver) msg_type="received" ;;
-    submit) msg_type="sent" ;;
-    status-report) msg_type="report" ;;
-    *) msg_type="$pdu" ;;
-  esac
+  msg_type="$(pdu_to_type "$pdu")"
 
   if load_own_number
   then
@@ -806,10 +857,7 @@ sms_send() {
   fi
 
   recipient="${recipient//[[:space:]]/}"
-  if [[ -n "$recipient" && "$recipient" != +* ]]
-  then
-    recipient="+$recipient"
-  fi
+  recipient="$(ensure_plus "$recipient")"
 
   # Enforce local-only sending unless --allow-foreign is set
   if [[ -z "$ALLOW_FOREIGN" ]]
@@ -839,17 +887,7 @@ sms_send() {
   # Log outgoing SMS (preview) to stderr and syslog
   printf 'text=%q\n' "$text" >&2
   local log_text
-  log_text="$text"
-  log_text=${log_text//$'\r'/}
-  log_text=${log_text//$'\n'/\\n}
-  log_text=${log_text//\\/\\\\}
-  if [[ -z "$log_text" ]]
-  then
-    log_text="<empty>"
-  elif (( ${#log_text} > 200 ))
-  then
-    log_text="${log_text:0:200}..."
-  fi
+  log_text="$(abbrev_text_for_log "$text")"
   local log_modem
   log_modem="$(modem_info_brief)"
   echo_info "sending sms modem=$log_modem to $recipient text='$log_text'"
@@ -1012,11 +1050,10 @@ sms_send_with_fallback() {
       cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j" 2>/dev/null)"
     fi
   fi
-  if ! list_json="$(mmcli -L -J)"
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   for mid in "${mids[@]}"
   do
     [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
@@ -1110,13 +1147,12 @@ sms_prune_sent() {
 }
 
 sms_prune_sent_modems() {
-  local list_json mids mid
-  if ! list_json="$(mmcli -L -J)"
+  local mids mid
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     error "failed to list modems for pruning"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -1135,13 +1171,12 @@ sms_prune_sent_modems() {
 }
 
 sms_prune_all_modems() {
-  local list_json mids mid
-  if ! list_json="$(mmcli -L -J)"
+  local mids mid
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     error "failed to list modems for pruning"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -1166,12 +1201,11 @@ sms_list_pretty() {
   if [[ -n "$ALL_MODEMS" ]]
   then
     local mids mid had_any=""
-    if ! list_json="$(mmcli -L -J)"
+    if ! mapfile -t mids < <(list_modem_ids_sorted)
     then
       error "failed to list modems"
       return 1
     fi
-    mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
     if (( ${#mids[@]} == 0 ))
     then
       if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
@@ -1228,10 +1262,7 @@ sms_list_pretty() {
           if [[ -n "$mjs" ]]
           then
             own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$mjs" 2>/dev/null)"
-            if [[ -n "$own" && "$own" != +* ]]
-            then
-              own="+$own"
-            fi
+            own="$(ensure_plus "$own")"
           fi
           if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
           then
@@ -1246,12 +1277,7 @@ sms_list_pretty() {
               continue
             fi
             pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-            case "${pdu,,}" in
-              deliver) msg_type="received" ;;
-              submit) msg_type="sent" ;;
-              status-report) msg_type="report" ;;
-              *) msg_type="$pdu" ;;
-            esac
+            msg_type="$(pdu_to_type "$pdu")"
             jq -c --arg id "$id" --arg type "$msg_type" --arg mid "$mid" --arg own "$own" '
               {
                 modem_id: ($mid|tonumber),
@@ -1309,17 +1335,9 @@ sms_list_pretty() {
           continue
         fi
         sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
-        if [[ -n "$sender" && "$sender" != "--" && "$sender" != +* ]]
-        then
-          sender="+$sender"
-        fi
+        sender="$(ensure_plus "$sender")"
         pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-        case "${pdu,,}" in
-          deliver) msg_type="received" ;;
-          submit) msg_type="sent" ;;
-          status-report) msg_type="report" ;;
-          *) msg_type="$pdu" ;;
-        esac
+        msg_type="$(pdu_to_type "$pdu")"
         text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
         text=${text//$'\r'/}
         text=${text//$'\n'/\\n}
@@ -1384,12 +1402,7 @@ sms_list_pretty() {
           continue
         fi
         pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-        case "${pdu,,}" in
-          deliver) msg_type="received" ;;
-          submit) msg_type="sent" ;;
-          status-report) msg_type="report" ;;
-          *) msg_type="$pdu" ;;
-        esac
+        msg_type="$(pdu_to_type "$pdu")"
         jq -c --arg id "$id" --arg type "$msg_type" --arg own "$own" '
           {
             id: ($id|tonumber),
@@ -1431,18 +1444,9 @@ sms_list_pretty() {
       continue
     fi
     sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
-    # Normalize sender phone format: ensure leading '+' when present
-    if [[ -n "$sender" && "$sender" != "--" && "$sender" != +* ]]
-    then
-      sender="+$sender"
-    fi
+    sender="$(ensure_plus "$sender")"
     pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-    case "${pdu,,}" in
-      deliver) msg_type="received" ;;
-      submit) msg_type="sent" ;;
-      status-report) msg_type="report" ;;
-      *) msg_type="$pdu" ;;
-    esac
+    msg_type="$(pdu_to_type "$pdu")"
     text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
     text=${text//$'\r'/}
     text=${text//$'\n'/\\n}
@@ -1598,13 +1602,12 @@ enable_modem() {
 }
 
 enable_all_modems() {
-  local list_json mids mid
-  if ! list_json="$(mmcli -L -J)"
+  local mids mid
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     error "failed to list modems to enable"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -1726,13 +1729,12 @@ modem_reset() {
 }
 
 modem_reset_all() {
-  local list_json mids mid
-  if ! list_json="$(mmcli -L -J)"
+  local mids mid
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     error "failed to list modems to reset"
     return 1
   fi
-  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
   if (( ${#mids[@]} == 0 ))
   then
     echo_info "no modems detected"
@@ -1817,18 +1819,8 @@ watch_send_reply() {
   local to="$1"
   local msg="$2"
   # Log outgoing SMS (abbreviate text and escape newlines)
-  local log_text="$msg"
-  log_text=${log_text//$'\r'/}
-  log_text=${log_text//$'\n'/\\n}
-  # Prevent echo -e from interpreting escapes
-  log_text=${log_text//\\/\\\\}
-  if [[ -z "$log_text" ]]
-  then
-    log_text="<empty>"
-  elif (( ${#log_text} > 200 ))
-  then
-    log_text="${log_text:0:200}..."
-  fi
+  local log_text
+  log_text="$(abbrev_text_for_log "$msg")"
   local log_modem
   log_modem="$(modem_info_brief)"
   watch_log "sending reply modem=$log_modem to $to text='$log_text'"
@@ -1926,13 +1918,10 @@ get_smsc_number() {
   resp="$(at_command 'AT+CSCA?')"
   if [[ -n "$resp" ]]
   then
-  smsc="$(at_first_quoted_decoded "$resp")"
+    smsc="$(at_first_quoted_decoded "$resp")"
     if [[ -n "$smsc" ]]
     then
-      if [[ "$smsc" != +* && "$smsc" =~ ^[0-9]+$ ]]
-      then
-        smsc="+$smsc"
-      fi
+      smsc="$(ensure_plus "$smsc")"
       SMSC_NUMBER="$smsc"
       printf '%s' "$SMSC_NUMBER"
       return 0
@@ -1991,10 +1980,7 @@ modem_status() {
   then
     carrier=unknown
   fi
-  if [[ -n "$own" && "$own" != +* ]]
-  then
-    own="+$own"
-  fi
+  own="$(ensure_plus "$own")"
   if [[ -z "$own" ]]
   then
     own=unknown
@@ -2179,24 +2165,11 @@ watch_handle_sms() {
     if om_json="$(mmcli_cmd -J)"
     then
       recipient="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$om_json" 2>/dev/null)"
-      if [[ -n "$recipient" && "$recipient" != +* ]]
-      then
-        recipient="+$recipient"
-      fi
+      recipient="$(ensure_plus "$recipient")"
     fi
 
-    local log_text="$text"
-    log_text=${log_text//$'\r'/}
-    log_text=${log_text//$'\n'/\\n}
-    # Prevent echo -e from interpreting escapes
-    log_text=${log_text//\\/\\\\}
-    if [[ -z "$log_text" ]]
-    then
-      log_text="<empty>"
-    elif (( ${#log_text} > 200 ))
-    then
-      log_text="${log_text:0:200}..."
-    fi
+    local log_text
+    log_text="$(abbrev_text_for_log "$text")"
     local log_recipient="$recipient"
     if [[ -z "$log_recipient" ]]
     then
@@ -2249,31 +2222,17 @@ watch_handle_sms() {
       rc=$?
       if (( rc != 0 ))
       then
-        log_body="$resp"
-        log_body=${log_body//$'\r'/}
-        log_body=${log_body//$'\n'/\\n}
-        log_body=${log_body//\\/\\\\}
-        if (( ${#log_body} > 200 ))
-        then
-          log_body="${log_body:0:200}..."
-        fi
+        log_body="$(abbrev_text_for_log "$resp")"
         watch_warn "webhook delivery error rc=$rc output='$log_body'"
       else
         code="${resp##*$'\n'}"
         body="${resp%$'\n'*}"
         if [[ "$code" =~ ^[0-9]{3}$ ]]
         then
-          log_body="$body"
+          log_body="$(abbrev_text_for_log "$body")"
         else
           code="n/a"
-          log_body="$resp"
-        fi
-        log_body=${log_body//$'\r'/}
-        log_body=${log_body//$'\n'/\\n}
-        log_body=${log_body//\\/\\\\}
-        if (( ${#log_body} > 200 ))
-        then
-          log_body="${log_body:0:200}..."
+          log_body="$(abbrev_text_for_log "$resp")"
         fi
         if [[ "$code" =~ ^2 ]]
         then
@@ -2638,9 +2597,8 @@ main() {
     then
       # For watch with --all, list all modems explicitly
       local _list _ids _id _j _ln
-      if _list="$(mmcli -L -J)"
+      if mapfile -t _ids < <(list_modem_ids_sorted)
       then
-        mapfile -t _ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$_list" 2>/dev/null | sort -n)
         echo_info "listening on all modems: ${#_ids[@]} detected"
         for _id in "${_ids[@]}"
         do
