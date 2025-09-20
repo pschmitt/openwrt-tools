@@ -37,6 +37,7 @@ JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
 HARD_RESET="${HARD_RESET:-}"
 LIST_ALL="${LIST_ALL:-}"
+SENT_ONLY="${SENT_ONLY:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -77,6 +78,7 @@ Options:
   -x, --trace          Enable shell tracing (set -x)
       --hard           Reset: also stop/start modemmanager (hard reset)
       --all            List/Prune: include messages from all modems or prune on all
+      --sent           Prune: delete only sent outgoing messages
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -570,6 +572,59 @@ sms_prune_all() {
       error "failed to delete SMS $sms_id"
     fi
   done <<< "$ids"
+}
+
+sms_prune_sent() {
+  # Delete only messages that are outgoing and already sent
+  local list ids id js state pdu
+  if ! list="$(mmcli_cmd --messaging-list-sms -J 2>/dev/null)"
+  then
+    return 0
+  fi
+  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list" 2>/dev/null)
+  if (( ${#ids[@]} == 0 ))
+  then
+    return 0
+  fi
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+    if ! js="$(mmcli_cmd --sms "$id" -J 2>/dev/null)"
+    then
+      continue
+    fi
+    state="$(jq -r '.sms.properties.state // empty' <<<"$js" 2>/dev/null)"
+    pdu="$(jq -r '.sms.properties["pdu-type"] // empty' <<<"$js" 2>/dev/null)"
+    if [[ "$state" == "sent" && "$pdu" == "submit" ]]
+    then
+      echo_info "deleting sent SMS $id"
+      mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+sms_prune_sent_modems() {
+  local list_json mids mid
+  if ! list_json="$(mmcli -L -J)"
+  then
+    error "failed to list modems for pruning"
+    return 1
+  fi
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#mids[@]} == 0 ))
+  then
+    echo_info "no modems detected"
+    return 0
+  fi
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    echo_info "pruning sent messages on modem $mid"
+    (
+      local MODEM="$mid"
+      sms_prune_sent || error "failed to prune sent messages on modem $mid"
+    )
+  done
 }
 
 sms_prune_all_modems() {
@@ -1575,6 +1630,8 @@ watch_handle_sms() {
           local output
           output="$(watch_run_command "$cmd")"
           watch_log "command from $sender finished rc=$WATCH_CMD_RC reason=${WATCH_CMD_REASON:-exit}"
+          # Before sending our reply, prune already-sent messages on this modem
+          sms_prune_sent || watch_warn "failed to prune sent SMS before reply"
           watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
         fi
         handled=1
@@ -1703,6 +1760,10 @@ main() {
         ;;
       --all)
         LIST_ALL=1
+        shift
+        ;;
+      --sent)
+        SENT_ONLY=1
         shift
         ;;
       -q|--quiet|--silent)
@@ -1891,7 +1952,13 @@ main() {
       fi
       ;;
     prune)
-      if [[ -n "$LIST_ALL" ]]
+      if [[ -n "$SENT_ONLY" && -n "$LIST_ALL" ]]
+      then
+        sms_prune_sent_modems
+      elif [[ -n "$SENT_ONLY" ]]
+      then
+        sms_prune_sent
+      elif [[ -n "$LIST_ALL" ]]
       then
         sms_prune_all_modems
       else
