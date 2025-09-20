@@ -68,17 +68,17 @@ Options:
                        or country (fr/de/us) or country name (france/germany/us)
   -d, --debug          Enable debug output
   -j, --json           Output JSON (for list/status/read)
-      --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
+  -r, --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
-      --syslog         Mirror logs to syslog (in addition to stderr)
+  -s, --syslog         Mirror logs to syslog (in addition to stderr)
   -x, --trace          Enable shell tracing (set -x)
-      --hard           Reset: also stop/start modemmanager (hard reset)
-      --all            List/Prune/Enable/Reset: operate on all modems
-      --sent           Prune: delete only sent outgoing messages
-      --allow-foreign  Send: allow sending to foreign country codes
-      --config PATH    Use alternate config file for watch
-      --fallback       Send/Watch: on failure, try other modem(s)
+  -H, --hard           Reset: also stop/start modemmanager (hard reset)
+  -a, --all           List/Prune/Enable/Reset: operate on all modems
+  -S, --sent           Prune: delete only sent outgoing messages
+  -f, --allow-foreign  Send: allow sending to foreign country codes
+  -c, --config PATH    Use alternate config file for watch
+  -F, --fallback       Send/Watch: on failure, try other modem(s)
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -104,28 +104,28 @@ Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
 Sends an SMS. If RECIPIENT is omitted, uses DEFAULT_RECIPIENT_XX/CC/DEFAULT.
 
 Relevant flags:
-  --fallback        Try other modems on failure (sorted by id)
-  --allow-foreign   Allow sending outside the modem's home country code
-  --config PATH     Load config for defaults (only needed outside 'watch')
+  -F, --fallback    Try other modems on failure (sorted by id)
+  -f, --allow-foreign Allow sending outside the modem's home country code
+  -c, --config PATH Load config for defaults (only needed outside 'watch')
 USAGE
 }
 
 usage_list() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [--json|--raw] [--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [-j|--json] [-r|--raw] [-a|--all]
 
 Lists SMS messages. Pretty by default; --json prints structured JSON; --raw prints raw mmcli JSON.
 
 Relevant flags:
-  --json   Output custom JSON array
-  --raw    Output raw mmcli objects array
-  --all    Include messages from all modems
+  -j, --json   Output custom JSON array
+  -r, --raw    Output raw mmcli objects array
+  -a, --all    Include messages from all modems
 USAGE
 }
 
 usage_read() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] read MESSAGE_ID [--json|--raw]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] read MESSAGE_ID [-j|--json] [-r|--raw]
 
 Reads a single SMS. --json outputs compact structured JSON; --raw outputs mmcli JSON.
 USAGE
@@ -133,30 +133,30 @@ USAGE
 
 usage_prune() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [--sent] [--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [-S|--sent] [-a|--all]
 
 Deletes messages. By default deletes all on the selected modem.
 
 Relevant flags:
-  --sent   Delete only sent (outgoing, state=sent) messages
-  --all    Operate on all modems
+  -S, --sent   Delete only sent (outgoing, state=sent) messages
+  -a, --all    Operate on all modems
 USAGE
 }
 
 usage_enable() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [-a|--all]
 
 Enables the selected modem and waits for readiness.
 
 Relevant flags:
-  --all    Enable all detected modems
+  -a, --all    Enable all detected modems
 USAGE
 }
 
 usage_status() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [--json]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-j|--json]
 
 Shows modem status. --json outputs structured JSON.
 USAGE
@@ -164,27 +164,27 @@ USAGE
 
 usage_reset() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [--hard] [--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-H|--hard] [-a|--all]
 
 Resets the selected modem. For Quectel devices, issues quectel reset.
 
 Relevant flags:
-  --hard   Stop/start ModemManager around reset
-  --all    Reset all detected modems
+  -H, --hard   Stop/start ModemManager around reset
+  -a, --all    Reset all detected modems
 USAGE
 }
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [--config PATH] [--all] [--fallback] [--allow-foreign]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-c|--config PATH] [-a|--all] [-F|--fallback] [-f|--allow-foreign]
 
 Watches incoming SMS and executes reply/webhook logic.
 
 Relevant flags:
-  --config PATH   Config file with defaults and whitelist
-  --all           Process messages from all modems (default: selected modem only)
-  --fallback      When replying, try other modems on failure (sorted by id)
-  --allow-foreign Allow replies to recipients outside the modem's home CC
+  -c, --config PATH   Config file with defaults and whitelist
+  -a, --all           Process messages from all modems (default: selected modem only)
+  -F, --fallback      When replying, try other modems on failure (sorted by id)
+  -f, --allow-foreign Allow replies to recipients outside the modem's home CC
 USAGE
 }
 
@@ -2348,23 +2348,23 @@ main() {
         JSON_OUTPUT=1
         shift
         ;;
-      --raw)
+      -r|--raw)
         RAW_OUTPUT=1
         shift
         ;;
-      --hard)
+      -H|--hard)
         HARD_RESET=1
         shift
         ;;
-      --all)
+      -a|--all)
         ALL_MODEMS=1
         shift
         ;;
-      --sent)
+      -S|--sent)
         SENT_ONLY=1
         shift
         ;;
-      --allow-foreign)
+      -f|--allow-foreign)
         ALLOW_FOREIGN=1
         shift
         ;;
@@ -2377,20 +2377,20 @@ main() {
         set -x
         shift
         ;;
-      --config)
+      -c|--config)
         if (( $# < 2 ))
         then
-          error "missing value for --config"
+          error "missing value for $1"
           return 2
         fi
         CONFIG_FILE="$2"
         shift 2
         ;;
-      --fallback)
+      -F|--fallback)
         FALLBACK=1
         shift
         ;;
-      --syslog)
+      -s|--syslog)
         ECHO_SYSLOG=1
         shift
         ;;
@@ -2513,27 +2513,27 @@ main() {
     while (( i < ${#ARGS[@]} ))
     do
       case "${ARGS[i]}" in
-        --allow-foreign)
+        -f|--allow-foreign)
           ALLOW_FOREIGN=1
           i=$((i+1))
           continue
           ;;
-        --fallback)
+        -F|--fallback)
           FALLBACK=1
           i=$((i+1))
           continue
           ;;
-        --all)
+        -a|--all)
           ALL_MODEMS=1
           i=$((i+1))
           continue
           ;;
-        --sent)
+        -S|--sent)
           SENT_ONLY=1
           i=$((i+1))
           continue
           ;;
-        --config)
+        -c|--config)
           if (( i + 1 < ${#ARGS[@]} ))
           then
             CONFIG_FILE="${ARGS[i+1]}"
@@ -2541,7 +2541,7 @@ main() {
             continue
           fi
           ;;
-        --syslog)
+        -s|--syslog)
           ECHO_SYSLOG=1
           i=$((i+1))
           continue
@@ -2640,7 +2640,21 @@ main() {
         echo_info "listening on all modems"
       fi
     else
-      if [[ "$MODEM" == "any" ]]
+      if [[ -n "$ALL_MODEMS" ]]
+      then
+        local _ids=()
+        if mapfile -t _ids < <(list_modem_ids_sorted)
+        then
+          if (( ${#_ids[@]} > 0 ))
+          then
+            echo_info "operating on all modems: ${#_ids[@]} detected"
+          else
+            echo_info "operating on all modems: none detected"
+          fi
+        else
+          echo_info "operating on all modems"
+        fi
+      elif [[ "$MODEM" == "any" ]]
       then
         local _j _ln
         if _j="$(mmcli_cmd -J)"
