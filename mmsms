@@ -44,10 +44,7 @@ load_config() {
   local origin="${1:-initial}"
   if [[ -n "$CONFIG_LOADED" ]]
   then
-    if [[ -n "$DEBUG" || -n "$VERBOSE" ]]
-    then
-      echo_debug "config already loaded ($origin): $CONFIG_FILE"
-    fi
+    echo_debug "config already loaded ($origin): $CONFIG_FILE"
     return 0
   fi
   if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]
@@ -1073,7 +1070,6 @@ sms_send() {
   if [[ -z "$recipient" ]]
   then
     # Try to load defaults from config when sending without explicit recipient
-    load_config send
     # shellcheck disable=SC2031
     recipient="$(resolve_default_recipient "$MODEM")"
     if [[ -z "$recipient" ]]
@@ -2741,8 +2737,6 @@ main() {
   local -a ARGS=()
   local -a DEBUG_FLAGS=()
 
-  load_config pre-opts
-
   # Global options can appear anywhere; collect non-option args into ARGS
   while (( $# > 0 ))
   do
@@ -2882,7 +2876,10 @@ main() {
     ARGS=("${ARGS[@]:1}")
   fi
 
-  load_config post-opts
+  if ! load_config post-args
+  then
+    return $?  # load_config already logged details
+  fi
   if [[ -n "$DEFAULT_MODEM" ]]
   then
     echo_debug "default modem configured: $DEFAULT_MODEM"
@@ -3165,7 +3162,6 @@ main() {
 
   case "$command" in
     send)
-      load_config send
       if [[ -n "$FALLBACK" ]]
       then
         if ! sms_send_with_fallback "${ARGS[@]}"
@@ -3243,8 +3239,7 @@ main() {
       fi
       ;;
     watch)
-      # Source config only for watch
-      load_config watch
+      # Config already sourced earlier; ensure whitelist is populated
       if (( ${#SMS_WHITELIST[@]} == 0 ))
       then
         error "watch requires at least one whitelisted number (SMS_WHITELIST)"
