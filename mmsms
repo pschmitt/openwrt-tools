@@ -98,6 +98,14 @@ error() {
   echo_error "$SCRIPT_NAME: $*"
 }
 
+# Send a line to the system log if `logger` is available
+log_sys() {
+  if command -v logger >/dev/null 2>&1
+  then
+    logger -t mmsms "$*"
+  fi
+}
+
 # Run an AT command via mmcli and return the response string
 # - Strips the leading "response: '...'") wrapper printed by mmcli
 # - If no such wrapper is present, returns raw stdout/stderr as-is
@@ -404,7 +412,23 @@ sms_send() {
     return 2
   fi
 
+  # Log outgoing SMS (preview) to stderr and syslog
   printf 'text=%q\n' "$text" >&2
+  local log_text
+  log_text="$text"
+  log_text=${log_text//$'\r'/}
+  log_text=${log_text//$'\n'/\\n}
+  log_text=${log_text//\\/\\\\}
+  if [[ -z "$log_text" ]]
+  then
+    log_text="<empty>"
+  elif (( ${#log_text} > 200 ))
+  then
+    log_text="${log_text:0:200}..."
+  fi
+  local log_modem="$MODEM"
+  echo_info "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
+  log_sys "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
 
   # DIRTYFIX For Home Assistant SMS notifications
   text="$(echo -e "$text")"
@@ -1123,7 +1147,9 @@ watch_send_reply() {
   then
     log_text="${log_text:0:200}..."
   fi
-  watch_log "sending reply to $to text='$log_text'"
+  local log_modem="$MODEM"
+  watch_log "sending reply modem=$log_modem to $to text='$log_text'"
+  log_sys "[mmsms:watch] sending reply modem=$log_modem to $to text='$log_text'"
   if ! sms_send "$to" "$msg"
   then
     watch_warn "failed to send reply to $to"
