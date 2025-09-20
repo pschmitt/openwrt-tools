@@ -174,13 +174,15 @@ USAGE
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [--config PATH] [--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [--config PATH] [--all] [--fallback] [--allow-foreign]
 
 Watches incoming SMS and executes reply/webhook logic.
 
 Relevant flags:
   --config PATH   Config file with defaults and whitelist
   --all           Process messages from all modems (default: selected modem only)
+  --fallback      When replying, try other modems on failure (sorted by id)
+  --allow-foreign Allow replies to recipients outside the modem's home CC
 USAGE
 }
 
@@ -952,6 +954,25 @@ sms_send() {
     send_attempt=$((send_attempt + 1))
   done
 
+  if (( rc != 0 )) && [[ -n "${SEND_CONTEXT:-}" ]]
+  then
+    local fail_info
+    fail_info="$(modem_info_brief)"
+    local fail_text
+    fail_text="$text"
+    fail_text=${fail_text//$'\r'/}
+    fail_text=${fail_text//$'\n'/\\n}
+    fail_text=${fail_text//\\/\\\\}
+    if [[ -z "$fail_text" ]]
+    then
+      fail_text="<empty>"
+    elif (( ${#fail_text} > 200 ))
+    then
+      fail_text="${fail_text:0:200}..."
+    fi
+    log_sys "send failed modem=$fail_info to $recipient text='$fail_text'"
+  fi
+
   rm -f "$tmpfile" 2>/dev/null || true
   return $rc
 }
@@ -991,6 +1012,22 @@ sms_send_with_fallback() {
 
   if [[ -z "$FALLBACK" ]]
   then
+    if [[ -n "${SEND_CONTEXT:-}" ]]
+    then
+      local fail_text
+      fail_text="$text"
+      fail_text=${fail_text//$'\r'/}
+      fail_text=${fail_text//$'\n'/\\n}
+      fail_text=${fail_text//\\/\\\\}
+      if [[ -z "$fail_text" ]]
+      then
+        fail_text="<empty>"
+      elif (( ${#fail_text} > 200 ))
+      then
+        fail_text="${fail_text:0:200}..."
+      fi
+      log_sys "send failed (no fallback) modem=$(modem_info_brief) to $recipient text='$fail_text'"
+    fi
     return 1
   fi
 
@@ -1041,6 +1078,22 @@ sms_send_with_fallback() {
   done
 
   echo_warning "fallback: no eligible modem could send the message"
+  if [[ -n "${SEND_CONTEXT:-}" ]]
+  then
+    local fail_text
+    fail_text="$text"
+    fail_text=${fail_text//$'\r'/}
+    fail_text=${fail_text//$'\n'/\\n}
+    fail_text=${fail_text//\\/\\\\}
+    if [[ -z "$fail_text" ]]
+    then
+      fail_text="<empty>"
+    elif (( ${#fail_text} > 200 ))
+    then
+      fail_text="${fail_text:0:200}..."
+    fi
+    log_sys "send failed (fallback) modem=$(modem_info_brief) to $recipient text='$fail_text'"
+  fi
   return 1
 }
 
@@ -2740,6 +2793,8 @@ main() {
 
   case "$command" in
     send)
+      # Mark context so functions can log direct-send failures to syslog
+      local SEND_CONTEXT="direct"
       if [[ -f "$CONFIG_FILE" ]]
       then
         # shellcheck disable=SC1090
@@ -2752,7 +2807,10 @@ main() {
           return 1
         fi
       else
-        sms_send "${ARGS[@]}"
+        if ! sms_send "${ARGS[@]}"
+        then
+          return 1
+        fi
       fi
       ;;
     list)
