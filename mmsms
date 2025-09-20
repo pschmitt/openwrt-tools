@@ -301,28 +301,13 @@ get_home_cc() {
   local own=""
   if [[ -n "$target_mid" ]]
   then
-    (
-      # shellcheck disable=SC2030
-      local MODEM="$target_mid"
-      if load_own_number
-      then
-        own="$OWN_NUMBER"
-      fi
-      if [[ -n "$own" ]]
-      then
-        printf '%s' "$own" >"${TMPDIR:-/tmp}/.mmsms-own.$$"
-      fi
-    )
-    if [[ -f "${TMPDIR:-/tmp}/.mmsms-own.$$" ]]
-    then
-      own="$(cat "${TMPDIR:-/tmp}/.mmsms-own.$$")"
-      rm -f "${TMPDIR:-/tmp}/.mmsms-own.$$"
-    fi
-  else
-    if load_own_number
+    if MODEM="$target_mid" load_own_number
     then
       own="$OWN_NUMBER"
     fi
+  elif load_own_number
+  then
+    own="$OWN_NUMBER"
   fi
 
   if [[ -z "$own" ]]
@@ -1098,7 +1083,6 @@ sms_send() {
 
   SMS_LAST_RECIPIENT="$recipient"
   SMS_LAST_RECIPIENT_FROM_DEFAULT="$recipient_was_default"
-  SMS_LAST_RECIPIENT_MODEM="$MODEM"
 
   # Enforce local-only sending unless --allow-foreign is set
   if [[ -z "$ALLOW_FOREIGN" ]]
@@ -1638,7 +1622,7 @@ sms_list_pretty() {
         do
           [[ -z "$mid" ]] && continue
           local item
-          item="$( (local MODEM="$mid" ALL_MODEMS=""; JSON_OUTPUT=1 RAW_OUTPUT=""; modem_status_single) )"
+          item="$(MODEM="$mid" ALL_MODEMS="" JSON_OUTPUT=1 RAW_OUTPUT="" modem_status_single)"
           [[ -n "$item" ]] && json_items+=("$item")
         done
       fi
@@ -1723,7 +1707,7 @@ sms_list_pretty() {
         do
           [[ -z "$mid" ]] && continue
           local raw
-        raw="$( (local MODEM="$mid" ALL_MODEMS=""; JSON_OUTPUT="" RAW_OUTPUT=1; modem_status_single) )"
+          raw="$(MODEM="$mid" ALL_MODEMS="" JSON_OUTPUT="" RAW_OUTPUT=1 modem_status_single)"
           [[ -n "$raw" ]] && raw_items+=("$raw")
         done
       fi
@@ -2328,7 +2312,7 @@ modem_status_single() {
 
   if [[ -n "$RAW_OUTPUT" ]]
   then
-    if [[ -n "$ALL_MODEMS" && -z "$1" ]]
+    if [[ -n "$ALL_MODEMS" ]]
     then
       local mids mid raw_items=()
       if mapfile -t mids < <(list_modem_ids_sorted)
@@ -2523,7 +2507,7 @@ modem_status() {
       for mid in "${mids[@]}"
       do
         [[ -z "$mid" ]] && continue
-        item="$( (local MODEM="$mid" ALL_MODEMS=""; modem_status_single) )"
+        item="$(MODEM="$mid" ALL_MODEMS="" modem_status_single)"
         [[ -n "$item" ]] && json_items+=("$item")
       done
       if (( ${#json_items[@]} == 0 ))
@@ -2542,7 +2526,7 @@ modem_status() {
       (( first )) || printf '\n'
       first=0
       echo_info "modem $mid:"
-      (local MODEM="$mid" ALL_MODEMS=""; modem_status_single)
+      MODEM="$mid" ALL_MODEMS="" modem_status_single
     done
     return 0
   fi
@@ -2815,6 +2799,7 @@ main() {
         ;;
       -d|--debug)
         DEBUG_FLAGS+=("${opt}")
+        # shellcheck disable=SC2034
         DEBUG=1
         shift
         ;;
@@ -2897,6 +2882,7 @@ main() {
         ;;
       -s|--syslog)
         DEBUG_FLAGS+=("${opt}")
+        # shellcheck disable=SC2034
         ECHO_SYSLOG=1
         shift
         ;;
@@ -3097,6 +3083,7 @@ main() {
           ;;
         -s|--syslog)
           DEBUG_FLAGS+=("${ARGS[i]}")
+          # shellcheck disable=SC2034
           ECHO_SYSLOG=1
           i=$((i+1))
           continue
@@ -3280,7 +3267,7 @@ main() {
       fi
       ;;
     status)
-      modem_status
+      modem_status "$@"
       ;;
     number)
       modem_number
