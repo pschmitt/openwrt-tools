@@ -65,37 +65,36 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
+  -a, --all            List/Prune/Enable/Reset: operate on all modems
+  -c, --config PATH    Use alternate config file for watch
+  -d, --debug          Enable debug output
+  -F, --fallback       Send/Watch: on failure, try other modem(s)
+  -f, --allow-foreign  Send: allow sending to foreign country codes
+  -H, --hard           Reset: also stop/start modemmanager (hard reset)
+  -j, --json           Output JSON (for list/status/read)
   -m, --modem MODEM    Modem selector or id (default: $MODEM)
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB/phone-number
                        or country (fr/de/us) or country name (france/germany/us)
-  -d, --debug          Enable debug output
-  -j, --json           Output JSON (for list/status/read)
-  -r, --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
-  -q, --quiet          Suppress info output (warnings/errors only)
+  -q, --quiet          Suppress info output (warnings/errors only) and status output (exit code only)
       --silent         Same as --quiet
+  -r, --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -s, --syslog         Mirror logs to syslog (in addition to stderr)
-  -x, --trace          Enable shell tracing (set -x)
-  -H, --hard           Reset: also stop/start modemmanager (hard reset)
-  -a, --all           List/Prune/Enable/Reset: operate on all modems
   -S, --sent           Prune: delete only sent outgoing messages
-  -f, --allow-foreign  Send: allow sending to foreign country codes
-  -c, --config PATH    Use alternate config file for watch
-  -F, --fallback       Send/Watch: on failure, try other modem(s)
-  -q, --quiet          Suppress status output (exit code only)
+  -x, --trace          Enable shell tracing (set -x)
   -h, --help           Show this help and exit
 
 Commands:
-  send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
-  list                       List SMS messages on the modem
-  read MESSAGE_ID            Show details for a specific SMS
-  prune                      Delete all SMS messages from the modem
   enable                     Wait for ModemManager and enable the modem
-  status                     Show modem status summary (default)
+  list                       List SMS messages on the modem
+  number|phone               Print modem's own phone number
+  prune                      Delete all SMS messages from the modem
+  read MESSAGE_ID            Show details for a specific SMS
   restart                    Restart modemmanager, issue quectel reset, re-enable modem
-  watch                      Monitor incoming SMS and forward/execute actions
-  number                     Print modem's own phone number
+  send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
   smsc                       Print modem's configured SMSC number
+  status                     Show modem status summary
+  watch                      Monitor incoming SMS and forward/execute actions
 USAGE
 }
 
@@ -107,22 +106,22 @@ Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
 Sends an SMS. If RECIPIENT is omitted, uses DEFAULT_RECIPIENT_XX/CC/DEFAULT.
 
 Relevant flags:
+  -c, --config PATH Load config for defaults (only needed outside 'watch')
   -F, --fallback    Try other modems on failure (sorted by id)
   -f, --allow-foreign Allow sending outside the modem's home country code
-  -c, --config PATH Load config for defaults (only needed outside 'watch')
 USAGE
 }
 
 usage_list() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [-j|--json] [-r|--raw] [-a|--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [-a|--all] [-j|--json] [-r|--raw]
 
 Lists SMS messages. Pretty by default; --json prints structured JSON; --raw prints raw mmcli JSON.
 
 Relevant flags:
+  -a, --all    Include messages from all modems
   -j, --json   Output custom JSON array
   -r, --raw    Output raw mmcli objects array
-  -a, --all    Include messages from all modems
 USAGE
 }
 
@@ -136,13 +135,13 @@ USAGE
 
 usage_prune() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [-S|--sent] [-a|--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [-a|--all] [-S|--sent]
 
 Deletes messages. By default deletes all on the selected modem.
 
 Relevant flags:
-  -S, --sent   Delete only sent (outgoing, state=sent) messages
   -a, --all    Operate on all modems
+  -S, --sent   Delete only sent (outgoing, state=sent) messages
 USAGE
 }
 
@@ -167,25 +166,25 @@ USAGE
 
 usage_reset() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-H|--hard] [-a|--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-a|--all] [-H|--hard]
 
 Resets the selected modem. For Quectel devices, issues quectel reset.
 
 Relevant flags:
-  -H, --hard   Stop/start ModemManager around reset
   -a, --all    Reset all detected modems
+  -H, --hard   Stop/start ModemManager around reset
 USAGE
 }
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-c|--config PATH] [-a|--all] [-F|--fallback] [-f|--allow-foreign]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-a|--all] [-c|--config PATH] [-F|--fallback] [-f|--allow-foreign]
 
 Watches incoming SMS and executes reply/webhook logic.
 
 Relevant flags:
-  -c, --config PATH   Config file with defaults and whitelist
   -a, --all           Process messages from all modems (default: selected modem only)
+  -c, --config PATH   Config file with defaults and whitelist
   -F, --fallback      When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
 USAGE
@@ -2814,6 +2813,15 @@ main() {
         fi
       fi
     fi
+  fi
+
+  if (( ${#ARGS[@]} > 0 ))
+  then
+    local dbg_args
+    printf -v dbg_args '%q ' "${ARGS[@]}"
+    echo_debug "command=$command args=${dbg_args%% }"
+  else
+    echo_debug "command=$command"
   fi
 
   case "$command" in
