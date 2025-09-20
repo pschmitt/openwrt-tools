@@ -439,7 +439,7 @@ abbrev_text_for_log() {
   fi
   if (( ${#s} > maxlen ))
   then
-    s="${s:0:maxlen}..."
+    s="${s:0:maxlen}…"
   fi
   printf '%s' "$s"
 }
@@ -1456,6 +1456,54 @@ sms_prune_all_modems() {
   done
 }
 
+sms_list_print_header() {
+  local include_mid="$1"
+  local noc="$2"
+  local header
+
+  if [[ "$include_mid" == "1" ]]
+  then
+    header="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
+  else
+    header="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
+  fi
+
+  if [[ -n "$noc" ]]
+  then
+    printf '%s\n' "$header"
+  else
+    printf '\e[1m%s\e[0m\n' "$header"
+  fi
+}
+
+sms_list_print_entry() {
+  local mid="$1"
+  local id="$2"
+  local js="$3"
+  local include_mid="$4"
+  local maxlen="${5:-80}"
+  local sender text msg_type pdu
+
+  sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
+  sender="$(ensure_plus "$sender")"
+  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+  msg_type="$(pdu_to_type "$pdu")"
+  text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
+  text=${text//$'\r'/}
+  text=${text//$'\n'/\\n}
+  if (( ${#text} > maxlen ))
+  then
+    text="${text:0:maxlen}…"
+  fi
+
+  if [[ "$include_mid" == "1" ]]
+  then
+    printf '%-4s %-4s %-10s %-18s %s\n' "$mid" "$id" "$msg_type" "$sender" "$text"
+  else
+    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_type" "$sender" "$text"
+  fi
+}
+
 sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
 
@@ -1564,14 +1612,7 @@ sms_list_pretty() {
     then
       _nocolor=1
     fi
-    local header_line
-    header_line="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
-    if [[ -n "$_nocolor" ]]
-    then
-      printf '%s\n' "$header_line"
-    else
-      printf '\e[1m%s\e[0m\n' "$header_line"
-    fi
+    sms_list_print_header 1 "$_nocolor"
 
     for mid in "${mids[@]}"
     do
@@ -1588,18 +1629,7 @@ sms_list_pretty() {
         then
           continue
         fi
-        sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
-        sender="$(ensure_plus "$sender")"
-        pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-        msg_type="$(pdu_to_type "$pdu")"
-        text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
-        text=${text//$'\r'/}
-        text=${text//$'\n'/\\n}
-        if (( ${#text} > maxlen ))
-        then
-          text="${text:0:maxlen}..."
-        fi
-        printf '%-4s %-4s %-10s %-18s %s\n' "$mid" "$id" "$msg_type" "$sender" "$text"
+        sms_list_print_entry "$mid" "$id" "$js" 1 "$maxlen"
         had_any=1
       done
     done
@@ -1704,14 +1734,7 @@ sms_list_pretty() {
   then
     _nocolor=1
   fi
-  local header_line
-  header_line="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
-  if [[ -n "$_nocolor" ]]
-  then
-    printf '%s\n' "$header_line"
-  else
-    printf '\e[1m%s\e[0m\n' "$header_line"
-  fi
+  sms_list_print_header 0 "$_nocolor"
 
   for id in "${ids[@]}"
   do
@@ -1720,18 +1743,7 @@ sms_list_pretty() {
     then
       continue
     fi
-    sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
-    sender="$(ensure_plus "$sender")"
-    pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-    msg_type="$(pdu_to_type "$pdu")"
-    text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
-    text=${text//$'\r'/}
-    text=${text//$'\n'/\\n}
-    if (( ${#text} > maxlen ))
-    then
-      text="${text:0:maxlen}..."
-    fi
-    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_type" "$sender" "$text"
+    sms_list_print_entry "" "$id" "$js" 0 "$maxlen"
   done
 }
 
