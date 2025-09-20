@@ -448,8 +448,8 @@ sms_send() {
   fi
   local log_modem
   log_modem="$(modem_info_brief)"
-  echo_info "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
-  log_sys "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
+  echo_info "sending sms modem=$log_modem to $recipient text='$log_text'"
+  log_sys "sending sms modem=$log_modem to $recipient text='$log_text'"
 
   # DIRTYFIX For Home Assistant SMS notifications
   text="$(echo -e "$text")"
@@ -485,7 +485,7 @@ sms_send() {
       smsc_params=",smsc=$smsc"
     elif [[ -n "$smsc_raw" ]]
     then
-      echo_warning "[mmsms:send] invalid smsc '$smsc_raw', skipping"
+      echo_warning "invalid smsc '$smsc_raw', skipping"
       smsc=""
     fi
   fi
@@ -506,7 +506,7 @@ sms_send() {
         error "failed to create SMS after $max_attempts attempts"
         break
       fi
-      echo_warning "[mmsms:send] failed to create SMS (attempt $attempt/$max_attempts), retrying"
+      echo_warning "failed to create SMS (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
       continue
     fi
@@ -523,7 +523,7 @@ sms_send() {
         error "failed to create SMS after $max_attempts attempts"
         break
       fi
-      echo_warning "[mmsms:send] received empty SMS id (attempt $attempt/$max_attempts), retrying"
+      echo_warning "received empty SMS id (attempt $attempt/$max_attempts), retrying"
       attempt=$((attempt + 1))
       continue
     fi
@@ -540,7 +540,7 @@ sms_send() {
       break
     fi
 
-    echo_warning "[mmsms:send] failed to send SMS (attempt $attempt/$max_attempts), retrying"
+    echo_warning "failed to send SMS (attempt $attempt/$max_attempts), retrying"
     attempt=$((attempt + 1))
   done
 
@@ -564,7 +564,7 @@ sms_prune_all() {
   while IFS= read -r sms_id
   do
     [[ -z "$sms_id" ]] && continue
-    echo_info "[mmsms:prune] deleting SMS $sms_id"
+    echo_info "deleting SMS $sms_id"
     if ! mmcli_cmd --messaging-delete-sms="$sms_id"
     then
       error "failed to delete SMS $sms_id"
@@ -582,13 +582,13 @@ sms_prune_all_modems() {
   mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
   if (( ${#mids[@]} == 0 ))
   then
-    echo_info "[mm-sms:prune] no modems detected"
+    echo_info "no modems detected"
     return 0
   fi
   for mid in "${mids[@]}"
   do
     [[ -z "$mid" ]] && continue
-    echo_info "[mm-sms:prune] pruning modem $mid"
+    echo_info "pruning modem $mid"
     (
       local MODEM="$mid"
       sms_prune_all || error "failed to prune on modem $mid"
@@ -615,7 +615,7 @@ sms_list_pretty() {
       then
         printf '[]\n'
       else
-        echo_info "[mmsms:list] no SMS messages"
+      echo_info "no SMS messages"
       fi
       return 0
     fi
@@ -768,7 +768,7 @@ sms_list_pretty() {
         had_any=1
       done
     done
-    [[ -n "$had_any" ]] || echo_info "[mmsms:list] no SMS messages"
+    [[ -n "$had_any" ]] || echo_info "no SMS messages"
     return 0
   fi
 
@@ -785,7 +785,7 @@ sms_list_pretty() {
     then
       printf '[]\n'
     else
-      echo_info "[mmsms:list] no SMS messages"
+      echo_info "no SMS messages"
     fi
     return 0
   fi
@@ -892,7 +892,7 @@ sms_list_pretty() {
 }
 
 enable_log() {
-  echo_info "[mmsms:enable] $*"
+  echo_info "$*"
 }
 
 enable_modem() {
@@ -906,7 +906,7 @@ enable_modem() {
   do
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mmsms:enable] timeout waiting for D-Bus socket"
+      echo_warning "timeout waiting for D-Bus socket"
       return 1
     fi
     sleep "$sleep_period"
@@ -919,7 +919,7 @@ enable_modem() {
   do
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mmsms:enable] timeout waiting for ModemManager"
+      echo_warning "timeout waiting for ModemManager"
       return 1
     fi
     sleep "$sleep_period"
@@ -959,7 +959,7 @@ enable_modem() {
 
     if (( elapsed >= max_wait ))
     then
-      echo_warning "[mmsms:enable] timeout waiting for modem detection"
+      echo_warning "timeout waiting for modem detection"
       return 1
     fi
     sleep "$sleep_period"
@@ -1000,7 +1000,7 @@ enable_modem() {
               primary: ($m.generic["primary-port"] // "--"),
               ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
             }
-          | ("[mmsms:enable] enabled modem: id=" + .id
+          | ("enabled modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
@@ -1016,7 +1016,7 @@ enable_modem() {
     return 0
   fi
 
-  echo_warning "[mmsms:enable] failed to enable modem"
+  echo_warning "failed to enable modem"
   return 1
 }
 
@@ -1114,22 +1114,22 @@ modem_reset() {
 }
 
 watch_log() {
-  echo_info "[mmsms:watch] $*"
+  echo_info "$*"
 }
 
 watch_warn() {
-  echo_warning "[mmsms:watch] $*"
+  echo_warning "$*"
 }
 
 reset_log() {
   if [[ -z $QUIET ]]
   then
-    echo_info "[mmsms:reset] $*"
+    echo_info "$*"
   fi
 }
 
 reset_warn() {
-  echo_warning "[mmsms:reset] $*"
+  echo_warning "$*"
 }
 
 watch_cleanup() {
@@ -1195,7 +1195,7 @@ watch_send_reply() {
   local log_modem
   log_modem="$(modem_info_brief)"
   watch_log "sending reply modem=$log_modem to $to text='$log_text'"
-  log_sys "[mmsms:watch] sending reply modem=$log_modem to $to text='$log_text'"
+  log_sys "sending reply modem=$log_modem to $to text='$log_text'"
   if ! sms_send "$to" "$msg"
   then
     watch_warn "failed to send reply to $to"
@@ -1822,7 +1822,7 @@ main() {
                       | if . == "" then "--"
                         else (if startswith("+") then . else "+" + . end) end)
             }
-          | ("[mmsms] selected modem: id=" + .id
+          | ("selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
@@ -1830,9 +1830,9 @@ main() {
              + " ports=" + .ports
              + " phone=" + .phone)
         ' <<<"$_j" 2>/dev/null || true)"
-        echo_info "${_ln:-[mmsms] selected modem: any}"
+        echo_info "${_ln:-selected modem: any}"
       else
-        echo_info "[mmsms] selected modem: any"
+        echo_info "selected modem: any"
       fi
     else
       local _mjson _mln
@@ -1852,7 +1852,7 @@ main() {
                       | if . == "" then "--"
                         else (if startswith("+") then . else "+" + . end) end)
             }
-          | ("[mmsms] selected modem: id=" + .id
+          | ("selected modem: id=" + .id
              + " manufacturer=" + .manufacturer
              + " model=" + .model
              + " plugin=" + .plugin
@@ -1861,7 +1861,7 @@ main() {
              + " phone=" + .phone)
         ' <<<"$_mjson" 2>/dev/null || true)"
       fi
-      echo_info "${_mln:-[mmsms] selected modem: $MODEM}"
+      echo_info "${_mln:-selected modem: $MODEM}"
     fi
   fi
 
