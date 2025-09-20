@@ -94,7 +94,7 @@ Commands:
   status                     Show modem status summary (default)
   restart                    Restart modemmanager, issue quectel reset, re-enable modem
   watch                      Monitor incoming SMS and forward/execute actions
-  number|phone               Print modem's own phone number
+  number                     Print modem's own phone number
   smsc                       Print modem's configured SMSC number
 USAGE
 }
