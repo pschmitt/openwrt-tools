@@ -545,7 +545,7 @@ get_modem_at_port() {
 
   port="$(jq -r '
     ((.modem.generic.ports // [])
-      | map(select(test("\\(at\\)$")) | (split(" ")[0]))
+      | map(select(startswith("at")) | (split(" ")[0]))
       | .[0])
     // (.modem.generic["primary-port"] // empty)
   ' <<<"$json")"
@@ -560,6 +560,8 @@ get_modem_at_port() {
   then
     port="/dev/$port"
   fi
+
+  echo_debug "get_modem_at_port: resolved port to $port"
 
   if [[ ! -e "$port" ]]
   then
@@ -814,7 +816,7 @@ at_first_quoted_decoded() {
 
 # Log and run generic mmcli calls (no implicit --modem)
 mmcli() {
-  echo_debug "[mmcli] mmcli $*"
+  echo_debug "\$ mmcli $*"
   command mmcli "$@"
 }
 
