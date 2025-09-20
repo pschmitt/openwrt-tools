@@ -76,7 +76,7 @@ Options:
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
       --hard           Reset: also stop/start modemmanager (hard reset)
-      --all            List: include messages from all modems
+      --all            List/Prune: include messages from all modems or prune on all
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -96,6 +96,26 @@ USAGE
 
 error() {
   echo_error "$SCRIPT_NAME: $*"
+}
+
+# Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
+modem_info_brief() {
+  local j info id manufacturer model plugin primary
+  if j="$(mmcli_cmd -J 2>/dev/null || true)"
+  then
+    id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j" 2>/dev/null)"
+    manufacturer="$(jq -r '.modem.generic.manufacturer // "--"' <<<"$j" 2>/dev/null)"
+    model="$(jq -r '.modem.generic.model // "--"' <<<"$j" 2>/dev/null)"
+    plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j" 2>/dev/null)"
+    primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j" 2>/dev/null)"
+    if [[ -n "$id" ]]
+    then
+      info="id=$id manufacturer=$manufacturer model=$model plugin=$plugin primary=$primary"
+      printf '%s' "$info"
+      return 0
+    fi
+  fi
+  printf '%s' "$MODEM"
 }
 
 # Send a line to the system log if `logger` is available
@@ -426,7 +446,8 @@ sms_send() {
   then
     log_text="${log_text:0:200}..."
   fi
-  local log_modem="$MODEM"
+  local log_modem
+  log_modem="$(modem_info_brief)"
   echo_info "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
   log_sys "[mmsms:send] modem=$log_modem to $recipient text='$log_text'"
 
@@ -549,6 +570,30 @@ sms_prune_all() {
       error "failed to delete SMS $sms_id"
     fi
   done <<< "$ids"
+}
+
+sms_prune_all_modems() {
+  local list_json mids mid
+  if ! list_json="$(mmcli -L -J)"
+  then
+    error "failed to list modems for pruning"
+    return 1
+  fi
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#mids[@]} == 0 ))
+  then
+    echo_info "[mm-sms:prune] no modems detected"
+    return 0
+  fi
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    echo_info "[mm-sms:prune] pruning modem $mid"
+    (
+      local MODEM="$mid"
+      sms_prune_all || error "failed to prune on modem $mid"
+    )
+  done
 }
 
 sms_list_pretty() {
@@ -1147,7 +1192,8 @@ watch_send_reply() {
   then
     log_text="${log_text:0:200}..."
   fi
-  local log_modem="$MODEM"
+  local log_modem
+  log_modem="$(modem_info_brief)"
   watch_log "sending reply modem=$log_modem to $to text='$log_text'"
   log_sys "[mmsms:watch] sending reply modem=$log_modem to $to text='$log_text'"
   if ! sms_send "$to" "$msg"
@@ -1591,9 +1637,9 @@ watch_messages() {
     fi
   fi
 
-  if ! sms_prune_all
+  if ! sms_prune_all_modems
   then
-    watch_warn "failed to prune existing SMS messages"
+    watch_warn "failed to prune existing SMS messages on all modems"
   fi
 
   enable_modem "$MODEM" || watch_warn "failed to enable modem"
@@ -1845,7 +1891,12 @@ main() {
       fi
       ;;
     prune)
-      sms_prune_all
+      if [[ -n "$LIST_ALL" ]]
+      then
+        sms_prune_all_modems
+      else
+        sms_prune_all
+      fi
       ;;
     enable)
       enable_modem "$MODEM"
