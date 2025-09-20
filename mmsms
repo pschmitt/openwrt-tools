@@ -2287,7 +2287,7 @@ watch_send_reply() {
 }
 
 watch_run_command() {
-  local cmd="$1"
+  local cmd="NO_COLOR=1 $1"
   local output rc reason="exit"
   rc=0
 
