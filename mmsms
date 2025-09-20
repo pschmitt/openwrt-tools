@@ -33,6 +33,7 @@ ALL_MODEMS="${ALL_MODEMS:-}"
 SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
+FALLBACK="${FALLBACK:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -227,6 +228,53 @@ phone_cc_label() {
   local cc
   cc="$(phone_cc "$1")"
   cc_to_label "$cc"
+}
+
+# Resolve default recipient based on modem/country-specific variables.
+# Order:
+#  - DEFAULT_RECIPIENT_<LABEL> (US/FR/DE)
+#  - DEFAULT_RECIPIENT_<CC> (1/33/49)
+#  - DEFAULT_RECIPIENT
+resolve_default_recipient() {
+  local mid="${1:-}"
+  local cc label var val
+  cc="$(get_home_cc "$mid" 2>/dev/null || true)"
+  case "$cc" in
+    1) label=US ;;
+    33) label=FR ;;
+    49) label=DE ;;
+    *) label="" ;;
+  esac
+
+  if [[ -n "$label" ]]
+  then
+    var="DEFAULT_RECIPIENT_${label}"
+    val="${!var:-}"
+    if [[ -n "$val" ]]
+    then
+      printf '%s' "$val"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$cc" ]]
+  then
+    var="DEFAULT_RECIPIENT_${cc}"
+    val="${!var:-}"
+    if [[ -n "$val" ]]
+    then
+      printf '%s' "$val"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$DEFAULT_RECIPIENT" ]]
+  then
+    printf '%s' "$DEFAULT_RECIPIENT"
+    return 0
+  fi
+
+  return 1
 }
 
 # Send a line to the system log if `logger` is available
@@ -526,34 +574,19 @@ sms_read_json() {
 }
 
 sms_send() {
-  if [[ $# -lt 2 ]]
-  then
-    usage >&2
-    return 2
-  fi
+  local recipient=""
+  local text=""
 
-  local recipient="$1"
-  shift
-  local text
-
-  recipient="${recipient//[[:space:]]/}"
-  if [[ -n "$recipient" && "$recipient" != +* ]]
+  # Parse args: allow default recipient when not specified
+  if (( $# >= 1 ))
   then
-    recipient="+$recipient"
-  fi
-
-  # Enforce local-only sending unless --allow-foreign is set
-  if [[ -z "$ALLOW_FOREIGN" ]]
-  then
-    local home_cc
-    home_cc="$(get_home_cc || true)"
-    if [[ -n "$home_cc" && "$recipient" == +([0-9]) ]]
+    if [[ "$1" == "-" ]]
     then
-      if [[ "$recipient" != +"$home_cc"* ]]
-      then
-        echo_warning "blocking foreign recipient $recipient (home CC=$home_cc); use --allow-foreign to override or set HOME_CC"
-        return 2
-      fi
+      shift
+    elif [[ "$1" == +* || "$1" =~ ^[0-9]+$ ]]
+    then
+      recipient="$1"
+      shift
     fi
   fi
 
@@ -566,6 +599,43 @@ sms_send() {
     text="$(cat)"
   else
     text="$*"
+  fi
+
+  if [[ -z "$recipient" ]]
+  then
+    # Try to load defaults from config when sending without explicit recipient
+    if [[ -f "$CONFIG_FILE" ]]
+    then
+      # shellcheck disable=SC1090
+      source "$CONFIG_FILE" || true
+    fi
+    recipient="$(resolve_default_recipient "$MODEM" 2>/dev/null || true)"
+    if [[ -z "$recipient" ]]
+    then
+      error "no recipient specified and no DEFAULT_RECIPIENT configured for this modem/country"
+      return 2
+    fi
+  fi
+
+  recipient="${recipient//[[:space:]]/}"
+  if [[ -n "$recipient" && "$recipient" != +* ]]
+  then
+    recipient="+$recipient"
+  fi
+
+  # Enforce local-only sending unless --allow-foreign is set
+  if [[ -z "$ALLOW_FOREIGN" ]]
+  then
+    local home_cc
+    home_cc="$(get_home_cc "$MODEM" || true)"
+    if [[ -n "$home_cc" && "$recipient" == +([0-9]) ]]
+    then
+      if [[ "$recipient" != +"$home_cc"* ]]
+      then
+        echo_warning "blocking foreign recipient $recipient (home CC=$home_cc); use --allow-foreign to override or set HOME_CC"
+        return 2
+      fi
+    fi
   fi
 
   if [[ -z "$text" ]]
@@ -2344,6 +2414,11 @@ main() {
 
   case "$command" in
     send)
+      if [[ -f "$CONFIG_FILE" ]]
+      then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE" || true
+      fi
       if [[ -n "$FALLBACK" ]]
       then
         if ! sms_send_with_fallback "${ARGS[@]}"
