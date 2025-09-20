@@ -1565,7 +1565,7 @@ sms_list_pretty() {
       _nocolor=1
     fi
     local header_line
-    header_line="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'FROM' 'MSG')"
+    header_line="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
     if [[ -n "$_nocolor" ]]
     then
       printf '%s\n' "$header_line"
@@ -1705,7 +1705,7 @@ sms_list_pretty() {
     _nocolor=1
   fi
   local header_line
-  header_line="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'FROM' 'MSG')"
+  header_line="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
   if [[ -n "$_nocolor" ]]
   then
     printf '%s\n' "$header_line"
