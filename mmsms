@@ -36,8 +36,10 @@ QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
 HARD_RESET="${HARD_RESET:-}"
-LIST_ALL="${LIST_ALL:-}"
+ALL_MODEMS="${ALL_MODEMS:-}"
 SENT_ONLY="${SENT_ONLY:-}"
+ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
+HOME_CC="${HOME_CC:-}"
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -70,6 +72,7 @@ Options:
   -m, --modem MODEM    Modem selector or id (default: $MODEM)
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB/phone-number
+                       or country (fr/de/us) or country name (france/germany/us)
   -d, --debug          Enable debug output
   -j, --json           Output JSON (for list/status/read)
       --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
@@ -79,6 +82,7 @@ Options:
       --hard           Reset: also stop/start modemmanager (hard reset)
       --all            List/Prune/Enable/Reset: operate on all modems
       --sent           Prune: delete only sent outgoing messages
+      --allow-foreign  Send: allow sending to foreign country codes
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -98,6 +102,62 @@ USAGE
 
 error() {
   echo_error "$SCRIPT_NAME: $*"
+}
+
+# Map selector to a country calling code (digits) for a small set
+# Supports: fr (France=33), de (Germany=49), us/usa (United States=1)
+country_to_cc() {
+  local s="${1,,}"
+  case "$s" in
+    fr|fra|france)
+      printf '33'
+      ;;
+    de|deu|germany|deutschland)
+      printf '49'
+      ;;
+    us|usa|"united states"|"united-states"|america)
+      printf '1'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Determine the home country code for E.164 numbers
+# Priority:
+#  - HOME_CC if set (digits only, e.g., 49)
+#  - Derive from OWN_NUMBER (heuristic: +1 -> 1, otherwise first two digits)
+get_home_cc() {
+  local cc=""
+  if [[ -n "$HOME_CC" ]]
+  then
+    cc="${HOME_CC//[^0-9]/}"
+    printf '%s' "$cc"
+    return 0
+  fi
+
+  if [[ -z "$OWN_NUMBER" ]]
+  then
+    if ! load_own_number
+    then
+      return 1
+    fi
+  fi
+  if [[ "$OWN_NUMBER" == +* ]]
+  then
+    local digits="${OWN_NUMBER#+}"
+    # Heuristic: NANP +1, otherwise take first two digits
+    if [[ "$digits" == 1* ]]
+    then
+      cc="1"
+    else
+      cc="${digits:0:2}"
+    fi
+    printf '%s' "$cc"
+    return 0
+  fi
+  return 1
 }
 
 # Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
@@ -210,7 +270,7 @@ get_modem_id() {
     return 0
   fi
 
-  # Case-insensitive substring match on fields
+  # Case-insensitive substring match on fields (unless country filter applies)
   sel="${sel_raw,,}"
 
   local list_json ids id json
@@ -244,6 +304,8 @@ get_modem_id() {
   fi
 
   local matches=()
+  local cc_filter=""
+  cc_filter="$(country_to_cc "$sel_raw" 2>/dev/null || true)"
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
@@ -252,7 +314,7 @@ get_modem_id() {
       continue
     fi
 
-    # Extract candidate fields and match case-insensitively in bash
+    # Extract candidate fields and match
     local fields numbers sel_digits
     fields="$(jq -r '
       .modem.generic as $g
@@ -267,37 +329,51 @@ get_modem_id() {
     sel_digits="${sel_raw//[^0-9+]/}"
 
     local matched=0
-    if [[ -n "$fields" ]]
+    if [[ -n "$cc_filter" && -n "$numbers" ]]
     then
-      local f lf
-      while IFS= read -r f
-      do
-        lf="${f,,}"
-        if [[ "$lf" == *"$sel"* ]]
-        then
-          matched=1; break
-        fi
-      done <<< "$fields"
-    fi
-
-    # Try matching by own phone number(s): substring, digit-substring, or regex
-    if (( matched == 0 )) && [[ -n "$numbers" ]]
-    then
-      local n nd
+      # Country code filter: match if any own-number starts with +<cc>
+      local n
       while IFS= read -r n
       do
         [[ -z "$n" ]] && continue
-        nd="${n//[^0-9+]/}"
-        if [[ "${n,,}" == *"${sel_raw,,}"* ]] || { [[ -n "$sel_digits" ]] && [[ "$nd" == *"$sel_digits"* ]]; }
-        then
-          matched=1; break
-        fi
-        # Regex match (best-effort). Ignore errors if pattern is invalid.
-        if printf '%s\n' "$n" | grep -Eq -- "$sel_raw" 2>/dev/null
+        n="${n#+}"
+        if [[ "$n" == "$cc_filter"* ]]
         then
           matched=1; break
         fi
       done <<< "$numbers"
+    else
+      # Generic substring/regex and number substring matching
+      if [[ -n "$fields" ]]
+      then
+        local f lf
+        while IFS= read -r f
+        do
+          lf="${f,,}"
+          if [[ "$lf" == *"$sel"* ]]
+          then
+            matched=1; break
+          fi
+        done <<< "$fields"
+      fi
+
+      if (( matched == 0 )) && [[ -n "$numbers" ]]
+      then
+        local n nd
+        while IFS= read -r n
+        do
+          [[ -z "$n" ]] && continue
+          nd="${n//[^0-9+]/}"
+          if [[ "${n,,}" == *"${sel_raw,,}"* ]] || { [[ -n "$sel_digits" ]] && [[ "$nd" == *"$sel_digits"* ]]; }
+          then
+            matched=1; break
+          fi
+          if printf '%s\n' "$n" | grep -Eq -- "$sel_raw" 2>/dev/null
+          then
+            matched=1; break
+          fi
+        done <<< "$numbers"
+      fi
     fi
 
     if (( matched == 1 ))
@@ -415,6 +491,21 @@ sms_send() {
   if [[ -n "$recipient" && "$recipient" != +* ]]
   then
     recipient="+$recipient"
+  fi
+
+  # Enforce local-only sending unless --allow-foreign is set
+  if [[ -z "$ALLOW_FOREIGN" ]]
+  then
+    local home_cc
+    home_cc="$(get_home_cc || true)"
+    if [[ -n "$home_cc" && "$recipient" == +([0-9]) ]]
+    then
+      if [[ "$recipient" != +"$home_cc"* ]]
+      then
+        echo_warning "blocking foreign recipient $recipient (home CC=$home_cc); use --allow-foreign to override or set HOME_CC"
+        return 2
+      fi
+    fi
   fi
 
   if (( $# == 0 ))
@@ -655,7 +746,7 @@ sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
 
   # When listing for all modems, iterate them explicitly
-  if [[ -n "$LIST_ALL" ]]
+  if [[ -n "$ALL_MODEMS" ]]
   then
     local mids mid had_any=""
     if ! list_json="$(mmcli -L -J)"
@@ -1088,6 +1179,8 @@ enable_all_modems() {
     echo_info "no modems detected"
     return 0
   fi
+  local ok_count=0
+  local fail_ids=()
   for mid in "${mids[@]}"
   do
     [[ -z "$mid" ]] && continue
@@ -1095,8 +1188,17 @@ enable_all_modems() {
     if ! enable_modem "$mid"
     then
       echo_warning "failed to enable modem $mid"
+      fail_ids+=("$mid")
+    else
+      ok_count=$((ok_count + 1))
     fi
   done
+  if (( ${#fail_ids[@]} > 0 ))
+  then
+    echo_info "enabled $ok_count/${#mids[@]} modems (failed: ${fail_ids[*]})"
+  else
+    echo_info "enabled $ok_count/${#mids[@]} modems"
+  fi
 }
 
 modem_reset() {
@@ -1747,7 +1849,7 @@ watch_messages() {
     watch_warn "failed to prune existing SMS messages on all modems"
   fi
 
-  if [[ -n "$LIST_ALL" ]]
+  if [[ -n "$ALL_MODEMS" ]]
   then
     enable_all_modems || watch_warn "failed to enable all modems"
   else
@@ -1773,7 +1875,7 @@ watch_messages() {
       if [[ "$id" =~ ^[0-9]+$ ]]
       then
         # If not listening on all, ignore messages from other modems
-        if [[ -z "$LIST_ALL" && -n "$current_modem_id" && "$current_modem_id" != "$MODEM" ]]
+        if [[ -z "$ALL_MODEMS" && -n "$current_modem_id" && "$current_modem_id" != "$MODEM" ]]
         then
           watch_warn "ignoring SMS $id from modem $current_modem_id (listening on $MODEM)"
           continue
@@ -1818,11 +1920,15 @@ main() {
         shift
         ;;
       --all)
-        LIST_ALL=1
+        ALL_MODEMS=1
         shift
         ;;
       --sent)
         SENT_ONLY=1
+        shift
+        ;;
+      --allow-foreign)
+        ALLOW_FOREIGN=1
         shift
         ;;
       -q|--quiet|--silent)
@@ -2011,13 +2117,13 @@ main() {
       fi
       ;;
     prune)
-      if [[ -n "$SENT_ONLY" && -n "$LIST_ALL" ]]
+      if [[ -n "$SENT_ONLY" && -n "$ALL_MODEMS" ]]
       then
         sms_prune_sent_modems
       elif [[ -n "$SENT_ONLY" ]]
       then
         sms_prune_sent
-      elif [[ -n "$LIST_ALL" ]]
+      elif [[ -n "$ALL_MODEMS" ]]
       then
         sms_prune_all_modems
       else
@@ -2025,7 +2131,7 @@ main() {
       fi
       ;;
     enable)
-      if [[ -n "$LIST_ALL" ]]
+      if [[ -n "$ALL_MODEMS" ]]
       then
         enable_all_modems
       else
@@ -2039,7 +2145,7 @@ main() {
       modem_number
       ;;
     reset)
-      if [[ -n "$LIST_ALL" ]]
+      if [[ -n "$ALL_MODEMS" ]]
       then
         modem_reset_all
       else
