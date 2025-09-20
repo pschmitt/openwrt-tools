@@ -410,7 +410,7 @@ sms_send() {
   # text="$(echo -e "$text")"
 
   local tmpfile
-  if ! tmpfile="$(mktemp /tmp/mmsms-text.XXXXXX)"
+  if ! tmpfile="$(mktemp ${TMPDIR:-/tmp}/mmsms-text.XXXXXX)"
   then
     error "failed to create temporary file for SMS text"
     return 1
@@ -1526,7 +1526,7 @@ watch_messages() {
   export PATH="/usr/local/bin:/srv/bin:$PATH"
   trap watch_cleanup EXIT INT TERM
 
-  WATCH_FIFO="/tmp/smsbus.$$"
+  WATCH_FIFO="${TMPDIR:-/tmp}/smsbus.$$"
   mkfifo "$WATCH_FIFO"
 
   local filter="type='signal',interface='org.freedesktop.ModemManager1.Modem.Messaging',member='Added'"
