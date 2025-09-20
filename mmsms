@@ -99,6 +99,59 @@ error() {
   echo_error "$SCRIPT_NAME: $*"
 }
 
+# Run an AT command via mmcli and return the response string
+# - Strips the leading "response: '...'") wrapper printed by mmcli
+# - If no such wrapper is present, returns raw stdout/stderr as-is
+at_command() {
+  local cmd="$1"
+  local out resp
+  if ! out="$(mmcli_cmd --command="$cmd" 2>&1 || true)"
+  then
+    out=""
+  fi
+  resp="$(printf '%s\n' "$out" | sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
+  if [[ -z "$resp" ]]
+  then
+    resp="$out"
+  fi
+  printf '%s' "$resp"
+}
+
+# Decode a UCS2 hex string like "002B0033..." by taking the low byte of each code unit
+at_decode_ucs2() {
+  local s="$1"
+  if [[ "$s" =~ ^([0-9A-Fa-f]{4})+$ ]]
+  then
+    local out=""
+    local pos=0 len=${#s} hb
+    while (( pos < len ))
+    do
+      hb="${s:pos+2:2}"
+      out+="$(printf '%b' "\\x$hb")"
+      pos=$((pos + 4))
+    done
+    printf '%s' "$out"
+    return 0
+  fi
+  printf '%s' "$s"
+}
+
+# Extract the first double-quoted field from an AT response and decode UCS2 if applicable
+at_first_quoted_decoded() {
+  local resp="$1"
+  local q
+  q="$(printf '%s\n' "$resp" | sed -n 's/^.*"\([^"]*\)".*$/\1/p' | head -n1)"
+  if [[ -z "$q" ]]
+  then
+    return 1
+  fi
+  if [[ "$q" =~ ^([0-9A-Fa-f]{4})+$ ]]
+  then
+    q="$(at_decode_ucs2 "$q")"
+  fi
+  printf '%s' "$q"
+}
+
 # Log and run generic mmcli calls (no implicit --modem)
 mmcli() {
   echo_debug "[mmcli] mmcli $*"
@@ -1136,14 +1189,27 @@ get_smsc_number() {
     return 0
   fi
 
-  if load_own_number
+  # Try to retrieve the network-configured SMSC via AT+CSCA?
+  # If unavailable or unsupported, return empty (do not force SMSC).
+  local resp smsc
+  resp="$(at_command 'AT+CSCA?')"
+  if [[ -n "$resp" ]]
   then
-    SMSC_NUMBER="$OWN_NUMBER"
-    printf '%s' "$SMSC_NUMBER"
-    return 0
+    smsc="$(at_first_quoted_decoded "$resp" || true)"
+    if [[ -n "$smsc" ]]
+    then
+      if [[ "$smsc" != +* && "$smsc" =~ ^[0-9]+$ ]]
+      then
+        smsc="+$smsc"
+      fi
+      SMSC_NUMBER="$smsc"
+      printf '%s' "$SMSC_NUMBER"
+      return 0
+    fi
   fi
 
-  SMSC_NUMBER="$DEFAULT_SMSC_NUMBER"
+  # No SMSC detected; leave empty so callers skip forcing one
+  SMSC_NUMBER=""
   printf '%s' "$SMSC_NUMBER"
 }
 
@@ -1386,10 +1452,6 @@ watch_handle_sms() {
         recipient="+$recipient"
       fi
     fi
-    if [[ -z "$recipient" ]]
-    then
-      recipient="$(get_smsc_number)"
-    fi
 
     local log_text="$text"
     log_text=${log_text//$'\r'/}
@@ -1401,7 +1463,12 @@ watch_handle_sms() {
     then
       log_text="${log_text:0:200}..."
     fi
-    watch_log "received id=$id from $sender to $recipient text='$log_text'"
+    local log_recipient="$recipient"
+    if [[ -z "$log_recipient" ]]
+    then
+      log_recipient="--"
+    fi
+    watch_log "received id=$id from $sender to $log_recipient text='$log_text'"
 
     local handled=0
     if [[ "$text" == "!"* ]]
