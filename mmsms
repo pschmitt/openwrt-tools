@@ -134,18 +134,49 @@ get_home_cc() {
     return 0
   fi
 
-  local j own
+  # Prefer using load_own_number to respect current MODEM context
+  local own=""
   if [[ -n "$target_mid" ]]
   then
-    j="$(mmcli -m "$target_mid" -J 2>/dev/null || true)"
+    (
+      local MODEM="$target_mid"
+      if load_own_number
+      then
+        own="$OWN_NUMBER"
+      fi
+      if [[ -n "$own" ]]
+      then
+        printf '%s' "$own" >"${TMPDIR:-/tmp}/.mmsms-own.$$"
+      fi
+    )
+    if [[ -f "${TMPDIR:-/tmp}/.mmsms-own.$$" ]]
+    then
+      own="$(cat "${TMPDIR:-/tmp}/.mmsms-own.$$")"
+      rm -f "${TMPDIR:-/tmp}/.mmsms-own.$$" 2>/dev/null || true
+    fi
   else
-    j="$(mmcli_cmd -J 2>/dev/null || true)"
+    if load_own_number
+    then
+      own="$OWN_NUMBER"
+    fi
   fi
-  if [[ -z "$j" ]]
+
+  if [[ -z "$own" ]]
   then
-    return 1
+    # Fallback to direct mmcli parsing
+    local j
+    if [[ -n "$target_mid" ]]
+    then
+      j="$(mmcli -m "$target_mid" -J 2>/dev/null || true)"
+    else
+      j="$(mmcli_cmd -J 2>/dev/null || true)"
+    fi
+    if [[ -n "$j" ]]
+    then
+      own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+    fi
   fi
-  own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+
   if [[ "$own" == +* ]]
   then
     local digits="${own#+}"
@@ -239,6 +270,21 @@ resolve_default_recipient() {
   local mid="${1:-}"
   local cc label var val
   cc="$(get_home_cc "$mid" 2>/dev/null || true)"
+  echo_debug "resolve_default_recipient: mid=${mid:-} cc=${cc:-}"
+
+  # Guard: unknown CC → fall back to global default or fail
+  if [[ -z "$cc" ]]
+  then
+    if [[ -n "${DEFAULT_RECIPIENT-}" ]]
+    then
+      echo_debug "resolve_default_recipient: cc unknown, using DEFAULT_RECIPIENT=${DEFAULT_RECIPIENT}"
+      printf '%s' "${DEFAULT_RECIPIENT}"
+      return 0
+    fi
+    echo_debug "resolve_default_recipient: cc unknown and no DEFAULT_RECIPIENT"
+    return 1
+  fi
+
   case "$cc" in
     1) label=US ;;
     33) label=FR ;;
@@ -246,34 +292,46 @@ resolve_default_recipient() {
     *) label="" ;;
   esac
 
+  # Try label-specific var
   if [[ -n "$label" ]]
   then
     var="DEFAULT_RECIPIENT_${label}"
-    val="${!var:-}"
+    echo_debug "resolve_default_recipient: try $var"
+    if declare -p "$var" >/dev/null 2>&1
+    then
+      val="${!var}"
+      if [[ -n "$val" ]]
+      then
+        echo_debug "resolve_default_recipient: matched $var=$val"
+        printf '%s' "$val"
+        return 0
+      fi
+    fi
+  fi
+
+  # Try numeric-CC specific var
+  var="DEFAULT_RECIPIENT_${cc}"
+  echo_debug "resolve_default_recipient: try $var"
+  if declare -p "$var" >/dev/null 2>&1
+  then
+    val="${!var}"
     if [[ -n "$val" ]]
     then
+      echo_debug "resolve_default_recipient: matched $var=$val"
       printf '%s' "$val"
       return 0
     fi
   fi
 
-  if [[ -n "$cc" ]]
+  # Global default
+  if [[ -n "${DEFAULT_RECIPIENT-}" ]]
   then
-    var="DEFAULT_RECIPIENT_${cc}"
-    val="${!var:-}"
-    if [[ -n "$val" ]]
-    then
-      printf '%s' "$val"
-      return 0
-    fi
-  fi
-
-  if [[ -n "$DEFAULT_RECIPIENT" ]]
-  then
-    printf '%s' "$DEFAULT_RECIPIENT"
+    echo_debug "resolve_default_recipient: default DEFAULT_RECIPIENT=${DEFAULT_RECIPIENT}"
+    printf '%s' "${DEFAULT_RECIPIENT}"
     return 0
   fi
 
+  echo_debug "resolve_default_recipient: no default found"
   return 1
 }
 
@@ -609,7 +667,7 @@ sms_send() {
       # shellcheck disable=SC1090
       source "$CONFIG_FILE" || true
     fi
-    recipient="$(resolve_default_recipient "$MODEM" 2>/dev/null || true)"
+    recipient="$(resolve_default_recipient "$MODEM" || true)"
     if [[ -z "$recipient" ]]
     then
       error "no recipient specified and no DEFAULT_RECIPIENT configured for this modem/country"
