@@ -10,15 +10,21 @@ source lib/echo.sh || exit 2
 CONFIG_FILE="${CONFIG_FILE:-/etc/mmsms.conf}"
 
 MODEM="${MODEM:-any}"
+ALL_MODEMS="${ALL_MODEMS:-}"
+DEFAULT_MODEM="${DEFAULT_MODEM:-}"
+
 OWN_NUMBER="${OWN_NUMBER:-}"
 SMSC_NUMBER="${SMSC_NUMBER:-}"
+
 SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
 SMS_RETRY_COUNT="${SMS_RETRY_COUNT:-${SMS_SEND_RETRY_COUNT:-${MAX_RETRY:-3}}}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
+
 AT_FALLBACK_MAX_READS="${AT_FALLBACK_MAX_READS:-25}"
 AT_FALLBACK_READ_TIMEOUT="${AT_FALLBACK_READ_TIMEOUT:-0.2}"
 
 WEBHOOK_URL="${WEBHOOK_URL:-}"
+
 WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
@@ -28,17 +34,15 @@ QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
 HARD_RESET="${HARD_RESET:-}"
-ALL_MODEMS="${ALL_MODEMS:-}"
 SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
-DEFAULT_MODEM="${DEFAULT_MODEM:-}"
+
 CONFIG_LOADED=""
 MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
-SMS_LAST_TEXT=""
 
 load_config() {
   local origin="${1:-initial}"
@@ -1109,8 +1113,6 @@ sms_send() {
   # Expand common escapes and strip trailing whitespace to avoid stray spaces
   text="$(printf '%b' "$text" | sed -e 's/[[:space:]]\+$//')"
 
-  SMS_LAST_TEXT="$text"
-
   # Log outgoing SMS (preview) to stderr and syslog
   local log_text
   log_text="$(abbrev_text_for_log "$text")"
@@ -1290,8 +1292,6 @@ sms_send_with_fallback() {
   if (( ${#args[@]} > 0 ))
   then
     text="${args[*]}"
-  else
-    text="$SMS_LAST_TEXT"
   fi
 
   if [[ -z "$text" ]]
