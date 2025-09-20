@@ -848,8 +848,8 @@ sms_send() {
   echo_info "sending sms modem=$log_modem to $recipient text='$log_text'"
   log_sys "sending sms modem=$log_modem to $recipient text='$log_text'"
 
-  # DIRTYFIX For Home Assistant SMS notifications
-  text="$(echo -e "$text")"
+  # Expand common escapes and strip trailing whitespace to avoid stray spaces
+  text="$(echo -e "$text" | sed -e 's/[[:space:]]\+$//')"
 
   local tmpfile
   if ! tmpfile="$(mktemp "${TMPDIR:-/tmp}/mmsms-text.XXXXXX")"
@@ -2523,6 +2523,59 @@ main() {
         return 0
       fi
     done
+  fi
+
+  # Normalize and pull global flags that appear after the subcommand,
+  # while preserving positional args for the subcommand.
+  if (( ${#ARGS[@]} > 0 ))
+  then
+    local -a CMD_ARGS=()
+    local i=0
+    while (( i < ${#ARGS[@]} ))
+    do
+      case "${ARGS[i]}" in
+        --allow-foreign)
+          ALLOW_FOREIGN=1
+          i=$((i+1))
+          continue
+          ;;
+        --fallback)
+          FALLBACK=1
+          i=$((i+1))
+          continue
+          ;;
+        --all)
+          ALL_MODEMS=1
+          i=$((i+1))
+          continue
+          ;;
+        --sent)
+          SENT_ONLY=1
+          i=$((i+1))
+          continue
+          ;;
+        --config)
+          if (( i + 1 < ${#ARGS[@]} ))
+          then
+            CONFIG_FILE="${ARGS[i+1]}"
+            i=$((i+2))
+            continue
+          fi
+          ;;
+        --)
+          # Copy the rest verbatim
+          while (( i < ${#ARGS[@]} ))
+          do
+            CMD_ARGS+=("${ARGS[i]}")
+            i=$((i+1))
+          done
+          break
+          ;;
+      esac
+      CMD_ARGS+=("${ARGS[i]}")
+      i=$((i+1))
+    done
+    ARGS=("${CMD_ARGS[@]}")
   fi
 
   if [[ "$command" == -* ]]
