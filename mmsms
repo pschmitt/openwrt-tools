@@ -15,6 +15,8 @@ SMSC_NUMBER="${SMSC_NUMBER:-}"
 SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
 SMS_SEND_RETRY_COUNT="${SMS_SEND_RETRY_COUNT:-2}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
+AT_FALLBACK_MAX_READS="${AT_FALLBACK_MAX_READS:-25}"
+AT_FALLBACK_READ_TIMEOUT="${AT_FALLBACK_READ_TIMEOUT:-0.2}"
 
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
@@ -93,6 +95,7 @@ Commands:
   restart                   Restart modemmanager, issue quectel reset, re-enable modem
   watch                     Monitor incoming SMS and forward/execute actions
   number|phone              Print modem's own phone number
+  smsc                     Print modem's configured SMSC number
   (default: status)
 USAGE
 }
@@ -197,6 +200,14 @@ Prints the modem's own number (MSISDN) if reported.
 USAGE
 }
 
+usage_smsc() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] smsc
+
+Prints the modem\'s configured SMSC (service center) number when available.
+USAGE
+}
+
 print_subcommand_usage() {
   case "$1" in
     send)   usage_send ;;
@@ -208,6 +219,7 @@ print_subcommand_usage() {
     reset)  usage_reset ;;
     watch)  usage_watch ;;
     number) usage_number ;;
+    smsc)   usage_smsc ;;
     *) usage ;;
   esac
 }
@@ -466,7 +478,7 @@ log_modem_details() {
 
     if [[ -z "$fields" ]]
     then
-      echo_info "${prefix}modem id=$mid"
+      echo_info "${prefix}modem={id='$mid'}"
       return 0
     fi
 
@@ -484,6 +496,105 @@ log_modem_details() {
   else
     echo_info "${prefix}modem={id='$mid'}"
   fi
+}
+
+get_modem_at_port() {
+  local json port
+
+  if ! json="$(mmcli -m "$MODEM" -J 2>/dev/null)"
+  then
+    echo_debug "get_modem_at_port: failed to query modem JSON"
+    return 1
+  fi
+
+  port="$(jq -r '
+    ((.modem.generic.ports // [])
+      | map(select(test("\\(at\\)$")) | (split(" ")[0]))
+      | .[0])
+    // (.modem.generic["primary-port"] // empty)
+  ' <<<"$json" 2>/dev/null)"
+
+  if [[ -z "$port" ]]
+  then
+    echo_debug "get_modem_at_port: no AT port detected"
+    return 1
+  fi
+
+  if [[ "$port" != /* ]]
+  then
+    port="/dev/$port"
+  fi
+
+  if [[ ! -e "$port" ]]
+  then
+    echo_debug "get_modem_at_port: port $port not present"
+    return 1
+  fi
+
+  printf '%s' "$port"
+}
+
+at_command_direct() {
+  local cmd="$1"
+  local port
+
+  if ! port="$(get_modem_at_port)"
+  then
+    return 1
+  fi
+
+  if [[ ! -w "$port" ]]
+  then
+    echo_debug "at_command_direct: port $port not writable"
+    return 1
+  fi
+
+  local fd
+  if ! exec {fd}<>"$port"
+  then
+    echo_debug "at_command_direct: failed to open $port"
+    return 1
+  fi
+
+  local _drain
+  while read -r -t "$AT_FALLBACK_READ_TIMEOUT" -u $fd _drain
+  do
+    :
+  done
+
+  printf '%s\r' "$cmd" >&$fd
+
+  local resp="" line="" timeout_count=0
+  while (( timeout_count < AT_FALLBACK_MAX_READS ))
+  do
+    if ! read -r -t "$AT_FALLBACK_READ_TIMEOUT" -u $fd line
+    then
+      timeout_count=$((timeout_count + 1))
+      continue
+    fi
+    timeout_count=0
+    line="${line%$'\r'}"
+    [[ "$line" == "$cmd" ]] && continue
+    if [[ -n "$line" ]]
+    then
+      resp+="$line"$'\n'
+      if [[ "$line" == "OK" || "$line" == "ERROR" ]]
+      then
+        break
+      fi
+    fi
+  done
+
+  exec {fd}>&- {fd}<&-
+
+  resp="${resp%$'\n'}"
+  if [[ -n "$resp" ]]
+  then
+    printf '%s' "$resp"
+    return 0
+  fi
+
+  return 1
 }
 
 # Resolve default recipient based on modem/country-specific variables.
@@ -565,14 +676,30 @@ resolve_default_recipient() {
 # - If no such wrapper is present, returns raw stdout/stderr as-is
 at_command() {
   local cmd="$1"
-  local out resp
-  out="$(mmcli_cmd --command="$cmd" 2>&1)" || out=""
-  resp="$(printf '%s\n' "$out" | sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
-  if [[ -z "$resp" ]]
+  local out resp rc
+
+  out="$(mmcli_cmd --command="$cmd" 2>&1)"
+  rc=$?
+  if (( rc == 0 ))
   then
-    resp="$out"
+    resp="$(printf '%s\n' "$out" | sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
+    if [[ -z "$resp" ]]
+    then
+      resp="$out"
+    fi
+    printf '%s' "$resp"
+    return 0
   fi
-  printf '%s' "$resp"
+
+  echo_debug "at_command: mmcli --command failed (rc=$rc), attempting direct fallback"
+  if resp="$(at_command_direct "$cmd")"
+  then
+    printf '%s' "$resp"
+    return 0
+  fi
+
+  printf '%s' "$out"
+  return $rc
 }
 
 # Decode a UCS2 hex string like "002B0033..." by taking the low byte of each code unit
@@ -2482,6 +2609,7 @@ main() {
         rst|reset|restart) topic="reset" ;;
         w|watch) topic="watch" ;;
         number|phone) topic="number" ;;
+        smsc) topic="smsc" ;;
       esac
       print_subcommand_usage "$topic"
     fi
@@ -2516,6 +2644,9 @@ main() {
       ;;
     watch|w)
       command="watch"
+      ;;
+    smsc)
+      command="smsc"
       ;;
   esac
 
@@ -2755,6 +2886,11 @@ main() {
       ;;
     number)
       modem_number
+      ;;
+    smsc)
+      local smsc
+      smsc="$(get_smsc_number)"
+      printf "%s\n" "$smsc"
       ;;
     reset)
       if [[ -n "$ALL_MODEMS" ]]
