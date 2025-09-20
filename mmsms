@@ -86,17 +86,16 @@ Options:
   -h, --help           Show this help and exit
 
 Commands:
-  send RECIPIENT [TEXT|-]   Send SMS; use '-' or stdin for TEXT
-  list                      List SMS messages on the modem
-  read MESSAGE_ID           Show details for a specific SMS
-  prune                     Delete all SMS messages from the modem
-  enable                    Wait for ModemManager and enable the modem
-  status                    Show modem status summary
-  restart                   Restart modemmanager, issue quectel reset, re-enable modem
-  watch                     Monitor incoming SMS and forward/execute actions
-  number|phone              Print modem's own phone number
-  smsc                     Print modem's configured SMSC number
-  (default: status)
+  send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
+  list                       List SMS messages on the modem
+  read MESSAGE_ID            Show details for a specific SMS
+  prune                      Delete all SMS messages from the modem
+  enable                     Wait for ModemManager and enable the modem
+  status                     Show modem status summary (default)
+  restart                    Restart modemmanager, issue quectel reset, re-enable modem
+  watch                      Monitor incoming SMS and forward/execute actions
+  number|phone               Print modem's own phone number
+  smsc                       Print modem's configured SMSC number
 USAGE
 }
 
@@ -162,7 +161,7 @@ usage_status() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-j|--json]
 
-Shows modem status. --json outputs structured JSON.
+Shows modem status. --json outputs structured JSON. (Default command)
 USAGE
 }
 
