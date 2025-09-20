@@ -1110,6 +1110,20 @@ watch_in_whitelist() {
 watch_send_reply() {
   local to="$1"
   local msg="$2"
+  # Log outgoing SMS (abbreviate text and escape newlines)
+  local log_text="$msg"
+  log_text=${log_text//$'\r'/}
+  log_text=${log_text//$'\n'/\\n}
+  # Prevent echo -e from interpreting escapes
+  log_text=${log_text//\\/\\\\}
+  if [[ -z "$log_text" ]]
+  then
+    log_text="<empty>"
+  elif (( ${#log_text} > 200 ))
+  then
+    log_text="${log_text:0:200}..."
+  fi
+  watch_log "sending reply to $to text='$log_text'"
   if ! sms_send "$to" "$msg"
   then
     watch_warn "failed to send reply to $to"
@@ -1455,6 +1469,8 @@ watch_handle_sms() {
     local log_text="$text"
     log_text=${log_text//$'\r'/}
     log_text=${log_text//$'\n'/\\n}
+    # Prevent echo -e from interpreting escapes
+    log_text=${log_text//\\/\\\\}
     if [[ -z "$log_text" ]]
     then
       log_text="<empty>"
