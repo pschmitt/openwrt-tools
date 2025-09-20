@@ -13,14 +13,13 @@ MODEM="${MODEM:-any}"
 OWN_NUMBER="${OWN_NUMBER:-}"
 SMSC_NUMBER="${SMSC_NUMBER:-}"
 SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
-SMS_SEND_RETRY_COUNT="${SMS_SEND_RETRY_COUNT:-2}"
+SMS_RETRY_COUNT="${SMS_RETRY_COUNT:-${SMS_SEND_RETRY_COUNT:-${MAX_RETRY:-3}}}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
 AT_FALLBACK_MAX_READS="${AT_FALLBACK_MAX_READS:-25}"
 AT_FALLBACK_READ_TIMEOUT="${AT_FALLBACK_READ_TIMEOUT:-0.2}"
 
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
-WATCH_MAX_RETRY="${MAX_RETRY:-3}"
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
@@ -34,7 +33,9 @@ SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
+AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
+SMS_LAST_TEXT=""
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -65,24 +66,26 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
-  -a, --all            List/Prune/Enable/Reset: operate on all modems
+  -A, --auto, --auto-recipient  Fallback: if foreign blocked, use modem's default recipient
+  -a, --all             List/Prune/Enable/Reset: operate on all modems
   -c, --config PATH    Use alternate config file for watch
   -d, --debug          Enable debug output
-  -F, --fallback       Send/Watch: on failure, try other modem(s)
+  -F, --fallback        Send/Watch: on failure, try other modem(s)
   -f, --allow-foreign  Send: allow sending to foreign country codes
-  -H, --hard           Reset: also stop/start modemmanager (hard reset)
-  -j, --json           Output JSON (for list/status/read)
-  -m, --modem MODEM    Modem selector or id (default: $MODEM)
+  -H, --hard            Reset: also stop/start modemmanager (hard reset)
+  -j, --json            Output JSON (for list/status/read)
+  -m, --modem MODEM     Modem selector or id (default: $MODEM)
                        Accepts id (e.g. 2), dbus path, 'any', or
                        a string matching manufacturer/plugin/ttyUSB/phone-number
                        or country (fr/de/us) or country name (france/germany/us)
-  -q, --quiet          Suppress info output (warnings/errors only) and status output (exit code only)
+  -q, --quiet           Suppress info output (warnings/errors only) and status output (exit code only)
       --silent         Same as --quiet
-  -r, --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
-  -s, --syslog         Mirror logs to syslog (in addition to stderr)
-  -S, --sent           Prune: delete only sent outgoing messages
-  -x, --trace          Enable shell tracing (set -x)
-  -h, --help           Show this help and exit
+  -r, --raw             List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
+  -R, --retry COUNT     Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
+  -s, --syslog          Mirror logs to syslog (in addition to stderr)
+  -S, --sent            Prune: delete only sent outgoing messages
+  -x, --trace           Enable shell tracing (set -x)
+  -h, --help            Show this help and exit
 
 Commands:
   enable                     Wait for ModemManager and enable the modem
@@ -106,9 +109,11 @@ Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
 Sends an SMS. If RECIPIENT is omitted, uses DEFAULT_RECIPIENT_XX/CC/DEFAULT.
 
 Relevant flags:
-  -c, --config PATH Load config for defaults (only needed outside 'watch')
-  -F, --fallback    Try other modems on failure (sorted by id)
+  -A, --auto, --auto-recipient  When fallback, use modem defaults if original blocked
+  -c, --config PATH    Load config for defaults (only needed outside 'watch')
+  -F, --fallback       Try other modems on failure (sorted by id)
   -f, --allow-foreign Allow sending outside the modem's home country code
+  -R, --retry COUNT    Override SMS resend attempts
 USAGE
 }
 
@@ -158,9 +163,14 @@ USAGE
 
 usage_status() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-j|--json]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-a|--all] [-j|--json] [-r|--raw]
 
 Shows modem status. --json outputs structured JSON. (Default command)
+
+Relevant flags:
+  -a, --all    Include all detected modems
+  -j, --json   Output structured JSON
+  -r, --raw    Output raw mmcli JSON
 USAGE
 }
 
@@ -178,15 +188,17 @@ USAGE
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-a|--all] [-c|--config PATH] [-F|--fallback] [-f|--allow-foreign]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-F|--fallback] [-f|--allow-foreign] [-R|--retry COUNT]
 
 Watches incoming SMS and executes reply/webhook logic.
 
 Relevant flags:
+  -A, --auto, --auto-recipient  When fallback, use modem defaults if original blocked
   -a, --all           Process messages from all modems (default: selected modem only)
   -c, --config PATH   Config file with defaults and whitelist
   -F, --fallback      When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
+  -R, --retry COUNT   Override SMS resend attempts
 USAGE
 }
 
@@ -499,6 +511,7 @@ log_modem_details() {
 get_modem_at_port() {
   local json port
 
+  echo_debug "AT fallback resolving modem port"
   if ! json="$(mmcli -m "$MODEM" -J 2>/dev/null)"
   then
     echo_debug "get_modem_at_port: failed to query modem JSON"
@@ -548,6 +561,7 @@ at_command_direct() {
   fi
 
   local fd
+  echo_debug "AT fallback open $port"
   if ! exec {fd}<>"$port"
   then
     echo_debug "at_command_direct: failed to open $port"
@@ -560,6 +574,7 @@ at_command_direct() {
     :
   done
 
+  echo_debug "AT fallback TX -> $cmd"
   printf '%s\r' "$cmd" >&$fd
 
   local resp="" line="" timeout_count=0
@@ -575,6 +590,7 @@ at_command_direct() {
     [[ "$line" == "$cmd" ]] && continue
     if [[ -n "$line" ]]
     then
+      echo_debug "AT fallback RX <- $line"
       resp+="$line"$'\n'
       if [[ "$line" == "OK" || "$line" == "ERROR" ]]
       then
@@ -588,6 +604,7 @@ at_command_direct() {
   resp="${resp%$'\n'}"
   if [[ -n "$resp" ]]
   then
+    echo_debug "AT fallback raw response: $resp"
     printf '%s' "$resp"
     return 0
   fi
@@ -970,6 +987,7 @@ sms_read_json() {
 sms_send() {
   local recipient=""
   local text=""
+  local recipient_was_default=0
 
   # Parse args: allow default recipient when not specified
   if (( $# >= 1 ))
@@ -1015,10 +1033,15 @@ sms_send() {
       error "no recipient specified and no DEFAULT_RECIPIENT configured for this modem/country"
       return 2
     fi
+    recipient_was_default=1
   fi
 
   recipient="${recipient//[[:space:]]/}"
   recipient="$(ensure_plus "$recipient")"
+
+  SMS_LAST_RECIPIENT="$recipient"
+  SMS_LAST_RECIPIENT_FROM_DEFAULT="$recipient_was_default"
+  SMS_LAST_RECIPIENT_MODEM="$MODEM"
 
   # Enforce local-only sending unless --allow-foreign is set
   if [[ -z "$ALLOW_FOREIGN" ]]
@@ -1044,6 +1067,8 @@ sms_send() {
 
   # Expand common escapes and strip trailing whitespace to avoid stray spaces
   text="$(printf '%b' "$text" | sed -e 's/[[:space:]]\+$//')"
+
+  SMS_LAST_TEXT="$text"
 
   # Log outgoing SMS (preview) to stderr and syslog
   local log_text
@@ -1090,10 +1115,12 @@ sms_send() {
     fi
   fi
   local create_attempt=1
-  local max_attempts=$((SMS_SEND_RETRY_COUNT + 1))
+  local max_attempts=$SMS_RETRY_COUNT
   local rc=1
 
   # Create the SMS first (retrying creation only if creation itself fails)
+  if (( max_attempts < 1 )); then max_attempts=1; fi
+
   while (( create_attempt <= max_attempts ))
   do
     sms_id=""
@@ -1135,6 +1162,8 @@ sms_send() {
 
   # Now retry only the send step for the created SMS id
   local send_attempt=1
+  if (( max_attempts < 1 )); then max_attempts=1; fi
+
   while (( send_attempt <= max_attempts ))
   do
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
@@ -1182,12 +1211,13 @@ recipient_allowed_for_modem() {
 }
 
 sms_send_with_fallback() {
-  local recipient="$1"
-  shift
-  local text="$*"
+  local orig_args=("$@")
+  local args=("$@")
+  local recipient=""
+  local text=""
 
-  # Try current modem first
-  if sms_send "$recipient" "$text"
+  # First attempt with the original arguments
+  if sms_send "${orig_args[@]}"
   then
     return 0
   fi
@@ -1197,13 +1227,48 @@ sms_send_with_fallback() {
     return 1
   fi
 
+  # Parse optional recipient from arguments
+  if (( ${#args[@]} > 0 ))
+  then
+    case "${args[0]}" in
+      -)
+        args=("${args[@]:1}")
+        ;;
+      +*|[0-9]*)
+        recipient="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+    esac
+  fi
+
+  if (( ${#args[@]} > 0 )) && [[ "${args[0]}" == "-" ]]
+  then
+    args=("${args[@]:1}")
+  fi
+
+  if (( ${#args[@]} > 0 ))
+  then
+    text="${args[*]}"
+  else
+    text="$SMS_LAST_TEXT"
+  fi
+
+  if [[ -z "$text" ]]
+  then
+    echo_warning "fallback: message text unavailable for resend"
+    return 1
+  fi
+
+  local resolved_recipient="${SMS_LAST_RECIPIENT:-$recipient}"
+  local orig_recipient_default_flag="${SMS_LAST_RECIPIENT_FROM_DEFAULT:-0}"
+  recipient="$resolved_recipient"
+
   # Gather other modems
-  local list_json mids mid cur_id
+  local mids mid cur_id
   # shellcheck disable=SC2031
   cur_id="$MODEM"
   if [[ "$cur_id" == "any" ]]
   then
-    # Attempt to pin to id
     local _j
     if _j="$(mmcli_cmd -J)"
     then
@@ -1214,32 +1279,69 @@ sms_send_with_fallback() {
   then
     return 1
   fi
+
   for mid in "${mids[@]}"
   do
     [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
-    if ! recipient_allowed_for_modem "$recipient" "$mid"
+    local prev_mode="$MODEM"
+    MODEM="$mid"
+    local candidate_recipient="$recipient"
+    local used_auto=""
+    local auto_tried=0
+    if ! recipient_allowed_for_modem "$candidate_recipient" "$mid"
     then
-      (
-        local MODEM="$mid"
-        local info
-        info="$(modem_info_brief)"
-        echo_warning "fallback: cannot use modem=$info for recipient $recipient (foreign not allowed; use --allow-foreign)"
-      )
-      continue
-    fi
-    (
-      # shellcheck disable=SC2030
-      local MODEM="$mid"
-      echo_debug "fallback: trying modem $mid"
-      if sms_send "$recipient" "$text"
+      if [[ -n "$AUTO_RECIPIENT" && "$orig_recipient_default_flag" == "1" ]]
+      then
+        auto_tried=1
+        local auto_recipient
+        if auto_recipient="$(resolve_default_recipient "$mid" 2>/dev/null)"
+        then
+          auto_recipient="${auto_recipient//[[:space:]]/}"
+          auto_recipient="$(ensure_plus "$auto_recipient")"
+        else
+          auto_recipient=""
+        fi
+        if [[ -n "$auto_recipient" ]] && ! recipient_allowed_for_modem "$auto_recipient" "$mid"
+        then
+          auto_recipient=""
+        fi
+        if [[ -n "$auto_recipient" ]]
+        then
+          candidate_recipient="$auto_recipient"
+          used_auto=1
+        fi
+      fi
+      if [[ -z "$used_auto" ]]
       then
         local info
         info="$(modem_info_brief)"
-        echo_info "fallback send succeeded modem=$info"
-        exit 0
+        if [[ "$auto_tried" == 1 ]]
+        then
+          echo_warning "fallback: modem=$info has no eligible default recipient (auto-recipient unavailable)"
+        else
+          echo_warning "fallback: cannot use modem=$info for recipient $recipient (foreign not allowed; use --allow-foreign)"
+        fi
+        MODEM="$prev_mode"
+        continue
       fi
-      exit 1
-    ) && return 0
+    fi
+    if [[ -n "$used_auto" ]]
+    then
+      local info
+      info="$(modem_info_brief)"
+      echo_info "fallback: using modem=$info default_recipient='$candidate_recipient'"
+    fi
+    echo_debug "fallback: sending text='$text'"
+    echo_debug "fallback: trying modem $mid"
+    if sms_send "$candidate_recipient" "$text"
+    then
+      local info
+      info="$(modem_info_brief)"
+      MODEM="$prev_mode"
+      echo_info "fallback send succeeded modem=$info"
+      return 0
+    fi
+    MODEM="$prev_mode"
   done
 
   echo_warning "fallback: no eligible modem could send the message"
@@ -1421,59 +1523,40 @@ sms_list_pretty() {
     fi
 
     if [[ -n "$JSON_OUTPUT" ]]
+  then
+    if [[ -n "$ALL_MODEMS" && -z "$target_mid" ]]
     then
-      local json_items
-      json_items="$(
+      local mids mid json_items=()
+      if mapfile -t mids < <(list_modem_ids_sorted)
+      then
         for mid in "${mids[@]}"
         do
           [[ -z "$mid" ]] && continue
-          # obtain own number per modem
-          local mjs own=""
-          mjs="$(mmcli --modem "$mid" -J)"
-          if [[ -n "$mjs" ]]
-          then
-            own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$mjs" 2>/dev/null)"
-            own="$(ensure_plus "$own")"
-          fi
-          if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
-          then
-            continue
-          fi
-          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
-          for id in "${ids[@]}"
-          do
-            [[ -z "$id" ]] && continue
-            if ! js="$(mmcli --modem "$mid" --sms "$id" -J)"
-            then
-              continue
-            fi
-            pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
-            msg_type="$(pdu_to_type "$pdu")"
-            jq -c --arg id "$id" --arg type "$msg_type" --arg mid "$mid" --arg own "$own" '
-              {
-                modem_id: ($mid|tonumber),
-                id: ($id|tonumber),
-                sender: (.sms.content.number // ""),
-                text: (.sms.content.text // ""),
-                class: (.sms.content.class // ""),
-                state: (.sms.properties.state // ""),
-                pdu: (.sms.properties["pdu-type"] // ""),
-                storage: (.sms.properties.storage // ""),
-                type: $type,
-                recipient: (if $type == "received" then $own else (.sms.content.number // "") end)
-              }
-            ' <<<"$js" 2>/dev/null
-          done
+          local item
+          item="$( (local MODEM="$mid" ALL_MODEMS=""; JSON_OUTPUT=1 RAW_OUTPUT=""; modem_status_single) )"
+          [[ -n "$item" ]] && json_items+=("$item")
         done
-      )"
-      if [[ -z "$json_items" ]]
+      fi
+      if (( ${#json_items[@]} == 0 ))
       then
-        printf '[]\n'
+        printf '[]
+'
       else
-        printf '%s\n' "$json_items" | jq -s '.'
+        printf '%s
+' "${json_items[@]}" | jq -s '.'
       fi
       return 0
     fi
+
+    local json_output
+    json_output="$(JSON_OUTPUT=1 RAW_OUTPUT="" modem_status_single)"
+    if [[ -n "$json_output" ]]
+    then
+      printf '%s
+' "$json_output"
+      return 0
+    fi
+  fi
 
     # Pretty output across all modems: add a MID column
     local _nocolor=""
@@ -1544,15 +1627,38 @@ sms_list_pretty() {
 
   if [[ -n "$RAW_OUTPUT" ]]
   then
-    # Collect raw mmcli JSON objects and wrap in an array
-    {
-      for id in "${ids[@]}"
-      do
-        [[ -z "$id" ]] && continue
-        mmcli_cmd --sms "$id" -J
-      done
-    } | jq -s '.'
-    return 0
+    if [[ -n "$ALL_MODEMS" && -z "$target_mid" ]]
+    then
+      local mids mid raw_items=()
+      if mapfile -t mids < <(list_modem_ids_sorted)
+      then
+        for mid in "${mids[@]}"
+        do
+          [[ -z "$mid" ]] && continue
+          local raw
+          raw="$( (local MODEM="$mid" ALL_MODEMS=""; modem_status_single -r) )"
+          [[ -n "$raw" ]] && raw_items+=("$raw")
+        done
+      fi
+      if (( ${#raw_items[@]} == 0 ))
+      then
+        printf '[]
+'
+      else
+        printf '%s
+' "${raw_items[@]}" | jq -s '.'
+      fi
+      return 0
+    fi
+
+    local raw_output
+    raw_output="$(JSON_OUTPUT="" RAW_OUTPUT=1 modem_status_single)"
+    if [[ -n "$raw_output" ]]
+    then
+      printf '%s
+' "$raw_output"
+      return 0
+    fi
   fi
 
   if [[ -n "$JSON_OUTPUT" ]]
@@ -2095,8 +2201,8 @@ get_smsc_number() {
   printf '%s' "$SMSC_NUMBER"
 }
 
-modem_status() {
-  local json state power reg signal carrier own smsc
+modem_status_single() {
+  local json state power reg signal carrier own smsc mid_label
 
   if ! json="$(mmcli_cmd -J)"
   then
@@ -2107,9 +2213,37 @@ modem_status() {
     return 1
   fi
 
+  mid_label="$(jq -r '.modem["dbus-path"] | split("/")[-1] // ""' <<<"$json" 2>/dev/null)"
+
   if [[ -n "$RAW_OUTPUT" ]]
   then
-    printf '%s\n' "$json" | jq
+    if [[ -n "$ALL_MODEMS" && -z "$1" ]]
+    then
+      local mids mid raw_items=()
+      if mapfile -t mids < <(list_modem_ids_sorted)
+      then
+        for mid in "${mids[@]}"
+        do
+          [[ -z "$mid" ]] && continue
+          local MODEM="$mid"
+          local raw
+          if raw="$(mmcli_cmd -J)"
+          then
+            raw_items+=("$raw")
+          fi
+        done
+      fi
+      if (( ${#raw_items[@]} == 0 ))
+      then
+        printf '[\n]'
+      else
+        printf '%s
+' "${raw_items[@]}" | jq -s '.'
+      fi
+    else
+      printf '%s
+' "$json" | jq
+    fi
     return 0
   fi
 
@@ -2163,6 +2297,7 @@ modem_status() {
     local sig_num_json
     sig_num_json="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
     jq -n \
+      --arg mid "$mid_label" \
       --arg state "$state" \
       --arg power "$power" \
       --arg registered "$reg" \
@@ -2170,7 +2305,7 @@ modem_status() {
       --arg phone "$own" \
       --arg smsc "$smsc" \
       --arg sig "$sig_num_json" \
-      '{state:$state, power:$power, registered:$registered, carrier:$carrier, phone:$phone, smsc:$smsc, signal: ($sig|tonumber?)}'
+      '{modem_id: ($mid|tonumber?), state:$state, power:$power, registered:$registered, carrier:$carrier, phone:$phone, smsc:$smsc, signal: ($sig|tonumber?)}'
     return 0
   fi
 
@@ -2249,6 +2384,61 @@ modem_status() {
   return 0
 }
 
+modem_status() {
+  local target_mid="${1:-}"
+
+  if [[ -z "$target_mid" && -n "$ALL_MODEMS" ]]
+  then
+    local mids mid
+    if ! mapfile -t mids < <(list_modem_ids_sorted)
+    then
+      error "failed to list modems"
+      return 1
+    fi
+    if (( ${#mids[@]} == 0 ))
+    then
+      if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+      then
+        printf '[]\n'
+      else
+        echo_info "no modems detected"
+      fi
+      return 0
+    fi
+
+    if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+    then
+      local json_items=() item
+      for mid in "${mids[@]}"
+      do
+        [[ -z "$mid" ]] && continue
+        item="$( (local MODEM="$mid" ALL_MODEMS=""; modem_status_single) )"
+        [[ -n "$item" ]] && json_items+=("$item")
+      done
+      if (( ${#json_items[@]} == 0 ))
+      then
+        printf '[]\n'
+      else
+        printf '%s\n' "${json_items[@]}" | jq -s '.'
+      fi
+      return 0
+    fi
+
+    local first=1
+    for mid in "${mids[@]}"
+    do
+      [[ -z "$mid" ]] && continue
+      (( first )) || printf '\n'
+      first=0
+      echo_info "modem $mid:"
+      (local MODEM="$mid" ALL_MODEMS=""; modem_status_single)
+    done
+    return 0
+  fi
+
+  modem_status_single
+}
+
 modem_number() {
   if ! load_own_number
   then
@@ -2313,7 +2503,7 @@ watch_handle_sms() {
       return
     fi
 
-    if [[ -z "$text" && $tries -lt $WATCH_MAX_RETRY ]]
+    if [[ -z "$text" && $tries -lt $SMS_RETRY_COUNT ]]
     then
       tries=$((tries + 1))
       sleep "$WATCH_RETRY_SLEEP"
@@ -2488,10 +2678,12 @@ watch_messages() {
 main() {
   local command
   local -a ARGS=()
+  local -a DEBUG_FLAGS=()
 
   # Global options can appear anywhere; collect non-option args into ARGS
   while (( $# > 0 ))
   do
+    local opt="$1"
     case "$1" in
       -m|--modem)
         if (( $# < 2 ))
@@ -2499,42 +2691,72 @@ main() {
           error "missing value for $1"
           return 2
         fi
+        DEBUG_FLAGS+=("${opt}=$2")
         MODEM="$2"
         shift 2
         ;;
       -d|--debug)
+        DEBUG_FLAGS+=("${opt}")
         DEBUG=1
         shift
         ;;
       -j|--json)
+        DEBUG_FLAGS+=("${opt}")
         JSON_OUTPUT=1
         shift
         ;;
       -r|--raw)
+        DEBUG_FLAGS+=("${opt}")
         RAW_OUTPUT=1
         shift
         ;;
       -H|--hard)
+        DEBUG_FLAGS+=("${opt}")
         HARD_RESET=1
         shift
         ;;
       -a|--all)
+        DEBUG_FLAGS+=("${opt}")
         ALL_MODEMS=1
         shift
         ;;
+      -A|--auto|--auto-recipient)
+        DEBUG_FLAGS+=("${opt}")
+        AUTO_RECIPIENT=1
+        shift
+        ;;
+      -R|--retry)
+        if (( $# < 2 ))
+        then
+          error "missing value for $1"
+          return 2
+        fi
+        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        then
+          error "--retry requires a non-negative integer"
+          return 2
+        fi
+        DEBUG_FLAGS+=("${opt}=$2")
+        SMS_RETRY_COUNT="$2"
+        shift 2
+        ;;
       -S|--sent)
+        DEBUG_FLAGS+=("${opt}")
         SENT_ONLY=1
         shift
         ;;
       -f|--allow-foreign)
+        DEBUG_FLAGS+=("${opt}")
         ALLOW_FOREIGN=1
         shift
         ;;
       -q|--quiet|--silent)
+        DEBUG_FLAGS+=("${opt}")
         QUIET=1
         shift
         ;;
       -x|--trace)
+        DEBUG_FLAGS+=("${opt}")
         PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
         set -x
         shift
@@ -2545,18 +2767,22 @@ main() {
           error "missing value for $1"
           return 2
         fi
+        DEBUG_FLAGS+=("${opt}=$2")
         CONFIG_FILE="$2"
         shift 2
         ;;
       -F|--fallback)
+        DEBUG_FLAGS+=("${opt}")
         FALLBACK=1
         shift
         ;;
       -s|--syslog)
+        DEBUG_FLAGS+=("${opt}")
         ECHO_SYSLOG=1
         shift
         ;;
       -h|--help)
+        DEBUG_FLAGS+=("${opt}")
         # If a subcommand is already captured in ARGS, defer help to subcommand usage
         if (( ${#ARGS[@]} > 0 )) && [[ "${ARGS[0]}" != -* ]]
         then
@@ -2680,21 +2906,48 @@ main() {
     do
       case "${ARGS[i]}" in
         -f|--allow-foreign)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           ALLOW_FOREIGN=1
           i=$((i+1))
           continue
           ;;
         -F|--fallback)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           FALLBACK=1
           i=$((i+1))
           continue
           ;;
+        -A|--auto|--auto-recipient)
+          DEBUG_FLAGS+=("${ARGS[i]}")
+          AUTO_RECIPIENT=1
+          i=$((i+1))
+          continue
+          ;;
+        -R|--retry)
+          if (( i + 1 >= ${#ARGS[@]} ))
+          then
+            error "missing value for ${ARGS[i]}"
+            return 2
+          fi
+          local _retry=${ARGS[i+1]}
+          if [[ ! "$_retry" =~ ^[0-9]+$ ]]
+          then
+            error "--retry requires a non-negative integer"
+            return 2
+          fi
+          DEBUG_FLAGS+=("${ARGS[i]}=${_retry}")
+          SMS_RETRY_COUNT="$_retry"
+          i=$((i+2))
+          continue
+          ;;
         -a|--all)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           ALL_MODEMS=1
           i=$((i+1))
           continue
           ;;
         -S|--sent)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           SENT_ONLY=1
           i=$((i+1))
           continue
@@ -2702,17 +2955,20 @@ main() {
         -c|--config)
           if (( i + 1 < ${#ARGS[@]} ))
           then
+            DEBUG_FLAGS+=("${ARGS[i]}=${ARGS[i+1]}")
             CONFIG_FILE="${ARGS[i+1]}"
             i=$((i+2))
             continue
           fi
           ;;
         -s|--syslog)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           ECHO_SYSLOG=1
           i=$((i+1))
           continue
           ;;
         --)
+          DEBUG_FLAGS+=("${ARGS[i]}")
           # Copy the rest verbatim
           while (( i < ${#ARGS[@]} ))
           do
@@ -2815,14 +3071,20 @@ main() {
     fi
   fi
 
+  local dbg_args="" dbg_flags=""
+  if (( ${#DEBUG_FLAGS[@]} > 0 ))
+  then
+    local dbg_flags_str
+    printf -v dbg_flags_str '%q ' "${DEBUG_FLAGS[@]}"
+    dbg_flags=" flags=${dbg_flags_str%% }"
+  fi
   if (( ${#ARGS[@]} > 0 ))
   then
-    local dbg_args
-    printf -v dbg_args '%q ' "${ARGS[@]}"
-    echo_debug "command=$command args=${dbg_args%% }"
-  else
-    echo_debug "command=$command"
+    local dbg_args_str
+    printf -v dbg_args_str '%q ' "${ARGS[@]}"
+    dbg_args=" args=${dbg_args_str%% }"
   fi
+  echo_debug "command=$command${dbg_flags}${dbg_args}"
 
   case "$command" in
     send)
