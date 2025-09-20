@@ -640,11 +640,11 @@ configure_huawei_modem() {
   echo_info "huawei: configuring modem for SMS text mode"
   local resp
   resp="$(at_command 'AT')"
-  echo_info "huawei: AT (baseline connectivity check) -> ${resp:-<no response>}"
+  echo_info "huawei: AT (baseline connectivity check) -> $(format_at_response "$resp")"
   resp="$(at_command 'AT+CMEE=2')"
-  echo_info "huawei: AT+CMEE=2 (enable verbose error codes) -> ${resp:-<no response>}"
+  echo_info "huawei: AT+CMEE=2 (enable verbose error codes) -> $(format_at_response "$resp")"
   resp="$(at_command 'AT+CMGF?')"
-  echo_info "huawei: AT+CMGF? (query SMS message format) -> ${resp:-<no response>}"
+  echo_info "huawei: AT+CMGF? (query SMS message format) -> $(format_at_response "$resp")"
 }
 
 configure_modem_vendor() {
@@ -764,6 +764,17 @@ at_command() {
 
   printf '%s' "$out"
   return $rc
+}
+
+format_at_response() {
+  local resp="$1"
+  if [[ -z "$resp" ]]
+  then
+    printf '%s' '<no response>'
+    return 0
+  fi
+  resp="${resp//$'\n'/'; '}"
+  printf '%s' "$resp"
 }
 
 # Decode a UCS2 hex string like "002B0033..." by taking the low byte of each code unit
@@ -2161,7 +2172,9 @@ watch_in_whitelist() {
   num="$(watch_canon_number "${1:-}")"
   if [[ -z "$num" ]]
   then
-    echo_warning "watch: sender '${original}' not whitelisted (empty canonical number); whitelist=${SMS_WHITELIST[*]}"
+    local whitelist_logged
+    printf -v whitelist_logged "'%s'" "${SMS_WHITELIST[@]}"
+    echo_warning "watch: sender '${original}' not whitelisted (empty canonical number); whitelist=${whitelist_logged}"
     return 1
   fi
   local allowed canon_allowed
@@ -2170,11 +2183,13 @@ watch_in_whitelist() {
     canon_allowed="$(watch_canon_number "$allowed")"
     if [[ -n "$canon_allowed" && "$num" == "$canon_allowed" ]]
     then
-      echo_info "watch: sender '${original}' matched whitelist entry '${allowed}'; whitelist=${SMS_WHITELIST[*]}"
+echo_info "watch: sender '${original}' matched whitelist entry '${allowed}' (whitelist='${SMS_WHITELIST[*]}')"
       return 0
     fi
   done
-  echo_warning "watch: sender '${original}' not in whitelist; whitelist=${SMS_WHITELIST[*]}"
+  local whitelist_logged
+  printf -v whitelist_logged "'%s'" "${SMS_WHITELIST[@]}"
+  echo_warning "watch: sender '${original}' not in whitelist; whitelist=${whitelist_logged}"
   return 1
 }
 
@@ -2623,12 +2638,18 @@ watch_handle_sms() {
     fi
     local sender_cc
     sender_cc="$(phone_cc_label "$sender")"
-    echo_info "received id=$id from $sender (cc=$sender_cc) to $log_recipient text='$log_text'"
+    echo_info "received message={id='$id' sender='$sender' (cc='$sender_cc') recipient='$log_recipient' text='$log_text'}"
+
+    local sender_whitelisted=0
+    if watch_in_whitelist "$sender"
+    then
+      sender_whitelisted=1
+    fi
 
     local handled=0
     if [[ "$text" == "!"* ]]
     then
-      if watch_in_whitelist "$sender"
+      if (( sender_whitelisted ))
       then
         local cmd="${text#!}"
         while [[ "$cmd" == " "* ]]
