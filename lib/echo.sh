@@ -6,6 +6,7 @@ DEBUG="${DEBUG:-}"
 NO_COLOR="${NO_COLOR:-}"
 NO_WARNING="${NO_WARNING:-}"
 VERBOSE="${VERBOSE:-}"
+ECHO_SYSLOG="${ECHO_SYSLOG:-}"
 QUIET="${QUIET:-}"
 
 echo_fancy() {
@@ -13,13 +14,26 @@ echo_fancy() {
   local color="$2"
   shift 2
 
+  local line
+  line="$prefix $*"
+
   if [[ -n "$NO_COLOR" || -n "$CRON" ]]
   then
-    echo "$prefix $*" >&2
-    return 0
+    echo "$line" >&2
+  else
+    echo -e "${color}${prefix}\e[0m $*" >&2
   fi
 
-  echo -e "${color}${prefix}\e[0m $*" >&2
+  # Guard-clause: mirror to syslog only when enabled and logger exists
+  if [[ -z "$ECHO_SYSLOG" ]]
+  then
+    return 0
+  fi
+  if ! command -v logger >/dev/null 2>&1
+  then
+    return 0
+  fi
+  logger -t mmsms "$line"
 }
 
 echo_info() {

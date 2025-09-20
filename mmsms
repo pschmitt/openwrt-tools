@@ -70,6 +70,7 @@ Options:
       --raw            List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -q, --quiet          Suppress info output (warnings/errors only)
       --silent         Same as --quiet
+      --syslog         Mirror logs to syslog (in addition to stderr)
   -x, --trace          Enable shell tracing (set -x)
       --hard           Reset: also stop/start modemmanager (hard reset)
       --all            List/Prune/Enable/Reset: operate on all modems
@@ -954,24 +955,7 @@ sms_send() {
     send_attempt=$((send_attempt + 1))
   done
 
-  if (( rc != 0 )) && [[ -n "${SEND_CONTEXT:-}" ]]
-  then
-    local fail_info
-    fail_info="$(modem_info_brief)"
-    local fail_text
-    fail_text="$text"
-    fail_text=${fail_text//$'\r'/}
-    fail_text=${fail_text//$'\n'/\\n}
-    fail_text=${fail_text//\\/\\\\}
-    if [[ -z "$fail_text" ]]
-    then
-      fail_text="<empty>"
-    elif (( ${#fail_text} > 200 ))
-    then
-      fail_text="${fail_text:0:200}..."
-    fi
-    log_sys "send failed modem=$fail_info to $recipient text='$fail_text'"
-  fi
+  # direct send failure logs use echo_warning at call site; SYSLOG_MIRROR handles mirroring
 
   rm -f "$tmpfile" 2>/dev/null || true
   return $rc
@@ -1012,22 +996,6 @@ sms_send_with_fallback() {
 
   if [[ -z "$FALLBACK" ]]
   then
-    if [[ -n "${SEND_CONTEXT:-}" ]]
-    then
-      local fail_text
-      fail_text="$text"
-      fail_text=${fail_text//$'\r'/}
-      fail_text=${fail_text//$'\n'/\\n}
-      fail_text=${fail_text//\\/\\\\}
-      if [[ -z "$fail_text" ]]
-      then
-        fail_text="<empty>"
-      elif (( ${#fail_text} > 200 ))
-      then
-        fail_text="${fail_text:0:200}..."
-      fi
-      log_sys "send failed (no fallback) modem=$(modem_info_brief) to $recipient text='$fail_text'"
-    fi
     return 1
   fi
 
@@ -1078,22 +1046,6 @@ sms_send_with_fallback() {
   done
 
   echo_warning "fallback: no eligible modem could send the message"
-  if [[ -n "${SEND_CONTEXT:-}" ]]
-  then
-    local fail_text
-    fail_text="$text"
-    fail_text=${fail_text//$'\r'/}
-    fail_text=${fail_text//$'\n'/\\n}
-    fail_text=${fail_text//\\/\\\\}
-    if [[ -z "$fail_text" ]]
-    then
-      fail_text="<empty>"
-    elif (( ${#fail_text} > 200 ))
-    then
-      fail_text="${fail_text:0:200}..."
-    fi
-    log_sys "send failed (fallback) modem=$(modem_info_brief) to $recipient text='$fail_text'"
-  fi
   return 1
 }
 
@@ -2479,6 +2431,10 @@ main() {
         FALLBACK=1
         shift
         ;;
+      --syslog)
+        ECHO_SYSLOG=1
+        shift
+        ;;
       -h|--help)
         # If a subcommand is already captured in ARGS, defer help to subcommand usage
         if (( ${#ARGS[@]} > 0 )) && [[ "${ARGS[0]}" != -* ]]
@@ -2625,6 +2581,11 @@ main() {
             i=$((i+2))
             continue
           fi
+          ;;
+        --syslog)
+          ECHO_SYSLOG=1
+          i=$((i+1))
+          continue
           ;;
         --)
           # Copy the rest verbatim
@@ -2793,8 +2754,6 @@ main() {
 
   case "$command" in
     send)
-      # Mark context so functions can log direct-send failures to syslog
-      local SEND_CONTEXT="direct"
       if [[ -f "$CONFIG_FILE" ]]
       then
         # shellcheck disable=SC1090
@@ -2809,6 +2768,7 @@ main() {
       else
         if ! sms_send "${ARGS[@]}"
         then
+          echo_warning "send failed; fallback disabled, not trying other modems"
           return 1
         fi
       fi
