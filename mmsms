@@ -829,6 +829,9 @@ sms_send() {
     return 2
   fi
 
+  # Expand common escapes and strip trailing whitespace to avoid stray spaces
+  text="$(printf '%b' "$text" | sed -e 's/[[:space:]]\+$//')"
+
   # Log outgoing SMS (preview) to stderr and syslog
   printf 'text=%q\n' "$text" >&2
   local log_text
@@ -848,8 +851,7 @@ sms_send() {
   echo_info "sending sms modem=$log_modem to $recipient text='$log_text'"
   log_sys "sending sms modem=$log_modem to $recipient text='$log_text'"
 
-  # Expand common escapes and strip trailing whitespace to avoid stray spaces
-  text="$(echo -e "$text" | sed -e 's/[[:space:]]\+$//')"
+  # text already expanded and trimmed above
 
   local tmpfile
   if ! tmpfile="$(mktemp "${TMPDIR:-/tmp}/mmsms-text.XXXXXX")"
