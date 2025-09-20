@@ -77,7 +77,7 @@ Options:
       --silent         Same as --quiet
   -x, --trace          Enable shell tracing (set -x)
       --hard           Reset: also stop/start modemmanager (hard reset)
-      --all            List/Prune: include messages from all modems or prune on all
+      --all            List/Prune/Enable/Reset: operate on all modems
       --sent           Prune: delete only sent outgoing messages
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
@@ -1075,6 +1075,30 @@ enable_modem() {
   return 1
 }
 
+enable_all_modems() {
+  local list_json mids mid
+  if ! list_json="$(mmcli -L -J)"
+  then
+    error "failed to list modems to enable"
+    return 1
+  fi
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#mids[@]} == 0 ))
+  then
+    echo_info "no modems detected"
+    return 0
+  fi
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    echo_info "enabling modem $mid"
+    if ! enable_modem "$mid"
+    then
+      echo_warning "failed to enable modem $mid"
+    fi
+  done
+}
+
 modem_reset() {
   local service="/etc/init.d/modemmanager"
   local has_service=""
@@ -1166,6 +1190,30 @@ modem_reset() {
   fi
 
   return 0
+}
+
+modem_reset_all() {
+  local list_json mids mid
+  if ! list_json="$(mmcli -L -J)"
+  then
+    error "failed to list modems to reset"
+    return 1
+  fi
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  if (( ${#mids[@]} == 0 ))
+  then
+    echo_info "no modems detected"
+    return 0
+  fi
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    echo_info "resetting modem $mid"
+    (
+      local MODEM="$mid"
+      modem_reset || error "failed to reset modem $mid"
+    )
+  done
 }
 
 watch_log() {
@@ -1699,7 +1747,12 @@ watch_messages() {
     watch_warn "failed to prune existing SMS messages on all modems"
   fi
 
-  enable_modem "$MODEM" || watch_warn "failed to enable modem"
+  if [[ -n "$LIST_ALL" ]]
+  then
+    enable_all_modems || watch_warn "failed to enable all modems"
+  else
+    enable_modem "$MODEM" || watch_warn "failed to enable modem"
+  fi
 
   local current_modem_id=""
   while IFS= read -r line
@@ -1719,6 +1772,12 @@ watch_messages() {
       local id="${local_path##*/}"
       if [[ "$id" =~ ^[0-9]+$ ]]
       then
+        # If not listening on all, ignore messages from other modems
+        if [[ -z "$LIST_ALL" && -n "$current_modem_id" && "$current_modem_id" != "$MODEM" ]]
+        then
+          watch_warn "ignoring SMS $id from modem $current_modem_id (listening on $MODEM)"
+          continue
+        fi
         watch_handle_sms "$id" "$current_modem_id"
       fi
     fi
@@ -1966,7 +2025,12 @@ main() {
       fi
       ;;
     enable)
-      enable_modem "$MODEM"
+      if [[ -n "$LIST_ALL" ]]
+      then
+        enable_all_modems
+      else
+        enable_modem "$MODEM"
+      fi
       ;;
     status)
       modem_status
@@ -1975,7 +2039,12 @@ main() {
       modem_number
       ;;
     reset)
-      modem_reset
+      if [[ -n "$LIST_ALL" ]]
+      then
+        modem_reset_all
+      else
+        modem_reset
+      fi
       ;;
     watch)
       watch_messages
