@@ -96,6 +96,119 @@ Commands:
 USAGE
 }
 
+# Subcommand-specific usage helpers (concise, focused on per-command flags)
+usage_send() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
+
+Sends an SMS. If RECIPIENT is omitted, uses DEFAULT_RECIPIENT_XX/CC/DEFAULT.
+
+Relevant flags:
+  --fallback        Try other modems on failure (sorted by id)
+  --allow-foreign   Allow sending outside the modem's home country code
+  --config PATH     Load config for defaults (only needed outside 'watch')
+USAGE
+}
+
+usage_list() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [--json|--raw] [--all]
+
+Lists SMS messages. Pretty by default; --json prints structured JSON; --raw prints raw mmcli JSON.
+
+Relevant flags:
+  --json   Output custom JSON array
+  --raw    Output raw mmcli objects array
+  --all    Include messages from all modems
+USAGE
+}
+
+usage_read() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] read MESSAGE_ID [--json|--raw]
+
+Reads a single SMS. --json outputs compact structured JSON; --raw outputs mmcli JSON.
+USAGE
+}
+
+usage_prune() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [--sent] [--all]
+
+Deletes messages. By default deletes all on the selected modem.
+
+Relevant flags:
+  --sent   Delete only sent (outgoing, state=sent) messages
+  --all    Operate on all modems
+USAGE
+}
+
+usage_enable() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [--all]
+
+Enables the selected modem and waits for readiness.
+
+Relevant flags:
+  --all    Enable all detected modems
+USAGE
+}
+
+usage_status() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [--json]
+
+Shows modem status. --json outputs structured JSON.
+USAGE
+}
+
+usage_reset() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [--hard] [--all]
+
+Resets the selected modem. For Quectel devices, issues quectel reset.
+
+Relevant flags:
+  --hard   Stop/start ModemManager around reset
+  --all    Reset all detected modems
+USAGE
+}
+
+usage_watch() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [--config PATH] [--all]
+
+Watches incoming SMS and executes reply/webhook logic.
+
+Relevant flags:
+  --config PATH   Config file with defaults and whitelist
+  --all           Process messages from all modems (default: selected modem only)
+USAGE
+}
+
+usage_number() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] number|phone
+
+Prints the modem's own number (MSISDN) if reported.
+USAGE
+}
+
+print_subcommand_usage() {
+  case "$1" in
+    send)   usage_send ;;
+    list)   usage_list ;;
+    read)   usage_read ;;
+    prune)  usage_prune ;;
+    enable) usage_enable ;;
+    status) usage_status ;;
+    reset)  usage_reset ;;
+    watch)  usage_watch ;;
+    number) usage_number ;;
+    *) usage ;;
+  esac
+}
+
 error() {
   echo_error "$SCRIPT_NAME: $*"
 }
@@ -194,7 +307,7 @@ get_home_cc() {
 
 # Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
 modem_info_brief() {
-  local j info id manufacturer model plugin primary own cc=""
+  local j info id manufacturer model plugin primary own ports cc=""
   if j="$(mmcli_cmd -J 2>/dev/null || true)"
   then
     id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j" 2>/dev/null)"
@@ -202,6 +315,7 @@ modem_info_brief() {
     model="$(jq -r '.modem.generic.model // "--"' <<<"$j" 2>/dev/null)"
     plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j" 2>/dev/null)"
     primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j" 2>/dev/null)"
+    ports="$(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | join(",")' <<<"$j" 2>/dev/null)"
     own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
     if [[ "$own" == +* ]]
     then
@@ -216,6 +330,14 @@ modem_info_brief() {
     if [[ -n "$id" ]]
     then
       info="id=$id manufacturer=$manufacturer model=$model plugin=$plugin primary=$primary"
+      if [[ -n "$ports" ]]
+      then
+        info+=" ports=$ports"
+      fi
+      if [[ -n "$own" ]]
+      then
+        info+=" phone=$own"
+      fi
       if [[ -n "$cc" ]]
       then
         info+=" cc=$(cc_to_label "$cc")"
@@ -650,6 +772,11 @@ sms_send() {
 
   if (( $# == 0 ))
   then
+    if [[ -t 0 ]]
+    then
+      error "no SMS text provided"
+      return 2
+    fi
     text="$(cat)"
   elif [[ "$1" == "-" ]]
   then
@@ -878,19 +1005,29 @@ sms_send_with_fallback() {
     [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
     if ! recipient_allowed_for_modem "$recipient" "$mid"
     then
+      (
+        local MODEM="$mid"
+        local info
+        info="$(modem_info_brief)"
+        echo_warning "fallback: cannot use modem=$info for recipient $recipient (foreign not allowed; use --allow-foreign)"
+      )
       continue
     fi
     (
       local MODEM="$mid"
+      echo_debug "fallback: trying modem $mid"
       if sms_send "$recipient" "$text"
       then
-        echo_info "fallback send succeeded on modem $mid"
+        local info
+        info="$(modem_info_brief)"
+        echo_info "fallback send succeeded modem=$info"
         exit 0
       fi
       exit 1
     ) && return 0
   done
 
+  echo_warning "fallback: no eligible modem could send the message"
   return 1
 }
 
@@ -2264,8 +2401,15 @@ main() {
         shift
         ;;
       -h|--help)
-        usage
-        return 0
+        # If a subcommand is already captured in ARGS, defer help to subcommand usage
+        if (( ${#ARGS[@]} > 0 )) && [[ "${ARGS[0]}" != -* ]]
+        then
+          ARGS+=("$1")
+          shift
+        else
+          usage
+          return 0
+        fi
         ;;
       --)
         shift
@@ -2287,8 +2431,31 @@ main() {
   then
     command="status"
   else
-    command="${ARGS[0]}"
-    ARGS=("${ARGS[@]:1}")
+  command="${ARGS[0]}"
+  ARGS=("${ARGS[@]:1}")
+
+  # Support a 'help' command and per-subcommand --help/-h after command
+  if [[ "$command" == "help" ]]
+  then
+    local topic="${ARGS[0]:-}"
+    if [[ -z "$topic" ]]
+    then
+      usage
+    else
+      case "$topic" in
+        s|send) topic="send" ;;
+        l|ls|list) topic="list" ;;
+        r|get|read) topic="read" ;;
+        en|enable|start) topic="enable" ;;
+        st|stat|status) topic="status" ;;
+        rst|reset|restart) topic="reset" ;;
+        w|watch) topic="watch" ;;
+        number|phone) topic="number" ;;
+      esac
+      print_subcommand_usage "$topic"
+    fi
+    return 0
+  fi
   fi
 
   case "$command" in
@@ -2320,6 +2487,28 @@ main() {
       command="watch"
       ;;
   esac
+
+  # Per-subcommand --help/-h anywhere in ARGS
+  for _arg in "${ARGS[@]}"
+  do
+    if [[ "$_arg" == "--help" || "$_arg" == "-h" ]]
+    then
+      print_subcommand_usage "$command"
+      return 0
+    fi
+  done
+  # Per-subcommand --help/-h before any modem resolution/logging
+  if [[ "$command" != "help" ]]
+  then
+    for _arg in "${ARGS[@]}"
+    do
+      if [[ "$_arg" == "--help" || "$_arg" == "-h" ]]
+      then
+        print_subcommand_usage "$command"
+        return 0
+      fi
+    done
+  fi
 
   if [[ "$command" == -* ]]
   then
