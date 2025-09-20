@@ -291,7 +291,7 @@ get_home_cc() {
     if [[ -f "${TMPDIR:-/tmp}/.mmsms-own.$$" ]]
     then
       own="$(cat "${TMPDIR:-/tmp}/.mmsms-own.$$")"
-      rm -f "${TMPDIR:-/tmp}/.mmsms-own.$$" 2>/dev/null || true
+      rm -f "${TMPDIR:-/tmp}/.mmsms-own.$$"
     fi
   else
     if load_own_number
@@ -312,7 +312,7 @@ get_home_cc() {
     fi
     if [[ -n "$j" ]]
     then
-      own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+      own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j")"
     fi
   fi
 
@@ -336,13 +336,13 @@ modem_info_brief() {
   local j info id manufacturer model plugin primary own ports cc=""
   if j="$(mmcli_cmd -J)"
   then
-    id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j" 2>/dev/null)"
-    manufacturer="$(jq -r '.modem.generic.manufacturer // "--"' <<<"$j" 2>/dev/null)"
-    model="$(jq -r '.modem.generic.model // "--"' <<<"$j" 2>/dev/null)"
-    plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j" 2>/dev/null)"
-    primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j" 2>/dev/null)"
-    ports="$(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | join(",")' <<<"$j" 2>/dev/null)"
-    own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+    id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j")"
+    manufacturer="$(jq -r '.modem.generic.manufacturer // "--"' <<<"$j")"
+    model="$(jq -r '.modem.generic.model // "--"' <<<"$j")"
+    plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j")"
+    primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j")"
+    ports="$(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | join(",")' <<<"$j")"
+    own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j")"
     own="$(ensure_plus "$own")"
     [[ -n "$ports" ]] || ports="--"
     [[ -n "$own" ]] || own="--"
@@ -462,7 +462,7 @@ list_modem_ids_sorted() {
   then
     return 1
   fi
-  jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n
+  jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" | sort -n
 }
 
 log_modem_details() {
@@ -470,7 +470,7 @@ log_modem_details() {
   [[ -z "$mid" ]] && return 1
 
   local mjson fields id manufacturer model plugin primary ports phone info
-  if mjson="$(mmcli -m "$mid" -J 2>/dev/null)"
+  if mjson="$(mmcli -m "$mid" -J)"
   then
     fields="$(jq -r '
       .modem as $m
@@ -484,7 +484,7 @@ log_modem_details() {
           ($m.generic["own-numbers"][0] // "")
         ]
       | @tsv
-    ' <<<"$mjson" 2>/dev/null)"
+    ' <<<"$mjson")"
 
     if [[ -z "$fields" ]]
     then
@@ -512,7 +512,7 @@ get_modem_at_port() {
   local json port
 
   echo_debug "AT fallback resolving modem port"
-  if ! json="$(mmcli -m "$MODEM" -J 2>/dev/null)"
+  if ! json="$(mmcli -m "$MODEM" -J)"
   then
     echo_debug "get_modem_at_port: failed to query modem JSON"
     return 1
@@ -523,7 +523,7 @@ get_modem_at_port() {
       | map(select(test("\\(at\\)$")) | (split(" ")[0]))
       | .[0])
     // (.modem.generic["primary-port"] // empty)
-  ' <<<"$json" 2>/dev/null)"
+  ' <<<"$json")"
 
   if [[ -z "$port" ]]
   then
@@ -604,12 +604,36 @@ at_command_direct() {
   resp="${resp%$'\n'}"
   if [[ -n "$resp" ]]
   then
-    echo_debug "AT fallback raw response: $resp"
     printf '%s' "$resp"
     return 0
   fi
 
   return 1
+}
+
+configure_huawei_modem() {
+  echo_info "huawei: configuring modem for SMS text mode"
+  local resp
+  resp="$(at_command 'AT')"
+  echo_info "huawei: AT -> ${resp:-<no response>}"
+  resp="$(at_command 'AT+CMEE=2')"
+  echo_info "huawei: AT+CMEE=2 -> ${resp:-<no response>}"
+  resp="$(at_command 'AT+CMGF?')"
+  echo_info "huawei: AT+CMGF? -> ${resp:-<no response>}"
+}
+
+configure_modem_vendor() {
+  local info_json="$1"
+  local plugin manufacturer
+  plugin="$(jq -r '.modem.generic.plugin // ""' <<<"$info_json")"
+  manufacturer="$(jq -r '.modem.generic.manufacturer // ""' <<<"$info_json")"
+  local lower_plugin="${plugin,,}"
+  local lower_manufacturer="${manufacturer,,}"
+
+  if [[ "$lower_plugin" == huawei || "$lower_manufacturer" == huawei* ]]
+  then
+    configure_huawei_modem
+  fi
 }
 
 # Resolve default recipient based on modem/country-specific variables.
@@ -620,7 +644,7 @@ at_command_direct() {
 resolve_default_recipient() {
   local mid="${1:-}"
   local cc label var val
-  cc="$(get_home_cc "$mid" 2>/dev/null)"
+  cc="$(get_home_cc "$mid")"
   echo_debug "resolve_default_recipient: mid=${mid:-} cc=${cc:-}"
 
   # Guard: unknown CC → fall back to global default or fail
@@ -792,7 +816,7 @@ get_modem_id() {
   fi
 
   # Collect modem ids
-  mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json")
   if (( ${#ids[@]} == 0 ))
   then
     error "no modems detected"
@@ -816,7 +840,7 @@ get_modem_id() {
 
   local matches=()
   local cc_filter=""
-  cc_filter="$(country_to_cc "$sel_raw" 2>/dev/null || true)"
+  cc_filter="$(country_to_cc "$sel_raw")"
   for id in "${ids[@]}"
   do
     [[ -z "$id" ]] && continue
@@ -835,8 +859,8 @@ get_modem_id() {
           ($g["primary-port"] // ""),
           (($g.ports // [])[]? | (split(" ")[0]))
         ] | .[]
-    ' <<<"$json" 2>/dev/null)"
-    numbers="$(jq -r '.modem.generic["own-numbers"][]? // empty' <<<"$json" 2>/dev/null)"
+    ' <<<"$json")"
+    numbers="$(jq -r '.modem.generic["own-numbers"][]? // empty' <<<"$json")"
     sel_digits="${sel_raw//[^0-9+]/}"
 
     local matched=0
@@ -879,7 +903,7 @@ get_modem_id() {
           then
             matched=1; break
           fi
-          if printf '%s\n' "$n" | grep -Eq -- "$sel_raw" 2>/dev/null
+          if printf '%s\n' "$n" | grep -Eq -- "$sel_raw"
           then
             matched=1; break
           fi
@@ -955,7 +979,7 @@ sms_read_json() {
     return 1
   fi
 
-  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
   msg_type="$(pdu_to_type "$pdu")"
 
   if load_own_number
@@ -981,7 +1005,7 @@ sms_read_json() {
         type: $type,
         recipient: (if $type == "received" then $own else ($s.content.number // "") end)
       }
-  ' <<<"$js" 2>/dev/null
+  ' <<<"$js"
 }
 
 sms_send() {
@@ -1088,7 +1112,7 @@ sms_send() {
 
   if ! printf '%s' "$text" >"$tmpfile"
   then
-    rm -f "$tmpfile" 2>/dev/null || true
+    rm -f "$tmpfile"
     error "failed to write SMS text to temporary file"
     return 1
   fi
@@ -1132,7 +1156,7 @@ sms_send() {
       if (( create_attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        rm -f "$tmpfile" 2>/dev/null || true
+        rm -f "$tmpfile"
         return 1
       fi
       echo_warning "failed to create SMS (attempt $create_attempt/$max_attempts), retrying"
@@ -1140,7 +1164,7 @@ sms_send() {
       continue
     fi
 
-    if ! sms_id="$(jq -r '.modem.messaging["created-sms"] // empty' <<<"$create_json" 2>/dev/null)"
+    if ! sms_id="$(jq -r '.modem.messaging["created-sms"] // empty' <<<"$create_json")"
     then
       sms_id=""
     fi
@@ -1150,7 +1174,7 @@ sms_send() {
       if (( create_attempt == max_attempts ))
       then
         error "failed to create SMS after $max_attempts attempts"
-        rm -f "$tmpfile" 2>/dev/null || true
+        rm -f "$tmpfile"
         return 1
       fi
       echo_warning "received empty SMS id (attempt $create_attempt/$max_attempts), retrying"
@@ -1184,7 +1208,7 @@ sms_send() {
 
   # direct send failure logs use echo_warning at call site; SYSLOG_MIRROR handles mirroring
 
-  rm -f "$tmpfile" 2>/dev/null || true
+  rm -f "$tmpfile"
   return $rc
 }
 
@@ -1198,7 +1222,7 @@ recipient_allowed_for_modem() {
     return 0
   fi
   local hcc
-  hcc="$(get_home_cc "$mid" 2>/dev/null || true)"
+  hcc="$(get_home_cc "$mid")"
   if [[ -z "$hcc" ]]
   then
     return 0
@@ -1272,7 +1296,7 @@ sms_send_with_fallback() {
     local _j
     if _j="$(mmcli_cmd -J)"
     then
-      cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j" 2>/dev/null)"
+      cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
     fi
   fi
   if ! mapfile -t mids < <(list_modem_ids_sorted)
@@ -1294,7 +1318,7 @@ sms_send_with_fallback() {
       then
         auto_tried=1
         local auto_recipient
-        if auto_recipient="$(resolve_default_recipient "$mid" 2>/dev/null)"
+        if auto_recipient="$(resolve_default_recipient "$mid")"
         then
           auto_recipient="${auto_recipient//[[:space:]]/}"
           auto_recipient="$(ensure_plus "$auto_recipient")"
@@ -1351,7 +1375,7 @@ sms_send_with_fallback() {
 sms_prune_all() {
   local ids
   mapfile -t ids < <(mmcli_cmd --messaging-list-sms -J | \
-    jq -r '."modem.messaging.sms"[]? | split("/")[-1]' 2>/dev/null | sort -n)
+    jq -r '."modem.messaging.sms"[]? | split("/")[-1]' | sort -n)
 
   local total=${#ids[@]}
   if (( total == 0 ))
@@ -1379,7 +1403,7 @@ sms_prune_sent() {
   then
     return 0
   fi
-  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list" 2>/dev/null | sort -n)
+  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list" | sort -n)
   if (( ${#ids[@]} == 0 ))
   then
     return 0
@@ -1388,8 +1412,8 @@ sms_prune_sent() {
   for id in "${ids[@]}"; do
     [[ -z "$id" ]] && continue
     if ! js="$(mmcli_cmd --sms "$id" -J)"; then continue; fi
-    state="$(jq -r '.sms.properties.state // empty' <<<"$js" 2>/dev/null)"
-    pdu="$(jq -r '.sms.properties["pdu-type"] // empty' <<<"$js" 2>/dev/null)"
+    state="$(jq -r '.sms.properties.state // empty' <<<"$js")"
+    pdu="$(jq -r '.sms.properties["pdu-type"] // empty' <<<"$js")"
     if [[ "$state" == "sent" && "$pdu" == "submit" ]]
     then
       sent_ids+=("$id")
@@ -1484,11 +1508,11 @@ sms_list_print_entry() {
   local maxlen="${5:-80}"
   local sender text msg_type pdu
 
-  sender="$(jq -r '.sms.content.number // "--"' <<<"$js" 2>/dev/null)"
+  sender="$(jq -r '.sms.content.number // "--"' <<<"$js")"
   sender="$(ensure_plus "$sender")"
-  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
   msg_type="$(pdu_to_type "$pdu")"
-  text="$(jq -r '.sms.content.text // ""' <<<"$js" 2>/dev/null)"
+  text="$(jq -r '.sms.content.text // ""' <<<"$js")"
   text=${text//$'\r'/}
   text=${text//$'\n'/\\n}
   if (( ${#text} > maxlen ))
@@ -1549,14 +1573,14 @@ sms_list_pretty() {
           then
             continue
           fi
-          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
           for id in "${ids[@]}"
           do
             [[ -z "$id" ]] && continue
             js="$(mmcli --modem "$mid" --sms "$id" -J)"
             if [[ -n "$js" ]]
             then
-            jq -e -c --arg mid "$mid" '{modem_id: ($mid|tonumber), sms: .}' <<<"$js" 2>/dev/null
+            jq -e -c --arg mid "$mid" '{modem_id: ($mid|tonumber), sms: .}' <<<"$js"
             fi
           done
         done
@@ -1621,7 +1645,7 @@ sms_list_pretty() {
       then
         continue
       fi
-      mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+      mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
       for id in "${ids[@]}"
       do
         [[ -z "$id" ]] && continue
@@ -1643,7 +1667,7 @@ sms_list_pretty() {
     return 1
   fi
 
-  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null)
+  mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
   if (( ${#ids[@]} == 0 ))
   then
     if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
@@ -1666,7 +1690,7 @@ sms_list_pretty() {
         do
           [[ -z "$mid" ]] && continue
           local raw
-          raw="$( (local MODEM="$mid" ALL_MODEMS=""; modem_status_single -r) )"
+        raw="$( (local MODEM="$mid" ALL_MODEMS=""; JSON_OUTPUT="" RAW_OUTPUT=1; modem_status_single) )"
           [[ -n "$raw" ]] && raw_items+=("$raw")
         done
       fi
@@ -1708,7 +1732,7 @@ sms_list_pretty() {
         then
           continue
         fi
-        pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js" 2>/dev/null)"
+        pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
         msg_type="$(pdu_to_type "$pdu")"
         jq -c --arg id "$id" --arg type "$msg_type" --arg own "$own" '
           {
@@ -1722,7 +1746,7 @@ sms_list_pretty() {
             type: $type,
             recipient: (if $type == "received" then $own else (.sms.content.number // "") end)
           }
-        ' <<<"$js" 2>/dev/null
+        ' <<<"$js"
       done
     } | jq -s '.'
     return 0
@@ -1799,13 +1823,13 @@ enable_modem() {
           (."modem-list" // [])
           | map(split("/")[-1])
           | any(. == $id)
-        ' <<<"$list_json" 2>/dev/null || printf 'false')"
+        ' <<<"$list_json" || printf 'false')"
         if [[ "$present" == "true" ]]
         then
           break
         fi
       else
-        modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" 2>/dev/null || printf '0')"
+        modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" || printf '0')"
         if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
         then
           break
@@ -1876,11 +1900,12 @@ enable_modem() {
                          elif .phone|startswith("+33") then "FR"
                          elif .phone|startswith("+49") then "DE"
                          else "--" end))
-        ' <<<"$_ej" 2>/dev/null)"
+        ' <<<"$_ej")"
         if [[ -n "$_eln" ]]
         then
           echo_info "$_eln"
         fi
+        configure_modem_vendor "$_ej"
       fi
     fi
     return 0
@@ -1940,8 +1965,8 @@ modem_reset() {
   local j plugin manufacturer is_quectel=""
   if j="$(mmcli_cmd -J)"
   then
-    plugin="$(jq -r '.modem.generic.plugin // empty' <<<"$j" 2>/dev/null)"
-    manufacturer="$(jq -r '.modem.generic.manufacturer // empty' <<<"$j" 2>/dev/null)"
+    plugin="$(jq -r '.modem.generic.plugin // empty' <<<"$j")"
+    manufacturer="$(jq -r '.modem.generic.manufacturer // empty' <<<"$j")"
     if [[ "${plugin,,}" == quectel || "${manufacturer,,}" == quectel* ]]
     then
       is_quectel=1
@@ -2055,7 +2080,7 @@ reset_warn() {
 watch_cleanup() {
   if [[ -n "$WATCH_DBUS_PID" ]]
   then
-    if ! kill "$WATCH_DBUS_PID" 2>/dev/null
+    if ! kill "$WATCH_DBUS_PID"
     then
       echo_warning "could not stop dbus-monitor (pid $WATCH_DBUS_PID)"
     fi
@@ -2063,7 +2088,7 @@ watch_cleanup() {
   fi
   if [[ -n "$WATCH_FIFO" ]]
   then
-    if ! rm -f "$WATCH_FIFO" 2>/dev/null
+    if ! rm -f "$WATCH_FIFO"
     then
       echo_warning "could not remove fifo $WATCH_FIFO"
     fi
@@ -2225,7 +2250,7 @@ modem_status_single() {
     return 1
   fi
 
-  mid_label="$(jq -r '.modem["dbus-path"] | split("/")[-1] // ""' <<<"$json" 2>/dev/null)"
+  mid_label="$(jq -r '.modem["dbus-path"] | split("/")[-1] // ""' <<<"$json")"
 
   if [[ -n "$RAW_OUTPUT" ]]
   then
@@ -2297,7 +2322,7 @@ modem_status_single() {
   fi
 
   # Derive SMSC (may use OWN_NUMBER or config); do not fail hard if empty
-  smsc="$(get_smsc_number || true)"
+  smsc="$(get_smsc_number)"
   if [[ -z "$smsc" ]]
   then
     smsc=unknown
@@ -2528,7 +2553,7 @@ watch_handle_sms() {
     local om_json
     if om_json="$(mmcli_cmd -J)"
     then
-      recipient="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$om_json" 2>/dev/null)"
+      recipient="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$om_json")"
       recipient="$(ensure_plus "$recipient")"
     fi
 
@@ -3016,7 +3041,7 @@ main() {
     local _j _id
     if _j="$(mmcli_cmd -J)"
     then
-      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j" 2>/dev/null)"
+      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
       if [[ -n "$_id" ]]
       then
         MODEM="$_id"
