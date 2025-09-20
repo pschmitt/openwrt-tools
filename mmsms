@@ -10,13 +10,6 @@ cd "$(dirname "$(readlink -f "$0")")" || return 9
 source lib/echo.sh || exit 2
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/mmsms.conf}"
-# source configuration file
-# shellcheck disable=SC1090
-if ! source "$CONFIG_FILE"
-then
-  echo_error "$SCRIPT_NAME: could not read configuration file $CONFIG_FILE"
-  exit 2
-fi
 
 MODEM="${MODEM:-any}"
 OWN_NUMBER="${OWN_NUMBER:-}"
@@ -83,6 +76,8 @@ Options:
       --all            List/Prune/Enable/Reset: operate on all modems
       --sent           Prune: delete only sent outgoing messages
       --allow-foreign  Send: allow sending to foreign country codes
+      --config PATH    Use alternate config file for watch
+      --fallback       Send/Watch: on failure, try other modem(s)
   -q, --quiet          Suppress status output (exit code only)
   -h, --help           Show this help and exit
 
@@ -129,6 +124,7 @@ country_to_cc() {
 #  - HOME_CC if set (digits only, e.g., 49)
 #  - Derive from OWN_NUMBER (heuristic: +1 -> 1, otherwise first two digits)
 get_home_cc() {
+  local target_mid="${1:-}"
   local cc=""
   if [[ -n "$HOME_CC" ]]
   then
@@ -137,17 +133,21 @@ get_home_cc() {
     return 0
   fi
 
-  if [[ -z "$OWN_NUMBER" ]]
+  local j own
+  if [[ -n "$target_mid" ]]
   then
-    if ! load_own_number
-    then
-      return 1
-    fi
+    j="$(mmcli -m "$target_mid" -J 2>/dev/null || true)"
+  else
+    j="$(mmcli_cmd -J 2>/dev/null || true)"
   fi
-  if [[ "$OWN_NUMBER" == +* ]]
+  if [[ -z "$j" ]]
   then
-    local digits="${OWN_NUMBER#+}"
-    # Heuristic: NANP +1, otherwise take first two digits
+    return 1
+  fi
+  own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+  if [[ "$own" == +* ]]
+  then
+    local digits="${own#+}"
     if [[ "$digits" == 1* ]]
     then
       cc="1"
@@ -688,6 +688,82 @@ sms_send() {
 
   rm -f "$tmpfile" 2>/dev/null || true
   return $rc
+}
+
+# Determine if a recipient is allowed for a given modem id based on
+# --allow-foreign/HOME_CC. Returns 0 if allowed, 1 if blocked.
+recipient_allowed_for_modem() {
+  local recipient="$1"
+  local mid="$2"
+  if [[ -n "$ALLOW_FOREIGN" ]]
+  then
+    return 0
+  fi
+  local hcc
+  hcc="$(get_home_cc "$mid" 2>/dev/null || true)"
+  if [[ -z "$hcc" ]]
+  then
+    return 0
+  fi
+  if [[ "$recipient" == +"$hcc"* ]]
+  then
+    return 0
+  fi
+  return 1
+}
+
+sms_send_with_fallback() {
+  local recipient="$1"
+  shift
+  local text="$*"
+
+  # Try current modem first
+  if sms_send "$recipient" "$text"
+  then
+    return 0
+  fi
+
+  if [[ -z "$FALLBACK" ]]
+  then
+    return 1
+  fi
+
+  # Gather other modems
+  local list_json mids mid cur_id
+  cur_id="$MODEM"
+  if [[ "$cur_id" == "any" ]]
+  then
+    # Attempt to pin to id
+    local _j
+    if _j="$(mmcli_cmd -J 2>/dev/null || true)"
+    then
+      cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j" 2>/dev/null)"
+    fi
+  fi
+  if ! list_json="$(mmcli -L -J 2>/dev/null)"
+  then
+    return 1
+  fi
+  mapfile -t mids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" 2>/dev/null | sort -n)
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
+    if ! recipient_allowed_for_modem "$recipient" "$mid"
+    then
+      continue
+    fi
+    (
+      local MODEM="$mid"
+      if sms_send "$recipient" "$text"
+      then
+        echo_info "fallback send succeeded on modem $mid"
+        exit 0
+      fi
+      exit 1
+    ) && return 0
+  done
+
+  return 1
 }
 
 sms_prune_all() {
@@ -1462,6 +1538,15 @@ watch_send_reply() {
   log_modem="$(modem_info_brief)"
   watch_log "sending reply modem=$log_modem to $to text='$log_text'"
   log_sys "sending reply modem=$log_modem to $to text='$log_text'"
+  if [[ -n "$FALLBACK" ]]
+  then
+    if ! sms_send_with_fallback "$to" "$msg"
+    then
+      watch_warn "failed to send reply to $to (including fallback)"
+      return 1
+    fi
+    return 0
+  fi
   if ! sms_send "$to" "$msg"
   then
     watch_warn "failed to send reply to $to"
@@ -2037,6 +2122,19 @@ main() {
         set -x
         shift
         ;;
+      --config)
+        if (( $# < 2 ))
+        then
+          error "missing value for --config"
+          return 2
+        fi
+        CONFIG_FILE="$2"
+        shift 2
+        ;;
+      --fallback)
+        FALLBACK=1
+        shift
+        ;;
       -h|--help)
         usage
         return 0
@@ -2246,7 +2344,15 @@ main() {
 
   case "$command" in
     send)
-      sms_send "${ARGS[@]}"
+      if [[ -n "$FALLBACK" ]]
+      then
+        if ! sms_send_with_fallback "${ARGS[@]}"
+        then
+          return 1
+        fi
+      else
+        sms_send "${ARGS[@]}"
+      fi
       ;;
     list)
       sms_list_pretty
@@ -2306,6 +2412,16 @@ main() {
       fi
       ;;
     watch)
+      # Source config only for watch
+      if [[ -f "$CONFIG_FILE" ]]
+      then
+        # shellcheck disable=SC1090
+        if ! source "$CONFIG_FILE"
+        then
+          error "could not read configuration file $CONFIG_FILE"
+          return 2
+        fi
+      fi
       watch_messages
       ;;
     *)
