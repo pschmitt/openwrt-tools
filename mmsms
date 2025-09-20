@@ -34,8 +34,36 @@ ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
+DEFAULT_MODEM="${DEFAULT_MODEM:-}"
+CONFIG_LOADED=""
+MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
 SMS_LAST_TEXT=""
+
+load_config() {
+  local origin="${1:-initial}"
+  if [[ -n "$CONFIG_LOADED" ]]
+  then
+    if [[ -n "$DEBUG" || -n "$VERBOSE" ]]
+    then
+      echo_debug "config already loaded ($origin): $CONFIG_FILE"
+    fi
+    return 0
+  fi
+  if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]
+  then
+    echo_debug "loading config ($origin): $CONFIG_FILE"
+    local source_rc=0
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE" || source_rc=$?
+    if (( source_rc != 0 ))
+    then
+      echo_warning "failed to load config ($origin): $CONFIG_FILE (rc=$source_rc)"
+      return "$source_rc"
+    fi
+    CONFIG_LOADED=1
+  fi
+}
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
 if ! declare -p SMS_WHITELIST >/dev/null 2>&1
@@ -1045,11 +1073,7 @@ sms_send() {
   if [[ -z "$recipient" ]]
   then
     # Try to load defaults from config when sending without explicit recipient
-    if [[ -f "$CONFIG_FILE" ]]
-    then
-      # shellcheck disable=SC1090
-      source "$CONFIG_FILE"
-    fi
+    load_config send
     # shellcheck disable=SC2031
     recipient="$(resolve_default_recipient "$MODEM")"
     if [[ -z "$recipient" ]]
@@ -2717,6 +2741,8 @@ main() {
   local -a ARGS=()
   local -a DEBUG_FLAGS=()
 
+  load_config pre-opts
+
   # Global options can appear anywhere; collect non-option args into ARGS
   while (( $# > 0 ))
   do
@@ -2730,6 +2756,7 @@ main() {
         fi
         DEBUG_FLAGS+=("${opt}=$2")
         MODEM="$2"
+        MODEM_EXPLICIT=1
         shift 2
         ;;
       -d|--debug)
@@ -2806,6 +2833,7 @@ main() {
         fi
         DEBUG_FLAGS+=("${opt}=$2")
         CONFIG_FILE="$2"
+        CONFIG_LOADED=""
         shift 2
         ;;
       -F|--fallback)
@@ -2850,8 +2878,21 @@ main() {
   then
     command="status"
   else
-  command="${ARGS[0]}"
-  ARGS=("${ARGS[@]:1}")
+    command="${ARGS[0]}"
+    ARGS=("${ARGS[@]:1}")
+  fi
+
+  load_config post-opts
+  if [[ -n "$DEFAULT_MODEM" ]]
+  then
+    echo_debug "default modem configured: $DEFAULT_MODEM"
+  fi
+
+  if [[ -z "$ALL_MODEMS" && -z "$MODEM_EXPLICIT" && -n "$DEFAULT_MODEM" ]]
+  then
+    MODEM="$DEFAULT_MODEM"
+    echo_debug "using default modem $MODEM"
+  fi
 
   # Support a 'help' command and per-subcommand --help/-h after command
   if [[ "$command" == "help" ]]
@@ -2875,7 +2916,6 @@ main() {
       print_subcommand_usage "$topic"
     fi
     return 0
-  fi
   fi
 
   case "$command" in
@@ -3125,11 +3165,7 @@ main() {
 
   case "$command" in
     send)
-      if [[ -f "$CONFIG_FILE" ]]
-      then
-        # shellcheck disable=SC1090
-        source "$CONFIG_FILE"
-      fi
+      load_config send
       if [[ -n "$FALLBACK" ]]
       then
         if ! sms_send_with_fallback "${ARGS[@]}"
@@ -3208,14 +3244,11 @@ main() {
       ;;
     watch)
       # Source config only for watch
-      if [[ -f "$CONFIG_FILE" ]]
+      load_config watch
+      if (( ${#SMS_WHITELIST[@]} == 0 ))
       then
-        # shellcheck disable=SC1090
-        if ! source "$CONFIG_FILE"
-        then
-          error "could not read configuration file $CONFIG_FILE"
-          return 2
-        fi
+        error "watch requires at least one whitelisted number (SMS_WHITELIST)"
+        return 2
       fi
       watch_messages
       ;;
