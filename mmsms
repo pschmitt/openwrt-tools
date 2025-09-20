@@ -560,14 +560,6 @@ resolve_default_recipient() {
   return 1
 }
 
-# Send a line to the system log if `logger` is available
-log_sys() {
-  if command -v logger >/dev/null 2>&1
-  then
-    logger -t mmsms "$*"
-  fi
-}
-
 # Run an AT command via mmcli and return the response string
 # - Strips the leading "response: '...'") wrapper printed by mmcli
 # - If no such wrapper is present, returns raw stdout/stderr as-is
@@ -934,7 +926,6 @@ sms_send() {
   local log_modem
   log_modem="$(modem_info_brief)"
   echo_info "sending sms with modem={$log_modem} recipient=$recipient text='$log_text'"
-  log_sys "sending sms with modem={$log_modem} recipient=$recipient text='$log_text'"
 
   # text already expanded and trimmed above
 
@@ -1807,14 +1798,6 @@ modem_reset_all() {
   done
 }
 
-watch_log() {
-  echo_info "$*"
-}
-
-watch_warn() {
-  echo_warning "$*"
-}
-
 reset_log() {
   if [[ -z $QUIET ]]
   then
@@ -1831,7 +1814,7 @@ watch_cleanup() {
   then
     if ! kill "$WATCH_DBUS_PID" 2>/dev/null
     then
-      watch_warn "could not stop dbus-monitor (pid $WATCH_DBUS_PID)"
+      echo_warning "could not stop dbus-monitor (pid $WATCH_DBUS_PID)"
     fi
     WATCH_DBUS_PID=""
   fi
@@ -1839,7 +1822,7 @@ watch_cleanup() {
   then
     if ! rm -f "$WATCH_FIFO" 2>/dev/null
     then
-      watch_warn "could not remove fifo $WATCH_FIFO"
+      echo_warning "could not remove fifo $WATCH_FIFO"
     fi
     WATCH_FIFO=""
   fi
@@ -1878,20 +1861,19 @@ watch_send_reply() {
   log_text="$(abbrev_text_for_log "$msg")"
   local log_modem
   log_modem="$(modem_info_brief)"
-  watch_log "sending reply with modem={$log_modem} recipient=$to text='$log_text'"
-  log_sys "sending reply with modem={$log_modem} recipient=$to text='$log_text'"
+  echo_info "sending reply with modem={$log_modem} recipient=$to text='$log_text'"
   if [[ -n "$FALLBACK" ]]
   then
     if ! sms_send_with_fallback "$to" "$msg"
     then
-      watch_warn "failed to send reply to $to (including fallback)"
+      echo_warning "failed to send reply to $to (including fallback)"
       return 1
     fi
     return 0
   fi
   if ! sms_send "$to" "$msg"
-  then
-    watch_warn "failed to send reply to $to"
+    then
+      echo_warning "failed to send reply to $to"
     return 1
   fi
 }
@@ -2176,7 +2158,7 @@ watch_handle_sms() {
   then
     MODEM="$prefer_modem_id"
   else
-    watch_warn "no modem hint for SMS $id; defaulting to any"
+    echo_warning "no modem hint for SMS $id; defaulting to any"
     MODEM="any"
   fi
   local tries=0
@@ -2196,13 +2178,13 @@ watch_handle_sms() {
 
     if [[ "$state" != "received" && "$pdu" != "deliver" ]]
     then
-      watch_log "ignore id=$id (state=$state pdu=$pdu)"
+      echo_info "ignore id=$id (state=$state pdu=$pdu)"
       return
     fi
 
     if [[ -n "$OWN_NUMBER" && "$sender" == "$OWN_NUMBER" ]]
     then
-      watch_log "skip self-sent id=$id"
+      echo_info "skip self-sent id=$id"
       return
     fi
 
@@ -2232,7 +2214,7 @@ watch_handle_sms() {
     fi
     local sender_cc
     sender_cc="$(phone_cc_label "$sender")"
-    watch_log "received id=$id from $sender (cc=$sender_cc) to $log_recipient text='$log_text'"
+    echo_info "received id=$id from $sender (cc=$sender_cc) to $log_recipient text='$log_text'"
 
     local handled=0
     if [[ "$text" == "!"* ]]
@@ -2248,17 +2230,17 @@ watch_handle_sms() {
         then
           watch_send_reply "$sender" "ERR: empty command"
         else
-          watch_log "executing command from $sender: $cmd"
+          echo_info "executing command from $sender: $cmd"
           local output
           output="$(watch_run_command "$cmd")"
-          watch_log "command from $sender finished rc=$WATCH_CMD_RC reason=${WATCH_CMD_REASON:-exit}"
+          echo_info "command from $sender finished rc=$WATCH_CMD_RC reason=${WATCH_CMD_REASON:-exit}"
           # Before sending our reply, prune already-sent messages on this modem
-          sms_prune_sent || watch_warn "failed to prune sent SMS before reply"
+          sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
           watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
         fi
         handled=1
       else
-        watch_log "command from $sender ignored (not whitelisted)"
+        echo_info "command from $sender ignored (not whitelisted)"
       fi
     fi
 
@@ -2270,7 +2252,7 @@ watch_handle_sms() {
         --arg text "$text" \
         --arg date "$(date -Iseconds)" \
         '{recipient:$recipient, sender:$sender, text:$text, date: $date}')"
-      watch_log "forwarding id=$id from $sender to webhook"
+      echo_info "forwarding id=$id from $sender to webhook"
       local resp rc code body log_body
       resp="$(curl -sS -m 10 -H 'Content-Type: application/json' -w $'\n%{http_code}' \
         -X POST -d "$payload" "$WEBHOOK_URL" 2>&1)"
@@ -2278,7 +2260,7 @@ watch_handle_sms() {
       if (( rc != 0 ))
       then
         log_body="$(abbrev_text_for_log "$resp")"
-        watch_warn "webhook delivery error rc=$rc output='$log_body'"
+        echo_warning "webhook delivery error rc=$rc output='$log_body'"
       else
         code="${resp##*$'\n'}"
         body="${resp%$'\n'*}"
@@ -2291,9 +2273,9 @@ watch_handle_sms() {
         fi
         if [[ "$code" =~ ^2 ]]
         then
-          watch_log "webhook response code=$code body='$log_body'"
+          echo_info "webhook response code=$code body='$log_body'"
         else
-          watch_warn "webhook response code=$code body='$log_body'"
+          echo_warning "webhook response code=$code body='$log_body'"
         fi
       fi
     fi
@@ -2302,7 +2284,7 @@ watch_handle_sms() {
     then
       if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1
       then
-        watch_warn "failed to delete processed SMS $id"
+        echo_warning "failed to delete processed SMS $id"
       fi
     fi
     return
@@ -2324,28 +2306,28 @@ watch_messages() {
   then
     if [[ -n "$OWN_NUMBER" ]]
     then
-      watch_log "own number = $OWN_NUMBER"
+      echo_info "own number = $OWN_NUMBER"
     fi
   else
     local load_rc=$?
     if (( load_rc == 1 ))
     then
-      watch_warn "could not query modem for own number"
+      echo_warning "could not query modem for own number"
     else
-      watch_warn "modem did not report own number"
+      echo_warning "modem did not report own number"
     fi
   fi
 
   if ! sms_prune_all_modems
   then
-    watch_warn "failed to prune existing SMS messages on all modems"
+    echo_warning "failed to prune existing SMS messages on all modems"
   fi
 
   if [[ -n "$ALL_MODEMS" ]]
   then
-    enable_all_modems || watch_warn "failed to enable all modems"
+    enable_all_modems || echo_warning "failed to enable all modems"
   else
-    enable_modem "$MODEM" || watch_warn "failed to enable modem"
+    enable_modem "$MODEM" || echo_warning "failed to enable modem"
   fi
 
   local current_modem_id=""
@@ -2369,7 +2351,7 @@ watch_messages() {
         # If not listening on all, ignore messages from other modems
         if [[ -z "$ALL_MODEMS" && -n "$current_modem_id" && "$current_modem_id" != "$MODEM" ]]
         then
-          watch_warn "ignoring SMS $id from modem $current_modem_id (listening on $MODEM)"
+          echo_warning "ignoring SMS $id from modem $current_modem_id (listening on $MODEM)"
           continue
         fi
         watch_handle_sms "$id" "$current_modem_id"
