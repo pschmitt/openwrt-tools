@@ -50,6 +50,9 @@ FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
 SKIP_MODEM_INIT_PATTERNS=()
 
+# Token used to render section dividers in fancy modem status output
+MODEM_STATUS_SEPARATOR_TOKEN="__MODEM_STATUS_SEPARATOR__"
+
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -3948,8 +3951,116 @@ get_smsc_number() {
   printf '%s' "$SMSC_NUMBER"
 }
 
+repeat_char() { # $1=char, $2=count
+  local char="$1"
+  local count="${2:-0}"
+
+  if (( count <= 0 ))
+  then
+    printf '%s' ""
+    return 0
+  fi
+
+  local _spaces
+  printf -v _spaces '%*s' "$count" ''
+  printf '%s' "${_spaces// /$char}"
+}
+
+colorize_text() { # $1=colorcode, $2=text
+  local color="$1"
+  local text="$2"
+
+  if [[ -z "$color" || -n "$NO_COLOR" || -n "$CRON" ]]
+  then
+    printf '%s' "$text"
+    return 0
+  fi
+
+  printf '\e[%sm%s\e[0m' "$color" "$text"
+}
+
+render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tcolor\tvalue
+  local title="$1"
+  local header_color="$2"
+  shift 2
+  local -a rows=("$@")
+
+  local label_width=0
+  local value_width=0
+  local header_text
+  if [[ -n "$title" ]]
+  then
+    header_text="Modem ${title} Status"
+  else
+    header_text="Modem Status"
+  fi
+  local row label color value
+
+  for row in "${rows[@]}"
+  do
+    IFS=$'\t' read -r label color value <<<"$row"
+    if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
+    then
+      continue
+    fi
+    if (( ${#label} > label_width ))
+    then
+      label_width=${#label}
+    fi
+    if (( ${#value} > value_width ))
+    then
+      value_width=${#value}
+    fi
+  done
+
+  (( label_width < 8 )) && label_width=8
+  (( value_width < 8 )) && value_width=8
+
+  local inner_width=$(( label_width + value_width + 5 ))
+  local header_required=$(( ${#header_text} + 1 ))
+  if (( header_required > inner_width ))
+  then
+    value_width=$(( header_required - label_width - 5 ))
+    if (( value_width < 8 ))
+    then
+      value_width=8
+    fi
+    inner_width=$(( label_width + value_width + 5 ))
+  fi
+
+  local border
+  border="$(repeat_char '━' "$inner_width")"
+  printf '┏%s┓\n' "$border"
+
+  local header_width=$(( inner_width - 1 ))
+  local header_padded
+  printf -v header_padded '%-*s' "$header_width" "$header_text"
+  printf '┃ %s┃\n' "$(colorize_text "$header_color" "$header_padded")"
+
+  printf '┣%s┫\n' "$(repeat_char '━' "$inner_width")"
+
+  local separator_line
+  separator_line="$(repeat_char '─' "$inner_width")"
+
+  local value_padded
+  for row in "${rows[@]}"
+  do
+    IFS=$'\t' read -r label color value <<<"$row"
+    if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
+    then
+      printf '┣%s┫\n' "$separator_line"
+      continue
+    fi
+
+    printf -v value_padded '%-*s' "$value_width" "$value"
+    printf '┃ %-*s │ %s ┃\n' "$label_width" "$label" "$(colorize_text "$color" "$value_padded")"
+  done
+
+  printf '┗%s┛\n' "$border"
+}
+
 modem_status_single() {
-  local json state power reg signal carrier own smsc mid_label
+  local json state power reg signal signal_num carrier own smsc mid_label
   local manufacturer model plugin primary_port ports_display ports_json="[]" at_port
   local country_code country_label country_display="unknown"
   local info_tsv
@@ -3999,7 +4110,7 @@ modem_status_single() {
   state="$(jq -r '(.modem.generic.state // empty)' <<<"$json")"
   power="$(jq -r '(.modem.generic["power-state"] // empty)' <<<"$json")"
   reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
-  signal="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+  signal_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
   carrier="$(jq -r '(.modem["3gpp"]["operator-name"] // .modem["3gpp"]["operator-code"] // .modem.cdma.sid // empty)' <<<"$json")"
   own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
 
@@ -4019,7 +4130,7 @@ modem_status_single() {
         ($ports
           | map(split(" ")[0] | normalize_port)
           | map(select(. != ""))
-          | join(", ")),
+          | join(" ")),
         ($ports
           | map(split(" ")[0] | normalize_port)
           | map(select(. != ""))
@@ -4054,9 +4165,9 @@ modem_status_single() {
   then
     reg=unknown
   fi
-  if [[ -n "$signal" ]]
+  if [[ -n "$signal_num" ]]
   then
-    signal="${signal}%"
+    signal="${signal_num}%"
   else
     signal=unknown
   fi
@@ -4123,8 +4234,7 @@ modem_status_single() {
   # JSON output if requested
   if [[ -n "$JSON_OUTPUT" ]]
   then
-    local sig_num_json
-    sig_num_json="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+    local sig_num_json="$signal_num"
     local ports_json_arg="$ports_json"
     if [[ -z "$ports_json_arg" ]]
     then
@@ -4168,88 +4278,90 @@ modem_status_single() {
     return 0
   fi
 
-  if [[ -z $QUIET ]]
+  # Choose colors for the status panel
+  local state_color power_color reg_color sig_color carrier_color phone_color smsc_color info_color country_color
+  case "${state,,}" in
+    connected|registered|enabled|online|on) state_color='1;32';;   # bold green
+    searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
+    failed|disabled|off) state_color='1;31';;                      # bold red
+    *) state_color='36';;                                          # cyan
+  esac
+
+  case "${power,,}" in
+    on|full) power_color='1;32';;
+    low) power_color='1;33';;
+    off|unknown) power_color='1;31';;
+    *) power_color='36';;
+  esac
+
+  case "${reg,,}" in
+    home|roaming|registered|attached) reg_color='1;32';;
+    searching|idle|unknown) reg_color='1;33';;
+    denied|unregistered) reg_color='1;31';;
+    *) reg_color='36';;
+  esac
+
+  if [[ "$signal_num" =~ ^[0-9]+$ ]]
   then
-    # Color helpers (respect NO_COLOR and CRON)
-    local _nocolor=""
-    if [[ -n "$NO_COLOR" || -n "$CRON" ]]
+    if (( signal_num >= 70 ))
     then
-      _nocolor=1
-    fi
-
-    colorize() { # $1=colorcode, $2=text
-      if [[ -n "$_nocolor" ]]
-      then
-        printf '%s' "$2"
-      else
-        printf '\e[%sm%s\e[0m' "$1" "$2"
-      fi
-    }
-
-    # Choose colors
-    local state_color power_color reg_color sig_color carrier_color phone_color smsc_color info_color country_color
-    case "${state,,}" in
-      connected|registered|enabled|online|on) state_color='1;32';;   # bold green
-      searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
-      failed|disabled|off) state_color='1;31';;                      # bold red
-      *) state_color='36';;                                          # cyan
-    esac
-
-    case "${power,,}" in
-      on|full) power_color='1;32';;
-      low) power_color='1;33';;
-      off|unknown) power_color='1;31';;
-      *) power_color='36';;
-    esac
-
-    case "${reg,,}" in
-      home|roaming|registered|attached) reg_color='1;32';;
-      searching|idle|unknown) reg_color='1;33';;
-      denied|unregistered) reg_color='1;31';;
-      *) reg_color='36';;
-    esac
-
-    # Determine signal color based on numeric value when available
-    local sig_num
-    sig_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
-    if [[ "$sig_num" =~ ^[0-9]+$ ]]
+      sig_color='1;32'
+    elif (( signal_num >= 40 ))
     then
-      if (( sig_num >= 70 ))
-      then
-        sig_color='1;32'
-      elif (( sig_num >= 40 ))
-      then
-        sig_color='1;33'
-      else
-        sig_color='1;31'
-      fi
+      sig_color='1;33'
     else
-      sig_color='36'
+      sig_color='1;31'
     fi
-
-    carrier_color='1;34' # bold blue
-    phone_color='1;34'
-    smsc_color='1;34'
-    info_color='1;34'
-    country_color="$phone_color"
-
-
-    printf 'modem id: %s\n' "$(colorize "$state_color" "$mid_label")"
-    printf 'modem state: %s\n' "$(colorize "$state_color" "$state")"
-    printf 'power: %s\n' "$(colorize "$power_color" "$power")"
-    printf 'registered: %s\n' "$(colorize "$reg_color" "$reg")"
-    printf 'signal: %s\n' "$(colorize "$sig_color" "$signal")"
-    printf 'carrier: %s\n' "$(colorize "$carrier_color" "$carrier")"
-    printf 'phone: %s\n' "$(colorize "$phone_color" "$own")"
-    printf 'smsc: %s\n' "$(colorize "$smsc_color" "$smsc")"
-    printf 'manufacturer: %s\n' "$(colorize "$info_color" "$manufacturer_display")"
-    printf 'model: %s\n' "$(colorize "$info_color" "$model_display")"
-    printf 'plugin: %s\n' "$(colorize "$info_color" "$plugin_display")"
-    printf 'primary port: %s\n' "$(colorize "$info_color" "$primary_port_display")"
-    printf 'at port: %s\n' "$(colorize "$info_color" "$at_port_display_value")"
-    printf 'ports: %s\n' "$(colorize "$info_color" "$ports_display_pretty")"
-    printf 'country: %s\n' "$(colorize "$country_color" "$country_display")"
+  else
+    sig_color='36'
   fi
+
+  carrier_color='1;34' # bold blue
+  phone_color='1;34'
+  smsc_color='1;34'
+  info_color='1;34'
+  country_color="$phone_color"
+  local id_color='1;37' # bold white
+
+  local -a status_rows=()
+  local row
+
+  printf -v row '%s\t%s\t%s' "Modem ID" "$id_color" "$mid_label"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "State" "$state_color" "$state"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Power" "$power_color" "$power"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Registration" "$reg_color" "$reg"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Signal" "$sig_color" "$signal"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Carrier" "$carrier_color" "$carrier"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Phone" "$phone_color" "$own"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "SMSC" "$smsc_color" "$smsc"
+  status_rows+=("$row")
+
+  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
+  status_rows+=("$row")
+
+  printf -v row '%s\t%s\t%s' "Manufacturer" "$info_color" "$manufacturer_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Model" "$info_color" "$model_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Plugin" "$info_color" "$plugin_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Primary Port" "$info_color" "$primary_port_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "AT Port" "$info_color" "$at_port_display_value"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Ports" "$info_color" "$ports_display_pretty"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Country" "$country_color" "$country_display"
+  status_rows+=("$row")
+
+  render_modem_status_panel "$mid_label" "$state_color" "${status_rows[@]}"
 
   return 0
 }
