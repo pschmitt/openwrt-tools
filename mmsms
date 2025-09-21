@@ -2963,8 +2963,8 @@ sms_prune_sent() {
   fi
 
   mapfile -t ids < <(jq -r '
-    ."modem.messaging.sms"[]? | split("/")[-1] | sort
-  ' <<<"$list")
+    ."modem.messaging.sms"[]? | split("/")[-1]
+  ' <<<"$list" | sort -n)
 
   if (( ${#ids[@]} == 0 ))
   then
