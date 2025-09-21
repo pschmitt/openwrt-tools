@@ -2532,12 +2532,7 @@ sms_send() {
       continue
     fi
 
-    if ! sms_id="$(jq -r '.modem.messaging["created-sms"] // empty' <<<"$create_json")"
-    then
-      sms_id=""
-    fi
-
-    if [[ -z "$sms_id" ]]
+    if ! sms_id="$(jq -er '.modem.messaging["created-sms"] // empty' <<<"$create_json")"
     then
       if (( create_attempt == max_attempts ))
       then
@@ -2555,7 +2550,10 @@ sms_send() {
 
   # Now retry only the send step for the created SMS id
   local send_attempt=1
-  if (( max_attempts < 1 )); then max_attempts=1; fi
+  if (( max_attempts < 1 ))
+  then
+    max_attempts=1
+  fi
 
   while (( send_attempt <= max_attempts ))
   do
