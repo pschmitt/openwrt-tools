@@ -29,6 +29,8 @@ WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
+WATCH_ENABLE="${WATCH_ENABLE:-}"
+WATCH_ENABLE_POLL_INTERVAL="${WATCH_ENABLE_POLL_INTERVAL:-5}"
 
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
@@ -77,6 +79,7 @@ fi
 
 WATCH_FIFO=""
 WATCH_DBUS_PID=""
+WATCH_MODEM_MONITOR_PID=""
 WATCH_CMD_RC=0
 MODEM_DETAILS_LOGGED=""
 
@@ -235,7 +238,7 @@ USAGE
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-F|--fallback] [-f|--allow-foreign] [-R|--retry COUNT]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-R|--retry COUNT]
 
 Watches incoming SMS and executes reply/webhook logic.
 
@@ -243,6 +246,7 @@ Relevant flags:
   -A, --auto, --auto-recipient  When fallback, use modem defaults if original blocked
   -a, --all           Process messages from all modems (default: selected modem only)
   -c, --config PATH   Config file with defaults and whitelist
+  -E, --enable        Enable selected modem(s) when starting watch; keep enabling new modems with --all
   -F, --fallback      When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
   -R, --retry COUNT   Override SMS resend attempts
@@ -914,6 +918,12 @@ parse_watch_args() {
       -a|--all)
         DEBUG_FLAGS+=("$1")
         ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -E|--enable)
+        DEBUG_FLAGS+=("$1")
+        WATCH_ENABLE=1
         shift
         continue
         ;;
@@ -3113,6 +3123,14 @@ watch_cleanup() {
     fi
     WATCH_DBUS_PID=""
   fi
+  if [[ -n "$WATCH_MODEM_MONITOR_PID" ]]
+  then
+    if ! kill "$WATCH_MODEM_MONITOR_PID"
+    then
+      echo_warning "could not stop modem monitor (pid $WATCH_MODEM_MONITOR_PID)"
+    fi
+    WATCH_MODEM_MONITOR_PID=""
+  fi
   if [[ -n "$WATCH_FIFO" ]]
   then
     if ! rm -f "$WATCH_FIFO"
@@ -3121,6 +3139,122 @@ watch_cleanup() {
     fi
     WATCH_FIFO=""
   fi
+}
+
+watch_enable_monitor_loop() {
+  local target_modem="${1:-}"
+  local enable_all="${2:-}"
+  local interval="$WATCH_ENABLE_POLL_INTERVAL"
+
+  declare -A enabled_modems=()
+  local -a mids=()
+
+  if mapfile -t mids < <(list_modem_ids_sorted 2>/dev/null)
+  then
+    local mid
+    for mid in "${mids[@]}"
+    do
+      [[ -z "$mid" ]] && continue
+      if [[ -n "$enable_all" ]]
+      then
+        enabled_modems["$mid"]=1
+      elif [[ -n "$target_modem" && "$target_modem" != "any" && "$mid" == "$target_modem" ]]
+      then
+        enabled_modems["$mid"]=1
+      fi
+    done
+  fi
+
+  while :
+  do
+    mids=()
+    if mapfile -t mids < <(list_modem_ids_sorted 2>/dev/null)
+    then
+      local mid
+      for mid in "${mids[@]}"
+      do
+        [[ -z "$mid" ]] && continue
+        if [[ -n "$enable_all" ]]
+        then
+          if [[ -z "${enabled_modems[$mid]:-}" ]]
+          then
+            echo_info "watch: auto-enabling modem $mid"
+            if enable_modem "$mid"
+            then
+              enabled_modems["$mid"]=1
+            else
+              echo_warning "watch: failed to auto-enable modem $mid"
+            fi
+          fi
+        else
+          if [[ -z "$target_modem" || "$target_modem" == "any" ]]
+          then
+            if [[ -z "${enabled_modems[$mid]:-}" ]]
+            then
+              echo_info "watch: auto-enabling modem $mid"
+              if enable_modem "$mid"
+              then
+                enabled_modems["$mid"]=1
+                target_modem="$mid"
+              else
+                echo_warning "watch: failed to auto-enable modem $mid"
+              fi
+            fi
+          elif [[ "$mid" == "$target_modem" ]]
+          then
+            if [[ -z "${enabled_modems[$mid]:-}" ]]
+            then
+              echo_info "watch: auto-enabling target modem $mid"
+              if enable_modem "$mid"
+              then
+                enabled_modems["$mid"]=1
+              else
+                echo_warning "watch: failed to auto-enable target modem $mid"
+              fi
+            fi
+          fi
+        fi
+      done
+
+      local known mid_present present
+      for known in "${!enabled_modems[@]}"
+      do
+        present=0
+        for mid_present in "${mids[@]}"
+        do
+          if [[ "$mid_present" == "$known" ]]
+          then
+            present=1
+            break
+          fi
+        done
+        if (( present == 0 ))
+        then
+          unset 'enabled_modems[$known]'
+        fi
+      done
+    fi
+
+    sleep "$interval"
+  done
+}
+
+watch_start_enable_monitor() {
+  if [[ -z "$WATCH_ENABLE" ]]
+  then
+    return 0
+  fi
+
+  if [[ -n "$WATCH_MODEM_MONITOR_PID" ]]
+  then
+    return 0
+  fi
+
+  local target_modem="$MODEM"
+  local enable_all="$ALL_MODEMS"
+
+  watch_enable_monitor_loop "$target_modem" "$enable_all" &
+  WATCH_MODEM_MONITOR_PID=$!
 }
 
 watch_canon_number() {
@@ -3719,11 +3853,15 @@ watch_messages() {
     echo_warning "failed to prune existing SMS messages on all modems"
   fi
 
-  if [[ -n "$ALL_MODEMS" ]]
+  if [[ -n "$WATCH_ENABLE" ]]
   then
-    enable_all_modems || echo_warning "failed to enable all modems"
-  else
-    enable_modem "$MODEM" || echo_warning "failed to enable modem"
+    if [[ -n "$ALL_MODEMS" ]]
+    then
+      enable_all_modems || echo_warning "failed to enable all modems"
+    else
+      enable_modem "$MODEM" || echo_warning "failed to enable modem"
+    fi
+    watch_start_enable_monitor
   fi
 
   local current_modem_id=""
@@ -3754,6 +3892,115 @@ watch_messages() {
       fi
     fi
   done <"$WATCH_FIFO"
+}
+
+command_requires_modem_resolution() {
+  local cmd="$1"
+
+  case "$cmd" in
+    logs|service)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+resolve_modem_selection() {
+  local cmd="$1"
+
+  if [[ -n "$DEFAULT_MODEM" ]]
+  then
+    echo_debug "default modem configured: $DEFAULT_MODEM"
+  fi
+
+  if [[ -z "$ALL_MODEMS" && -z "$MODEM_EXPLICIT" && -n "$DEFAULT_MODEM" ]]
+  then
+    MODEM="$DEFAULT_MODEM"
+    echo_debug "using default modem $MODEM"
+  fi
+
+  local resolved
+  if ! resolved="$(get_modem_id "$MODEM")"
+  then
+    # get_modem_id already printed context and list
+    return 2
+  fi
+  MODEM="$resolved"
+
+  if [[ "$MODEM" == "any" ]]
+  then
+    local _j _id
+    if _j="$(mmcli_cmd -J)"
+    then
+      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
+      if [[ -n "$_id" ]]
+      then
+        MODEM="$_id"
+      fi
+    fi
+  fi
+
+  if [[ -z $QUIET ]]
+  then
+    if [[ "$cmd" == "watch" && -n "$ALL_MODEMS" ]]
+    then
+      local _ids=()
+      local _id
+      if mapfile -t _ids < <(list_modem_ids_sorted)
+      then
+        echo_info "listening on all modems: ${#_ids[@]} detected"
+        for _id in "${_ids[@]}"
+        do
+          [[ -z "$_id" ]] && continue
+          log_modem_details "$_id"
+        done
+        MODEM_DETAILS_LOGGED=1
+      else
+        echo_info "listening on all modems"
+      fi
+    else
+      if [[ -n "$ALL_MODEMS" ]]
+      then
+        local _ids=()
+        local _id
+        if mapfile -t _ids < <(list_modem_ids_sorted)
+        then
+          if (( ${#_ids[@]} > 0 ))
+          then
+            echo_info "operating on all modems: ${#_ids[@]} detected"
+            for _id in "${_ids[@]}"
+            do
+              [[ -z "$_id" ]] && continue
+              log_modem_details "$_id"
+            done
+            MODEM_DETAILS_LOGGED=1
+          else
+            echo_info "operating on all modems: none detected"
+          fi
+        else
+          echo_info "operating on all modems"
+        fi
+      elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
+      then
+        log_modem_details "$MODEM" "selected "
+      else
+        local _info
+        _info="$(modem_info_brief)"
+        if [[ -n "$_info" && "$_info" != "$MODEM" ]]
+        then
+          echo_info "selected modem={$_info}"
+        elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
+        then
+          echo_info "selected modem={id='$MODEM'}"
+        else
+          echo_info "selected modem: any"
+        fi
+      fi
+    fi
+  fi
+
+  return 0
 }
 
 main() {
@@ -3945,94 +4192,14 @@ main() {
     return $?
   fi
 
-  if [[ -n "$DEFAULT_MODEM" ]]
+  if command_requires_modem_resolution "$command"
   then
-    echo_debug "default modem configured: $DEFAULT_MODEM"
-  fi
-
-  if [[ -z "$ALL_MODEMS" && -z "$MODEM_EXPLICIT" && -n "$DEFAULT_MODEM" ]]
-  then
-    MODEM="$DEFAULT_MODEM"
-    echo_debug "using default modem $MODEM"
-  fi
-
-  # Resolve human-friendly modem selector to a concrete id, once
-  if ! MODEM="$(get_modem_id "$MODEM")"
-  then
-    # get_modem_id already printed context and list
-    return 2
-  fi
-
-  # Pin 'any' to the actual modem id to avoid races in subsequent calls
-  if [[ "$MODEM" == "any" ]]
-  then
-    local _j _id
-    if _j="$(mmcli_cmd -J)"
+    local resolve_rc
+    resolve_modem_selection "$command"
+    resolve_rc=$?
+    if (( resolve_rc != 0 ))
     then
-      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
-      if [[ -n "$_id" ]]
-      then
-        MODEM="$_id"
-      fi
-    fi
-  fi
-
-  # Informative log about modem selection
-  if [[ -z $QUIET ]]
-  then
-    if [[ "$command" == "watch" && -n "$ALL_MODEMS" ]]
-    then
-      # For watch with --all, list all modems explicitly
-      local _ids _id
-      if mapfile -t _ids < <(list_modem_ids_sorted)
-      then
-        echo_info "listening on all modems: ${#_ids[@]} detected"
-        for _id in "${_ids[@]}"
-        do
-          [[ -z "$_id" ]] && continue
-          log_modem_details "$_id"
-        done
-        MODEM_DETAILS_LOGGED=1
-      else
-        echo_info "listening on all modems"
-      fi
-    else
-      if [[ -n "$ALL_MODEMS" ]]
-      then
-        local _ids=()
-        if mapfile -t _ids < <(list_modem_ids_sorted)
-        then
-          if (( ${#_ids[@]} > 0 ))
-          then
-            echo_info "operating on all modems: ${#_ids[@]} detected"
-            for _id in "${_ids[@]}"
-            do
-              [[ -z "$_id" ]] && continue
-              log_modem_details "$_id"
-            done
-            MODEM_DETAILS_LOGGED=1
-          else
-            echo_info "operating on all modems: none detected"
-          fi
-        else
-          echo_info "operating on all modems"
-        fi
-      elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
-      then
-        log_modem_details "$MODEM" "selected "
-      else
-        local _info
-        _info="$(modem_info_brief)"
-        if [[ -n "$_info" && "$_info" != "$MODEM" ]]
-        then
-          echo_info "selected modem={$_info}"
-        elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
-        then
-          echo_info "selected modem={id='$MODEM'}"
-        else
-          echo_info "selected modem: any"
-        fi
-      fi
+      return "$resolve_rc"
     fi
   fi
 
