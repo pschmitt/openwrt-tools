@@ -1204,7 +1204,7 @@ sms_send() {
   log_text="$(abbrev_text_for_log "$text")"
   local log_modem
   log_modem="$(modem_info_brief)"
-  echo_info "sending sms with modem={$log_modem} recipient=$recipient text='$log_text'"
+  echo_info "sending sms with modem={$log_modem} recipient='$recipient' text='$log_text'"
 
   local tmpfile
   if ! tmpfile="$(mktemp "${TMPDIR:-/tmp}/mmsms-text.XXXXXX")"
@@ -1301,7 +1301,7 @@ sms_send() {
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
       rc=0
-      echo_success "message sent with modem={$log_modem} recipient=$recipient"
+      echo_success "message sent with modem={$log_modem} recipient='$recipient'"
       break
     fi
 
