@@ -134,6 +134,15 @@ USAGE
 }
 
 # Subcommand-specific usage helpers (concise, focused on per-command flags)
+usage_at() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] at [COMMAND]
+
+Issue and AT command to the modem's AT port. If COMMAND is omitted, enters interactive mode.
+USAGE
+}
+
+# Subcommand-specific usage helpers (concise, focused on per-command flags)
 usage_send() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
@@ -252,16 +261,17 @@ USAGE
 
 print_subcommand_usage() {
   case "$1" in
-    send)   usage_send ;;
-    list)   usage_list ;;
-    read)   usage_read ;;
-    prune)  usage_prune ;;
+    at)     usage_at     ;;
+    send)   usage_send   ;;
+    list)   usage_list   ;;
+    read)   usage_read   ;;
+    prune)  usage_prune  ;;
     enable) usage_enable ;;
     status) usage_status ;;
-    reset)  usage_reset ;;
-    watch)  usage_watch ;;
+    reset)  usage_reset  ;;
+    watch)  usage_watch  ;;
     number) usage_number ;;
-    smsc)   usage_smsc ;;
+    smsc)   usage_smsc   ;;
     *) usage ;;
   esac
 }
@@ -793,6 +803,16 @@ at_command() {
 
   printf '%s' "$out"
   return $rc
+}
+
+at_command_interactive() {
+  local port
+  if ! port="$(get_modem_at_port)"
+  then
+    return 1
+  fi
+
+  socat - "${port},crnl"
 }
 
 format_at_response() {
@@ -3039,6 +3059,7 @@ main() {
       usage
     else
       case "$topic" in
+        at|ati) topic="at" ;;
         s|send) topic="send" ;;
         l|ls|list) topic="list" ;;
         r|get|read) topic="read" ;;
@@ -3055,6 +3076,9 @@ main() {
   fi
 
   case "$command" in
+    at|ati)
+      command="at"
+      ;;
     send|s)
       command="send"
       ;;
@@ -3301,6 +3325,15 @@ main() {
   echo_debug "command=$command${dbg_flags}${dbg_args}"
 
   case "$command" in
+    at)
+      if [[ -n ${ARGS[0]} ]]
+      then
+        at_command "${ARGS[@]}"
+      else
+        echo_info "Starting interactive AT command session (exit with Ctrl-D)"
+        at_command_interactive
+      fi
+      ;;
     send)
       if [[ -n "$FALLBACK" ]]
       then
