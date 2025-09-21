@@ -3777,9 +3777,9 @@ get_smsc_number() {
 
 modem_status_single() {
   local json state power reg signal carrier own smsc mid_label
-  local manufacturer="" model="" plugin="" primary_port="" ports_display="" ports_json="[]" at_port=""
-  local country_code="" country_label="" country_display="unknown"
-  local info_tsv=""
+  local manufacturer model plugin primary_port ports_display ports_json="[]" at_port
+  local country_code country_label country_display="unknown"
+  local info_tsv
 
   if ! json="$(mmcli_cmd -J)"
   then
@@ -4060,6 +4060,8 @@ modem_status_single() {
     info_color='1;34'
     country_color="$phone_color"
 
+
+    printf 'modem id: %s\n' "$(colorize "$state_color" "$mid_label")"
     printf 'modem state: %s\n' "$(colorize "$state_color" "$state")"
     printf 'power: %s\n' "$(colorize "$power_color" "$power")"
     printf 'registered: %s\n' "$(colorize "$reg_color" "$reg")"
