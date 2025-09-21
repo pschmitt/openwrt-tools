@@ -117,7 +117,7 @@ Commands:
   number|phone               Print modem's own phone number
   prune                      Delete all SMS messages from the modem
   read MESSAGE_ID            Show details for a specific SMS
-  restart                    Restart modemmanager, issue quectel reset, re-enable modem
+  restart                    Restart modemmanager, issue vendor reset, re-enable modem
   send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
   service [ACTION]           Control the ${SCRIPT_NAME} service (start|stop|restart|status)
   smsc                       Print modem's configured SMSC number
@@ -228,7 +228,7 @@ usage_reset() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-a|--all] [-H|--hard]
 
-Resets the selected modem. For Quectel devices, issues quectel reset.
+Resets the selected modem. Issues vendor-specific resets when supported.
 
 Relevant flags:
   -a, --all    Reset all detected modems
@@ -1537,17 +1537,52 @@ configure_huawei_modem() {
   done
 }
 
-configure_modem_vendor() {
+configure_quectel_modem() {
+  echo_debug "quectel: no vendor-specific configuration required"
+  return 0
+}
+
+modem_vendor_from_info_json() {
   local info_json="$1"
 
-  local plugin manufacturer
+  local plugin manufacturer vendor=""
   plugin="$(jq -r '.modem.generic.plugin // ""' <<<"$info_json")"
   manufacturer="$(jq -r '.modem.generic.manufacturer // ""' <<<"$info_json")"
 
   if [[ "${plugin,,}" == huawei || "${manufacturer,,}" == huawei* ]]
   then
-    configure_huawei_modem
+    vendor="huawei"
+  elif [[ "${plugin,,}" == quectel || "${manufacturer,,}" == quectel* ]]
+  then
+    vendor="quectel"
   fi
+
+  if [[ -n "$vendor" ]]
+  then
+    printf '%s' "$vendor"
+    return 0
+  fi
+
+  return 1
+}
+
+configure_modem_vendor() {
+  local info_json="$1"
+
+  local vendor=""
+  if ! vendor="$(modem_vendor_from_info_json "$info_json")"
+  then
+    return 0
+  fi
+
+  case "$vendor" in
+    huawei)
+      configure_huawei_modem
+      ;;
+    quectel)
+      configure_quectel_modem
+      ;;
+  esac
 }
 
 # Resolve default recipient based on modem/country-specific variables.
@@ -2989,85 +3024,64 @@ enable_all_modems() {
 modem_reset() {
   local service="/etc/init.d/modemmanager"
   local has_service=""
-  local do_service=""
 
   if [[ -x "$service" ]]
   then
     has_service=1
   else
-    reset_warn "modemmanager init script not found or not executable at $service"
+    echo_warning "modemmanager init script not found or not executable at $service"
   fi
 
-  # Detect modem plugin/manufacturer to decide if Quectel-specific reset applies
-  local j plugin manufacturer is_quectel=""
-  if j="$(mmcli_cmd -J)"
+  local info_json="" vendor=""
+  if info_json="$(mmcli_cmd -J)"
   then
-    plugin="$(jq -r '.modem.generic.plugin // empty' <<<"$j")"
-    manufacturer="$(jq -r '.modem.generic.manufacturer // empty' <<<"$j")"
-    if [[ "${plugin,,}" == quectel || "${manufacturer,,}" == quectel* ]]
+    if ! vendor="$(modem_vendor_from_info_json "$info_json")"
     then
-      is_quectel=1
+      vendor=""
     fi
+    echo_debug "modem_reset: detected vendor '${vendor:-unknown}'"
   else
-    reset_warn "could not query modem to determine vendor; proceeding without Quectel reset"
+    echo_warning "could not query modem to determine vendor; proceeding with generic reset"
   fi
 
-  if [[ -n "$is_quectel" ]]
+  if [[ -n "$HARD_RESET" && -n "$has_service" ]]
   then
-    if ! command -v quectel >/dev/null 2>&1
+    reset_log "stopping ModemManager"
+    if ! "$service" stop
     then
-      echo_error "quectel command not found in PATH"
+      echo_error "failed to stop ModemManager service"
       return 1
     fi
+  fi
 
-    if [[ -n "$HARD_RESET" ]] && [[ -n "$has_service" ]]
-    then
-      reset_log "stopping ModemManager"
-      if ! "$service" stop
-      then
-        echo_error "failed to stop ModemManager service"
-        return 1
-      fi
-      do_service=1
-    fi
-
-    reset_log "issuing quectel reset"
-    if ! quectel reset
+  if [[ "$vendor" == quectel ]]
+  then
+    reset_log "quectel: sending AT+QPOWD=0"
+    local resp
+    if ! resp="$(at_command 'AT+QPOWD=0')"
     then
       echo_error "quectel reset failed"
-      if [[ -n "$do_service" ]]
-      then
-        reset_warn "attempting to restart ModemManager after reset failure"
-        "$service" start || reset_warn "could not restart ModemManager"
-      fi
-      return 1
     fi
 
-    if [[ -n "$do_service" ]]
+    local formatted_resp
+    formatted_resp="$(format_at_response "$resp")"
+    reset_log "quectel: AT+QPOWD=0 -> $formatted_resp"
+  fi
+
+  if [[ -n "$HARD_RESET" && -n "$has_service" ]]
+  then
+    reset_log "starting ModemManager"
+    if ! "$service" start
     then
-      reset_log "starting ModemManager"
-      if ! "$service" start
-      then
-        echo_error "failed to start ModemManager service"
-        return 1
-      fi
-    fi
-  else
-    # Non-Quectel: avoid vendor reset; optionally restart ModemManager to nudge detection
-    if [[ -n "$HARD_RESET" ]] && [[ -n "$has_service" ]]
-    then
-      reset_log "restarting ModemManager (non-Quectel)"
-      if ! "$service" restart
-      then
-        reset_warn "failed to restart ModemManager service"
-      fi
+      echo_error "failed to start ModemManager service"
+      return 1
     fi
   fi
 
   reset_log "enabling modem"
   if ! enable_modem "$MODEM"
   then
-    reset_warn "failed to enable modem after reset, retrying in 5s"
+    echo_warning "failed to enable modem after reset, retrying in 5s"
     sleep 5
     if ! enable_modem "$MODEM"
     then
@@ -3106,10 +3120,6 @@ reset_log() {
   fi
 }
 
-reset_warn() {
-  echo_warning "$*"
-}
-
 watch_cleanup() {
   if [[ -n "$WATCH_DBUS_PID" ]]
   then
@@ -3119,6 +3129,7 @@ watch_cleanup() {
     fi
     WATCH_DBUS_PID=""
   fi
+
   if [[ -n "$WATCH_MODEM_MONITOR_PID" ]]
   then
     if ! kill "$WATCH_MODEM_MONITOR_PID"
@@ -3127,6 +3138,7 @@ watch_cleanup() {
     fi
     WATCH_MODEM_MONITOR_PID=""
   fi
+
   if [[ -n "$WATCH_FIFO" ]]
   then
     if ! rm -f "$WATCH_FIFO"
