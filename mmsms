@@ -655,13 +655,23 @@ at_command_direct() {
 
 configure_huawei_modem() {
   echo_info "huawei: configuring modem for SMS text mode"
-  local resp
-  resp="$(at_command 'AT')"
-  echo_info "huawei: AT (baseline connectivity check) -> $(format_at_response "$resp")"
-  resp="$(at_command 'AT+CMEE=2')"
-  echo_info "huawei: AT+CMEE=2 (enable verbose error codes) -> $(format_at_response "$resp")"
-  resp="$(at_command 'AT+CMGF?')"
-  echo_info "huawei: AT+CMGF? (query SMS message format) -> $(format_at_response "$resp")"
+
+  local -A at_codes=(
+    [AT]="baseline connectivity check"
+    [AT&F]="restore factory defaults"
+    [AT+CMEE=2]="enable verbose error codes"
+    [AT+CMGF=1]="set SMS message format to text"
+    [AT+CSMP=17,167,0,0]="set SMS params: submit PDU, validity ~24h, normal PID, 7-bit alphabet"
+    [AT+CGSMS=3]="set SMS service to PS preferred (fallback CS)"
+    [AT+CMGD=1,4]="delete all messages"
+  )
+
+  local cmd resp
+  for cmd in "${!at_codes[@]}"
+  do
+    resp="$(at_command "$cmd")"
+    echo_info "huawei: $cmd (${at_codes[$cmd]}) -> $(format_at_response "$resp")"
+  done
 }
 
 configure_modem_vendor() {
