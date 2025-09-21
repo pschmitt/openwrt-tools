@@ -3115,7 +3115,7 @@ sms_list_pretty() {
       then
         printf '[]\n'
       else
-        echo_info "no SMS messages"
+        echo "no messages"
       fi
 
       return 0
@@ -3232,7 +3232,7 @@ sms_list_pretty() {
         had_any=1
       done
     done
-    [[ -n "$had_any" ]] || echo_info "no SMS messages"
+    [[ -n "$had_any" ]] || echo "*no messages*"
     return 0
   fi
 
@@ -3249,7 +3249,7 @@ sms_list_pretty() {
     then
       printf '[]\n'
     else
-      echo_info "no SMS messages"
+      echo "*no messages*"
     fi
     return 0
   fi
