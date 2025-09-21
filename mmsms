@@ -4295,10 +4295,11 @@ modem_status_single() {
   esac
 
   case "${reg,,}" in
-    home|roaming|registered|attached) reg_color='1;32';;
-    searching|idle|unknown) reg_color='1;33';;
-    denied|unregistered) reg_color='1;31';;
-    *) reg_color='36';;
+    home|registered|attached) reg_color='1;32';; # green
+    roaming) reg_color='1;35';; # magenta
+    searching|idle|unknown) reg_color='1;33';; # yellow
+    denied|unregistered) reg_color='1;31';; # red
+    *) reg_color='36';; # cyan
   esac
 
   if [[ "$signal_num" =~ ^[0-9]+$ ]]
