@@ -1783,13 +1783,17 @@ modem_usb_replug() {
 
   if [[ -z "$info_json" ]]
   then
-    echo_warning "cannot replug USB device: missing modem info"
+    echo_error "cannot replug USB device: missing modem info"
     return 1
   fi
 
   local -a ports=()
   local jq_status=0
-  mapfile -t ports < <(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | map(select(length > 0)) | .[]' <<<"$info_json") || jq_status=$?
+  mapfile -t ports < <(jq -r '
+    (.modem.generic.ports // [])
+    | map(split(" ")[0])
+    | map(select(length > 0)) | .[]
+  ' <<<"$info_json") || jq_status=$?
 
   if (( jq_status != 0 )) && (( ${#ports[@]} == 0 ))
   then
@@ -1799,27 +1803,27 @@ modem_usb_replug() {
 
   if (( ${#ports[@]} == 0 ))
   then
-    echo_warning "no modem ports reported; cannot replug USB device"
+    echo_warning "no modem ports reported, cannot replug USB device"
     return 1
   fi
 
-  local port=""
   declare -A seen_dirs=()
   declare -A dir_ports=()
   local -a device_dirs=()
 
+  local port
   for port in "${ports[@]}"
   do
     [[ -n "$port" ]] || continue
 
-    local sys_path=""
+    local sys_path
     if ! sys_path="$(usb_sysfs_path_for_port "$port")"
     then
       echo_debug "usb replug: unable to resolve sysfs path for port $port"
       continue
     fi
 
-    local device_dir=""
+    local device_dir
     if ! device_dir="$(usb_device_dir_for_path "$sys_path")"
     then
       echo_debug "usb replug: no USB device directory found for port $port ($sys_path)"
@@ -1848,20 +1852,24 @@ modem_usb_replug() {
 
   local bind_path="/sys/bus/usb/drivers/usb/bind"
   local unbind_path="/sys/bus/usb/drivers/usb/unbind"
-  local success=0
-  local device_dir=""
+  local success
 
+  local device_dir
   for device_dir in "${device_dirs[@]}"
   do
     local port_list="${dir_ports[$device_dir]# }"
-    local dev_name="$(basename "$device_dir")"
-    local vendor=""
-    local product=""
+
+    local dev_name
+    dev_name="$(basename "$device_dir")"
+
+    local vendor
+    local product
 
     if [[ -f "$device_dir/idVendor" ]]
     then
       vendor="$(<"$device_dir/idVendor")"
     fi
+
     if [[ -f "$device_dir/idProduct" ]]
     then
       product="$(<"$device_dir/idProduct")"
@@ -1876,12 +1884,15 @@ modem_usb_replug() {
         echo_warning "failed to deauthorize USB device $dev_name"
         continue
       fi
+
       sleep 2
+
       if ! printf '1\n' >"$authorized_path"
       then
         echo_warning "failed to reauthorize USB device $dev_name"
         continue
       fi
+
       sleep 2
       success=1
       continue
@@ -1895,12 +1906,15 @@ modem_usb_replug() {
         echo_warning "failed to unbind USB device $dev_name"
         continue
       fi
+
       sleep 2
+
       if ! printf '%s\n' "$dev_name" >"$bind_path"
       then
         echo_warning "failed to bind USB device $dev_name"
         continue
       fi
+
       sleep 2
       success=1
       continue
@@ -1909,7 +1923,7 @@ modem_usb_replug() {
     echo_warning "no supported USB replug control for device $dev_name (ports: ${port_list:-unknown})"
   done
 
-  if (( success == 0 ))
+  if [[ -n $success ]]
   then
     return 1
   fi
@@ -1946,10 +1960,15 @@ resolve_default_recipient() {
 
   local label
   case "$cc" in
-    1) label=US ;;
-    33) label=FR ;;
-    49) label=DE ;;
-    *) label="" ;;
+    1)
+      label=US
+      ;;
+    33)
+      label=FR
+      ;;
+    49)
+      label=DE
+      ;;
   esac
 
   # Try label-specific var
@@ -2054,11 +2073,11 @@ at_command_interactive() {
 
 mmsms_logread() {
   echo_debug "logread args: $*"
-  logread -e mmsms "$@"
+  logread -e "$SCRIPT_NAME" "$@"
 }
 
 mmsms_service_action() {
-  /etc/init.d/mmsms "$@"
+  "/etc/init.d/${SCRIPT_NAME}" "$@"
 }
 
 format_at_response() {
@@ -2260,8 +2279,8 @@ get_modem_id() {
   fi
 
   # Helper to show available modems for disambiguation
-  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
-  echo_info "Available modems:" >&2
+  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)"
+  echo_info "Available modems:"
 
   for id in "${ids[@]}"
   do

@@ -24,16 +24,9 @@ echo_fancy() {
     echo -e "${color}${prefix}\e[0m $*" >&2
   fi
 
-  # Guard-clause: mirror to syslog only when enabled and logger exists
-  if [[ -z "$ECHO_SYSLOG" ]]
-  then
-    return 0
-  fi
-  if ! command -v logger >/dev/null 2>&1
-  then
-    return 0
-  fi
-  logger -t mmsms "$line"
+  # Guard-clause: mirror to syslog only when enabled
+  [[ -z "$ECHO_SYSLOG" ]] && return 0
+  logger -t "$SCRIPT_NAME" "$line"
 }
 
 echo_info() {
