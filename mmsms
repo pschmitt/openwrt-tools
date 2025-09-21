@@ -48,6 +48,77 @@ ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
+SKIP_MODEM_INIT_PATTERNS=()
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+add_skip_modem_init_pattern() {
+  local pattern
+  pattern="$(trim "$1")"
+  [[ -z "$pattern" ]] && return 0
+
+  local existing
+  for existing in "${SKIP_MODEM_INIT_PATTERNS[@]}"
+  do
+    if [[ "${existing,,}" == "${pattern,,}" ]]
+    then
+      return 0
+    fi
+  done
+
+  SKIP_MODEM_INIT_PATTERNS+=("$pattern")
+}
+
+apply_skip_modem_init_from_config() {
+  local decl
+
+  if decl="$(declare -p SKIP_MODEM_INIT 2>/dev/null)"
+  then
+    if [[ "$decl" == "declare -a"* ]]
+    then
+      local pattern
+      for pattern in "${SKIP_MODEM_INIT[@]}"
+      do
+        add_skip_modem_init_pattern "$pattern"
+      done
+      return 0
+    fi
+  elif [[ -z "${SKIP_MODEM_INIT:-}" ]]
+  then
+    return 0
+  fi
+
+  local raw="${SKIP_MODEM_INIT:-}"
+  if [[ -z "$raw" ]]
+  then
+    return 0
+  fi
+
+  if [[ "$raw" == *$'\n'* ]]
+  then
+    while IFS= read -r line
+    do
+      add_skip_modem_init_pattern "$line"
+    done <<< "$raw"
+  elif [[ "$raw" == *,* ]]
+  then
+    local -a patterns=()
+    local IFS=','
+    read -ra patterns <<< "$raw"
+    local pattern
+    for pattern in "${patterns[@]}"
+    do
+      add_skip_modem_init_pattern "$pattern"
+    done
+  else
+    add_skip_modem_init_pattern "$raw"
+  fi
+}
 
 PARSED_ARGS=()
 PARSE_SHIFT=0
@@ -64,6 +135,8 @@ load_config() {
     echo_warning "failed to load config: $CONFIG_FILE"
     return 1
   fi
+
+  apply_skip_modem_init_from_config
 }
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
@@ -124,6 +197,9 @@ Options:
   -R, --retry COUNT     Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
   -s, --syslog          Mirror logs to syslog (in addition to stderr)
   -S, --sent            Prune: delete only sent outgoing messages
+      --skip-modem-init PATTERN
+                        Enable: skip vendor-specific modem initialization when
+                        modem details match PATTERN (repeatable)
   -x, --trace           Enable shell tracing (set -x)
   -h, --help            Show this help and exit
 
@@ -223,6 +299,9 @@ Enables the selected modem and waits for readiness.
 
 Relevant flags:
   -a, --all    Enable all detected modems
+      --skip-modem-init PATTERN
+                 Skip vendor-specific modem initialization when modem details
+                 match PATTERN (repeatable)
 USAGE
 }
 
@@ -379,6 +458,30 @@ parse_common_option() {
       DEBUG_FLAGS+=("${opt}=$value")
       CONFIG_FILE="$value"
       PARSE_SHIFT=2
+      return 0
+      ;;
+    --skip-modem-init)
+      if [[ -z "$value" ]]
+      then
+        echo_error "missing value for $opt"
+        return 2
+      fi
+      DEBUG_FLAGS+=("${opt}=$value")
+      add_skip_modem_init_pattern "$value"
+      PARSE_SHIFT=2
+      return 0
+      ;;
+    --skip-modem-init=*)
+      local pattern
+      pattern="${opt#*=}"
+      if [[ -z "$pattern" ]]
+      then
+        echo_error "missing value for --skip-modem-init"
+        return 2
+      fi
+      DEBUG_FLAGS+=("--skip-modem-init=$pattern")
+      add_skip_modem_init_pattern "$pattern"
+      PARSE_SHIFT=1
       return 0
       ;;
   esac
@@ -1430,6 +1533,119 @@ list_modem_ids_sorted() {
   jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" | sort -n
 }
 
+modem_info_matches_selector() {
+  local selector_raw="$1"
+  local info_json="$2"
+  shift 2
+
+  local selector
+  selector="$(trim "$selector_raw")"
+  if [[ -z "$selector" ]]
+  then
+    return 1
+  fi
+
+  local selector_lc="${selector,,}"
+  local selector_digits="${selector//[^0-9+]/}"
+
+  local cc_filter=""
+  if ! cc_filter="$(country_to_cc "$selector")"
+  then
+    cc_filter=""
+  fi
+
+  local -a text_fields=()
+  if ! mapfile -t text_fields < <(jq -r '
+    .modem.generic as $g
+    | [
+        ($g.manufacturer // ""),
+        ($g.model // ""),
+        ($g.plugin // ""),
+        ($g["primary-port"] // ""),
+        (($g.ports // [])[]? | (split(" ")[0]))
+      ]
+    | .[]
+    | select(. != "")
+  ' <<<"$info_json")
+  then
+    text_fields=()
+  fi
+
+  if (( $# > 0 ))
+  then
+    local extra
+    for extra in "$@"
+    do
+      if [[ -n "$extra" ]]
+      then
+        text_fields+=("$extra")
+      fi
+    done
+  fi
+
+  local -a number_fields=()
+  if ! mapfile -t number_fields < <(jq -r '
+    .modem.generic["own-numbers"][]?
+    | select(. != "")
+  ' <<<"$info_json")
+  then
+    number_fields=()
+  fi
+
+  local field
+  if [[ -n "$cc_filter" ]]
+  then
+    for field in "${number_fields[@]}"
+    do
+      [[ -z "$field" ]] && continue
+      local digits_only="${field//[^0-9]/}"
+      if [[ -n "$digits_only" && "$digits_only" == "$cc_filter"* ]]
+      then
+        printf '%s' "$field"
+        return 0
+      fi
+    done
+  fi
+
+  for field in "${text_fields[@]}"
+  do
+    [[ -z "$field" ]] && continue
+    if [[ "${field,,}" == *"$selector_lc"* ]]
+    then
+      printf '%s' "$field"
+      return 0
+    fi
+  done
+
+  for field in "${number_fields[@]}"
+  do
+    [[ -z "$field" ]] && continue
+    if [[ "${field,,}" == *"$selector_lc"* ]]
+    then
+      printf '%s' "$field"
+      return 0
+    fi
+
+    if [[ -n "$selector_digits" ]]
+    then
+      local digits_with_plus="${field//[^0-9+]/}"
+      if [[ "$digits_with_plus" == *"$selector_digits"* ]]
+      then
+        printf '%s' "$field"
+        return 0
+      fi
+    fi
+
+    if printf '%s\n' "$field" | grep -Eq -- "$selector"
+    then
+      printf '%s' "$field"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 log_modem_details() {
   local mid="$1" prefix="${2:-}"
   [[ -z "$mid" ]] && return 1
@@ -1698,6 +1914,34 @@ configure_modem_vendor() {
   if ! vendor="$(modem_vendor_from_info_json "$info_json")"
   then
     return 0
+  fi
+
+  if (( ${#SKIP_MODEM_INIT_PATTERNS[@]} > 0 ))
+  then
+    local -a extra_fields=()
+    if [[ -n "$vendor" ]]
+    then
+      extra_fields+=("$vendor")
+    fi
+
+    local pattern matched_field
+    for pattern in "${SKIP_MODEM_INIT_PATTERNS[@]}"
+    do
+      pattern="$(trim "$pattern")"
+      [[ -z "$pattern" ]] && continue
+
+      matched_field=""
+      if matched_field="$(modem_info_matches_selector "$pattern" "$info_json" "${extra_fields[@]}")"
+      then
+        if [[ -n "$matched_field" ]]
+        then
+          echo_info "$vendor: skipping vendor-specific initialization (--skip-modem-init \"$pattern\" matched \"$matched_field\")"
+        else
+          echo_info "$vendor: skipping vendor-specific initialization (--skip-modem-init \"$pattern\")"
+        fi
+        return 0
+      fi
+    done
   fi
 
   case "$vendor" in
@@ -2149,13 +2393,11 @@ at_first_quoted_decoded() {
 
 # Resolve a human-friendly modem selector to a concrete modem id
 # - Accepts: numeric id (e.g., 2), D-Bus path, 'any', or a substring
-#   matching manufacturer, plugin, primary-port, or any ttyUSB/wwan port.
+#   matching manufacturer, model, plugin, primary-port, or any ttyUSB/wwan port.
 # - On multiple matches, prints a modem list to stderr and returns non-zero.
 # - On no match, reports an error and shows the list.
 get_modem_id() {
   local sel_raw="${1:-}"
-  local sel
-
   # Default / passthrough cases
   if [[ -z "$sel_raw" || "$sel_raw" == any ]]
   then
@@ -2169,9 +2411,6 @@ get_modem_id() {
     printf '%s' "${sel_raw##*/}"
     return 0
   fi
-
-  # Case-insensitive substring match on fields (unless country filter applies)
-  sel="${sel_raw,,}"
 
   local list_json ids id json
   if ! list_json="$(mmcli -L -J)"
@@ -2204,8 +2443,6 @@ get_modem_id() {
   fi
 
   local matches=()
-  local cc_filter=""
-  cc_filter="$(country_to_cc "$sel_raw")"
 
   for id in "${ids[@]}"
   do
@@ -2215,70 +2452,7 @@ get_modem_id() {
       continue
     fi
 
-    # Extract candidate fields and match
-    local fields numbers sel_digits
-    fields="$(jq -r '
-      .modem.generic as $g
-      | [
-          ($g.manufacturer // ""),
-          ($g.plugin // ""),
-          ($g["primary-port"] // ""),
-          (($g.ports // [])[]? | (split(" ")[0]))
-        ] | .[]
-    ' <<<"$json")"
-    numbers="$(jq -r '.modem.generic["own-numbers"][]? // empty' <<<"$json")"
-    sel_digits="${sel_raw//[^0-9+]/}"
-
-    local matched=0
-    if [[ -n "$cc_filter" && -n "$numbers" ]]
-    then
-      # Country code filter: match if any own-number starts with +<cc>
-      local n
-      while IFS= read -r n
-      do
-        [[ -z "$n" ]] && continue
-        n="${n#+}"
-        if [[ "$n" == "$cc_filter"* ]]
-        then
-          matched=1; break
-        fi
-      done <<< "$numbers"
-    else
-      # Generic substring/regex and number substring matching
-      if [[ -n "$fields" ]]
-      then
-        local f lf
-        while IFS= read -r f
-        do
-          lf="${f,,}"
-          if [[ "$lf" == *"$sel"* ]]
-          then
-            matched=1; break
-          fi
-        done <<< "$fields"
-      fi
-
-      if (( matched == 0 )) && [[ -n "$numbers" ]]
-      then
-        local n nd
-        while IFS= read -r n
-        do
-          [[ -z "$n" ]] && continue
-          nd="${n//[^0-9+]/}"
-          if [[ "${n,,}" == *"${sel_raw,,}"* ]] || { [[ -n "$sel_digits" ]] && [[ "$nd" == *"$sel_digits"* ]]; }
-          then
-            matched=1; break
-          fi
-
-          if printf '%s\n' "$n" | grep -Eq -- "$sel_raw"
-          then
-            matched=1; break
-          fi
-        done <<< "$numbers"
-      fi
-    fi
-
-    if (( matched == 1 ))
+    if modem_info_matches_selector "$sel_raw" "$json" >/dev/null
     then
       matches+=("$id")
     fi
@@ -4557,6 +4731,30 @@ main() {
         DEBUG_FLAGS+=("$1=$2")
         CONFIG_FILE="$2"
         shift 2
+        continue
+        ;;
+      --skip-modem-init)
+        if (( $# < 2 ))
+        then
+          echo_error "missing value for $1"
+          return 2
+        fi
+        DEBUG_FLAGS+=("$1=$2")
+        add_skip_modem_init_pattern "$2"
+        shift 2
+        continue
+        ;;
+      --skip-modem-init=*)
+        local pattern
+        pattern="${1#*=}"
+        if [[ -z "$pattern" ]]
+        then
+          echo_error "missing value for --skip-modem-init"
+          return 2
+        fi
+        DEBUG_FLAGS+=("--skip-modem-init=$pattern")
+        add_skip_modem_init_pattern "$pattern"
+        shift
         continue
         ;;
       -h|--help)
