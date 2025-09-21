@@ -48,6 +48,8 @@ ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
+PULL_NO_RESTART="${PULL_NO_RESTART:-}"
+PULL_HARD_RESET="${PULL_HARD_RESET:-}"
 SKIP_MODEM_INIT_PATTERNS=()
 
 # Token used to render section dividers in fancy modem status output
@@ -216,6 +218,8 @@ Commands:
   read MESSAGE_ID            Show details for a specific SMS
   restart                    Restart modemmanager, issue vendor reset, re-enable modem
   send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
+  pull [--hard] [--no-restart]
+                             Update repository and restart service
   service [ACTION]           Control the ${SCRIPT_NAME} service (start|stop|restart|status)
   smsc                       Print modem's configured SMSC number
   status                     Show modem status summary
@@ -316,6 +320,16 @@ Control the $SCRIPT_NAME service.
 USAGE
 }
 
+usage_pull() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] pull [--hard] [--no-restart]
+
+Updates the $SCRIPT_NAME repository via git pull. With --hard, runs
+git reset --hard before pulling. Use --no-restart to skip restarting the
+service after pulling.
+USAGE
+}
+
 usage_status() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-a|--all] [-j|--json] [-r|--raw]
@@ -387,6 +401,7 @@ print_subcommand_usage() {
     enable)  usage_enable  ;;
     status)  usage_status  ;;
     reset)   usage_reset   ;;
+    pull)    usage_pull    ;;
     service) usage_service ;;
     watch)   usage_watch   ;;
     number)  usage_number  ;;
@@ -399,7 +414,7 @@ is_command_token() {
   local token="$1"
 
   case "$token" in
-    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|service|svc|watch|w|smsc|help)
+    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|pull|service|svc|watch|w|smsc|help)
       return 0
       ;;
   esac
@@ -943,6 +958,60 @@ parse_service_args() {
   return 0
 }
 
+parse_pull_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage pull
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --hard)
+        DEBUG_FLAGS+=("$1")
+        PULL_HARD_RESET=1
+        shift
+        continue
+        ;;
+      --no-restart)
+        DEBUG_FLAGS+=("$1")
+        PULL_NO_RESTART=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
 parse_status_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1274,6 +1343,10 @@ parse_command_args() {
       ;;
     enable)
       parse_enable_args "$@"
+      return $?
+      ;;
+    pull)
+      parse_pull_args "$@"
       return $?
       ;;
     service)
@@ -2337,6 +2410,40 @@ mmsms_logread() {
 
 mmsms_service_action() {
   "/etc/init.d/${SCRIPT_NAME}" "$@"
+}
+
+mmsms_repo_pull() {
+  if [[ -n "$PULL_HARD_RESET" ]]
+  then
+    echo_info "Resetting repository (git reset --hard)"
+    if ! git reset --hard
+    then
+      echo_error "git reset --hard failed"
+      return 1
+    fi
+  fi
+
+  echo_info "Pulling latest changes"
+  if ! git pull
+  then
+    echo_error "git pull failed"
+    return 1
+  fi
+
+  if [[ -n "$PULL_NO_RESTART" ]]
+  then
+    echo_debug "Skipping service restart (--no-restart)"
+    return 0
+  fi
+
+  echo_info "Restarting $SCRIPT_NAME service"
+  if ! mmsms_service_action restart
+  then
+    echo_error "failed to restart $SCRIPT_NAME service"
+    return 1
+  fi
+
+  return 0
 }
 
 format_at_response() {
@@ -4677,7 +4784,7 @@ command_requires_modem_resolution() {
   local cmd="$1"
 
   case "$cmd" in
-    logs|service)
+    logs|service|pull)
       return 1
       ;;
   esac
@@ -5075,6 +5182,17 @@ main() {
       ;;
     service)
       mmsms_service_action "${CMD_ARGS[@]}"
+      ;;
+    pull)
+      if (( ${#CMD_ARGS[@]} > 0 ))
+      then
+        echo_error "pull does not accept additional arguments"
+        return 2
+      fi
+      if ! mmsms_repo_pull
+      then
+        return 1
+      fi
       ;;
     prune)
       if [[ -n "$SENT_ONLY" && -n "$ALL_MODEMS" ]]
