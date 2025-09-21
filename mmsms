@@ -2079,6 +2079,7 @@ at_command_interactive() {
     return 1
   fi
 
+  echo_info "Starting interactive AT command session with $port (exit with Ctrl-D)"
   socat - "${port},crnl"
 }
 
@@ -4721,7 +4722,6 @@ main() {
       then
         at_command "${CMD_ARGS[@]}"
       else
-        echo_info "Starting interactive AT command session (exit with Ctrl-D)"
         at_command_interactive
       fi
       ;;
