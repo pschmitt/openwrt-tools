@@ -802,15 +802,20 @@ at_command() {
 
   if modemmanager_running_with_debug
   then
-    echo_debug "MM is in debug mode, running AT command using mmcli"
+    echo_debug "MM is in debug mode, running AT command '${cmd}' using mmcli"
 
     local out
     if out="$(mmcli_cmd --command="$cmd" 2>&1)"
     then
+      # TODO is this really working for multiple-line responses?
       resp="$(printf '%s\n' "$out" | \
         sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
 
-      [[ -z "$resp" ]] && return 1
+      if [[ -z "$resp" ]]
+      then
+        echo_warning "'${cmd}': empty AT command response"
+        return 1
+      fi
 
       printf '%s' "$resp"
       return 0
@@ -821,7 +826,7 @@ at_command() {
 
   if ! resp="$(at_command_direct "$cmd")"
   then
-    echo_debug "direct AT command failed"
+    echo_debug "direct AT command failed: '$cmd'"
     return 1
   fi
 
