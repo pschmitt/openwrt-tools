@@ -23,6 +23,11 @@ CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
 AT_FALLBACK_MAX_READS="${AT_FALLBACK_MAX_READS:-25}"
 AT_FALLBACK_READ_TIMEOUT="${AT_FALLBACK_READ_TIMEOUT:-0.2}"
 
+AT_WAIT_TIMEOUT_DEFAULT="${AT_WAIT_TIMEOUT_DEFAULT:-60}"
+AT_WAIT_SLEEP_INTERVAL="${AT_WAIT_SLEEP_INTERVAL:-2}"
+AT_WAIT_MODEM="${AT_WAIT_MODEM:-}"
+AT_WAIT_TIMEOUT="${AT_WAIT_TIMEOUT:-0}"
+
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 
 WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
@@ -131,9 +136,14 @@ USAGE
 # Subcommand-specific usage helpers (concise, focused on per-command flags)
 usage_at() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] at [COMMAND]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] at [OPTIONS] [COMMAND]
 
 Issue and AT command to the modem's AT port. If COMMAND is omitted, enters interactive mode.
+
+Relevant flags:
+  -w, --wait[=SECONDS]  Wait for the modem AT port before running the command.
+                        Defaults to ${AT_WAIT_TIMEOUT_DEFAULT}s when no value is provided.
+                        Use 0 to wait indefinitely.
 USAGE
 }
 
@@ -377,6 +387,38 @@ parse_at_args() {
         print_subcommand_usage at
         PARSED_ARGS=()
         return 64
+        ;;
+      -w|--wait)
+        AT_WAIT_MODEM=1
+        if [[ ! "$AT_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || (( AT_WAIT_TIMEOUT <= 0 ))
+        then
+          AT_WAIT_TIMEOUT="$AT_WAIT_TIMEOUT_DEFAULT"
+        fi
+        shift
+        if [[ -n "${1:-}" && "${1:-}" =~ ^[0-9]+$ ]]
+        then
+          AT_WAIT_TIMEOUT="$1"
+          shift
+        fi
+        continue
+        ;;
+      -w=*|--wait=*)
+        local wait_value
+        wait_value="${1#*=}"
+        if [[ -z "$wait_value" ]]
+        then
+          echo_error "missing value for --wait"
+          return 2
+        fi
+        if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
+        then
+          echo_error "invalid value for --wait: '$wait_value' (expected integer seconds)"
+          return 2
+        fi
+        AT_WAIT_MODEM=1
+        AT_WAIT_TIMEOUT="$wait_value"
+        shift
+        continue
         ;;
       --)
         shift
@@ -1424,42 +1466,99 @@ log_modem_details() {
 }
 
 get_modem_at_port() {
-  local json port
+  local wait_enabled="$AT_WAIT_MODEM"
+  local wait_timeout="$AT_WAIT_TIMEOUT"
+  local sleep_interval="$AT_WAIT_SLEEP_INTERVAL"
+
+  if [[ ! "$wait_timeout" =~ ^[0-9]+$ ]]
+  then
+    wait_timeout=0
+  fi
+
+  if [[ ! "$sleep_interval" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+  then
+    sleep_interval=2
+  fi
 
   echo_debug "Resolving modem AT port for '$MODEM'"
-  if ! json="$(mmcli -m "$MODEM" -J)"
-  then
-    echo_debug "get_modem_at_port: failed to query modem JSON"
-    return 1
-  fi
 
-  port="$(jq -r '
-    ((.modem.generic.ports // [])
-      | map(select(startswith("at")) | (split(" ")[0]))
-      | .[0])
-    // (.modem.generic["primary-port"] // empty)
-  ' <<<"$json")"
+  local wait_started=$SECONDS
+  local wait_logged=0
+  local err="no AT port detected for modem '$MODEM'"
 
-  if [[ -z "$port" ]]
-  then
-    echo_error "no AT port detected for modem '$MODEM'"
-    return 1
-  fi
+  while :
+  do
+    local mmcli_out="" json="" port=""
 
-  if [[ "$port" != /* ]]
-  then
-    port="/dev/$port"
-  fi
+    if ! mmcli_out="$(mmcli -m "$MODEM" -J 2>&1)"
+    then
+      echo_debug "get_modem_at_port: mmcli failed: ${mmcli_out//$'\n'/ }"
+      err="failed to query modem JSON"
+    else
+      json="$mmcli_out"
+      port="$(jq -r '
+        def normalize_port:
+          if . == null or . == "" then ""
+          elif startswith("/") then .
+          else "/dev/" + .
+          end;
+        ((.modem.generic.ports // [])
+          | map(select(test("\\(at\\)"; "i")) | split(" ")[0] | normalize_port)
+          | map(select(. != ""))
+          | .[0])
+        // ((.modem.generic["primary-port"] // "") | normalize_port)
+      ' <<<"$json")"
 
-  echo_debug "resolved modem '$MODEM' AT port to '${port}'"
+      if [[ "$port" == "null" ]]
+      then
+        port=""
+      fi
 
-  if [[ ! -e "$port" ]]
-  then
-    echo_error "modem '$MODEM' AT port '$port' does not exist"
-    return 1
-  fi
+      if [[ -n "$port" ]]
+      then
+        echo_debug "resolved modem '$MODEM' AT port candidate '${port}'"
+        if [[ -e "$port" ]]
+        then
+          echo_debug "resolved modem '$MODEM' AT port to '${port}'"
+          printf '%s' "$port"
+          return 0
+        fi
+        err="modem '$MODEM' AT port '$port' does not exist"
+      else
+        err="no AT port detected for modem '$MODEM'"
+      fi
+    fi
 
-  printf '%s' "$port"
+    if [[ -z "$wait_enabled" ]]
+    then
+      echo_error "$err"
+      return 1
+    fi
+
+    if (( wait_logged == 0 ))
+    then
+      if (( wait_timeout > 0 ))
+      then
+        echo_info "waiting for modem '$MODEM' AT port (timeout ${wait_timeout}s)"
+      else
+        echo_info "waiting for modem '$MODEM' AT port"
+      fi
+      wait_logged=1
+      wait_started=$SECONDS
+    fi
+
+    if (( wait_timeout > 0 ))
+    then
+      local elapsed=$(( SECONDS - wait_started ))
+      if (( elapsed >= wait_timeout ))
+      then
+        echo_error "$err"
+        return 1
+      fi
+    fi
+
+    sleep "$sleep_interval"
+  done
 }
 
 at_command_direct() {
@@ -3648,6 +3747,9 @@ get_smsc_number() {
 
 modem_status_single() {
   local json state power reg signal carrier own smsc mid_label
+  local manufacturer="" model="" plugin="" primary_port="" ports_display="" ports_json="[]" at_port=""
+  local country_code="" country_label="" country_display="unknown"
+  local info_tsv=""
 
   if ! json="$(mmcli_cmd -J)"
   then
@@ -3698,6 +3800,45 @@ modem_status_single() {
   carrier="$(jq -r '(.modem["3gpp"]["operator-name"] // .modem["3gpp"]["operator-code"] // .modem.cdma.sid // empty)' <<<"$json")"
   own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
 
+  info_tsv="$(jq -r '
+    def normalize_port:
+      if . == null or . == "" then ""
+      elif startswith("/") then .
+      else "/dev/" + .
+      end;
+
+    (.modem.generic.ports // []) as $ports
+    | [
+        (.modem.generic.manufacturer // ""),
+        (.modem.generic.model // ""),
+        (.modem.generic.plugin // ""),
+        ((.modem.generic["primary-port"] // "") | normalize_port),
+        ($ports
+          | map(split(" ")[0] | normalize_port)
+          | map(select(. != ""))
+          | join(", ")),
+        ($ports
+          | map(split(" ")[0] | normalize_port)
+          | map(select(. != ""))
+          | @json),
+        ($ports
+          | map(select(test("\\(at\\)"; "i")) | split(" ")[0] | normalize_port)
+          | map(select(. != ""))
+          | .[0] // "")
+      ]
+    | @tsv
+  ' <<<"$json")"
+
+  if [[ -n "$info_tsv" ]]
+  then
+    IFS=$'\t' read -r manufacturer model plugin primary_port ports_display ports_json at_port <<<"$info_tsv"
+  fi
+
+  if [[ -z "$ports_json" ]]
+  then
+    ports_json="[]"
+  fi
+
   if [[ -z "$state" ]]
   then
     state=unknown
@@ -3721,12 +3862,53 @@ modem_status_single() {
     carrier=unknown
   fi
   own="$(ensure_plus "$own")"
+  local own_for_country="$own"
   if [[ -z "$own" ]]
   then
     own=unknown
   else
     OWN_NUMBER="$own"
   fi
+
+  if [[ "$own_for_country" == +* ]]
+  then
+    country_code="$(phone_cc "$own_for_country")"
+    if [[ "$country_code" == "--" || -z "$country_code" ]]
+    then
+      country_code=""
+    else
+      country_label="$(cc_to_label "$country_code")"
+      if [[ "$country_label" == "--" ]]
+      then
+        country_label=""
+      fi
+    fi
+  fi
+
+  if [[ -n "$country_code" ]]
+  then
+    if [[ -n "$country_label" && "$country_label" != "$country_code" ]]
+    then
+      country_display="$country_label (+$country_code)"
+    else
+      country_display="+$country_code"
+    fi
+  else
+    country_display="unknown"
+  fi
+
+  local manufacturer_display="$manufacturer"
+  [[ -n "$manufacturer_display" ]] || manufacturer_display="unknown"
+  local model_display="$model"
+  [[ -n "$model_display" ]] || model_display="unknown"
+  local plugin_display="$plugin"
+  [[ -n "$plugin_display" ]] || plugin_display="unknown"
+  local primary_port_display="$primary_port"
+  [[ -n "$primary_port_display" ]] || primary_port_display="unknown"
+  local at_port_display_value="$at_port"
+  [[ -n "$at_port_display_value" ]] || at_port_display_value="unknown"
+  local ports_display_pretty="$ports_display"
+  [[ -n "$ports_display_pretty" ]] || ports_display_pretty="unknown"
 
   # Derive SMSC (may use OWN_NUMBER or config); do not fail hard if empty
   smsc="$(get_smsc_number)"
@@ -3740,6 +3922,11 @@ modem_status_single() {
   then
     local sig_num_json
     sig_num_json="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
+    local ports_json_arg="$ports_json"
+    if [[ -z "$ports_json_arg" ]]
+    then
+      ports_json_arg="[]"
+    fi
     jq -n \
       --arg mid "$mid_label" \
       --arg state "$state" \
@@ -3749,7 +3936,32 @@ modem_status_single() {
       --arg phone "$own" \
       --arg smsc "$smsc" \
       --arg sig "$sig_num_json" \
-      '{modem_id: ($mid|tonumber?), state:$state, power:$power, registered:$registered, carrier:$carrier, phone:$phone, smsc:$smsc, signal: ($sig|tonumber?)}'
+      --arg manufacturer "$manufacturer" \
+      --arg model "$model" \
+      --arg plugin "$plugin" \
+      --arg primary "$primary_port" \
+      --arg at_port "$at_port" \
+      --arg country_code "$country_code" \
+      --arg country_label "$country_label" \
+      --argjson ports "$ports_json_arg" \
+      '{
+        modem_id: ($mid|tonumber?),
+        state: $state,
+        power: $power,
+        registered: $registered,
+        carrier: $carrier,
+        phone: $phone,
+        smsc: $smsc,
+        signal: ($sig|tonumber?),
+        manufacturer: (if $manufacturer == "" then null else $manufacturer end),
+        model: (if $model == "" then null else $model end),
+        plugin: (if $plugin == "" then null else $plugin end),
+        primary_port: (if $primary == "" then null else $primary end),
+        at_port: (if $at_port == "" then null else $at_port end),
+        ports: $ports,
+        country_code: (if $country_code == "" then null else ($country_code|tonumber?) end),
+        country: (if $country_label == "" then null else $country_label end)
+      }'
     return 0
   fi
 
@@ -3772,7 +3984,7 @@ modem_status_single() {
     }
 
     # Choose colors
-    local state_color power_color reg_color sig_color carrier_color phone_color smsc_color
+    local state_color power_color reg_color sig_color carrier_color phone_color smsc_color info_color country_color
     case "${state,,}" in
       connected|registered|enabled|online|on) state_color='1;32';;   # bold green
       searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
@@ -3815,6 +4027,8 @@ modem_status_single() {
     carrier_color='1;34' # bold blue
     phone_color='1;34'
     smsc_color='1;34'
+    info_color='1;34'
+    country_color="$phone_color"
 
     printf 'modem state: %s\n' "$(colorize "$state_color" "$state")"
     printf 'power: %s\n' "$(colorize "$power_color" "$power")"
@@ -3823,6 +4037,13 @@ modem_status_single() {
     printf 'carrier: %s\n' "$(colorize "$carrier_color" "$carrier")"
     printf 'phone: %s\n' "$(colorize "$phone_color" "$own")"
     printf 'smsc: %s\n' "$(colorize "$smsc_color" "$smsc")"
+    printf 'manufacturer: %s\n' "$(colorize "$info_color" "$manufacturer_display")"
+    printf 'model: %s\n' "$(colorize "$info_color" "$model_display")"
+    printf 'plugin: %s\n' "$(colorize "$info_color" "$plugin_display")"
+    printf 'primary port: %s\n' "$(colorize "$info_color" "$primary_port_display")"
+    printf 'at port: %s\n' "$(colorize "$info_color" "$at_port_display_value")"
+    printf 'ports: %s\n' "$(colorize "$info_color" "$ports_display_pretty")"
+    printf 'country: %s\n' "$(colorize "$country_color" "$country_display")"
   fi
 
   return 0
