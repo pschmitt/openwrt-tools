@@ -3095,11 +3095,7 @@ modem_reset_all() {
   do
     [[ -z "$mid" ]] && continue
     echo_info "resetting modem $mid"
-    (
-      # shellcheck disable=SC2030
-      local MODEM="$mid"
-      modem_reset || echo_error "failed to reset modem $mid"
-    )
+    MODEM="$mid" modem_reset || echo_error "failed to reset modem $mid"
   done
 }
 
@@ -3432,9 +3428,8 @@ modem_status_single() {
         for mid in "${mids[@]}"
         do
           [[ -z "$mid" ]] && continue
-          local MODEM="$mid"
           local raw
-          if raw="$(mmcli_cmd -J)"
+          if raw="$(MODEM="$mid" mmcli_cmd -J)"
           then
             raw_items+=("$raw")
           fi
