@@ -287,10 +287,6 @@ print_subcommand_usage() {
   esac
 }
 
-error() {
-  echo_error "$SCRIPT_NAME: $*"
-}
-
 # Map selector to a country calling code (digits) for a small set
 # Supports: fr (France=33), de (Germany=49), us/usa (United States=1)
 country_to_cc() {
@@ -827,7 +823,7 @@ at_command_interactive() {
 }
 
 logread_mmsms() {
-  echo_info "logread args: $*"
+  echo_debug "logread args: $*"
   logread -e mmsms "$@"
 }
 
@@ -921,7 +917,7 @@ get_modem_id() {
   local list_json ids id json
   if ! list_json="$(mmcli -L -J)"
   then
-    error "could not query modem list via mmcli"
+    echo_error "could not query modem list via mmcli"
     return 1
   fi
 
@@ -929,7 +925,7 @@ get_modem_id() {
   mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json")
   if (( ${#ids[@]} == 0 ))
   then
-    error "no modems detected"
+    echo_error "no modems detected"
     return 1
   fi
 
@@ -1036,7 +1032,7 @@ get_modem_id() {
   fi
 
   # Helper to show available modems for disambiguation
-  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
+  echo_echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
   echo_info "Available modems:" >&2
 
   for id in "${ids[@]}"
@@ -1146,7 +1142,7 @@ sms_send() {
   then
     if [[ -t 0 ]]
     then
-      error "no SMS text provided"
+      echo_error "no SMS text provided"
       return 2
     fi
     text="$(cat)"
@@ -1165,7 +1161,7 @@ sms_send() {
     recipient="$(resolve_default_recipient "$MODEM")"
     if [[ -z "$recipient" ]]
     then
-      error "no recipient specified and no DEFAULT_RECIPIENT configured for this modem/country"
+      echo_error "no recipient specified and no DEFAULT_RECIPIENT configured for this modem/country"
       return 2
     fi
     recipient_was_default=1
@@ -1195,7 +1191,7 @@ sms_send() {
 
   if [[ -z "$text" ]]
   then
-    error "no SMS text provided"
+    echo_error "no SMS text provided"
     return 2
   fi
 
@@ -1212,14 +1208,14 @@ sms_send() {
   local tmpfile
   if ! tmpfile="$(mktemp "${TMPDIR:-/tmp}/mmsms-text.XXXXXX")"
   then
-    error "failed to create temporary file for SMS text"
+    echo_error "failed to create temporary file for SMS text"
     return 1
   fi
 
   if ! printf '%s' "$text" >"$tmpfile"
   then
     rm -f "$tmpfile"
-    error "failed to write SMS text to temporary file"
+    echo_error "failed to write SMS text to temporary file"
     return 1
   fi
 
@@ -1264,7 +1260,7 @@ sms_send() {
     then
       if (( create_attempt == max_attempts ))
       then
-        error "failed to create SMS after $max_attempts attempts"
+        echo_error "failed to create SMS after $max_attempts attempts"
         rm -f "$tmpfile"
         return 1
       fi
@@ -1283,7 +1279,7 @@ sms_send() {
     then
       if (( create_attempt == max_attempts ))
       then
-        error "failed to create SMS after $max_attempts attempts"
+        echo_error "failed to create SMS after $max_attempts attempts"
         rm -f "$tmpfile"
         return 1
       fi
@@ -1310,7 +1306,7 @@ sms_send() {
 
     if (( send_attempt == max_attempts ))
     then
-      error "failed to send SMS after $max_attempts attempts"
+      echo_error "failed to send SMS after $max_attempts attempts"
       break
     fi
 
@@ -1515,7 +1511,7 @@ sms_prune_all() {
     echo_info "deleting SMS $sms_id ($i/$total)"
     if ! mmcli_cmd --messaging-delete-sms="$sms_id"
     then
-      error "failed to delete SMS $sms_id"
+      echo_error "failed to delete SMS $sms_id"
     fi
   done
 }
@@ -1575,7 +1571,7 @@ sms_prune_sent_modems() {
 
   if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
-    error "failed to list modems for pruning"
+    echo_error "failed to list modems for pruning"
     return 1
   fi
 
@@ -1589,7 +1585,7 @@ sms_prune_sent_modems() {
   do
     [[ -z "$mid" ]] && continue
     echo_info "pruning sent messages on modem $mid"
-    MODEM=$mid sms_prune_sent || error "failed to prune sent messages on modem $mid"
+    MODEM=$mid sms_prune_sent || echo_error "failed to prune sent messages on modem $mid"
   done
 }
 
@@ -1597,7 +1593,7 @@ sms_prune_all_modems() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
-    error "failed to list modems for pruning"
+    echo_error "failed to list modems for pruning"
     return 1
   fi
 
@@ -1611,7 +1607,7 @@ sms_prune_all_modems() {
   do
     [[ -z "$mid" ]] && continue
     echo_info "pruning modem $mid"
-    MODEM="$mid" sms_prune_all || error "failed to prune on modem $mid"
+    MODEM="$mid" sms_prune_all || echo_error "failed to prune on modem $mid"
   done
 }
 
@@ -1672,7 +1668,7 @@ sms_list_pretty() {
     local mids mid had_any=""
     if ! mapfile -t mids < <(list_modem_ids_sorted)
     then
-      error "failed to list modems"
+      echo_error "failed to list modems"
       return 1
     fi
 
@@ -1805,7 +1801,7 @@ sms_list_pretty() {
 
   if ! list_json="$(mmcli_cmd --messaging-list-sms -J)"
   then
-    error "failed to list SMS messages"
+    echo_error "failed to list SMS messages"
     return 1
   fi
 
@@ -2096,7 +2092,7 @@ enable_all_modems() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
-    error "failed to list modems to enable"
+    echo_error "failed to list modems to enable"
     return 1
   fi
   if (( ${#mids[@]} == 0 ))
@@ -2156,7 +2152,7 @@ modem_reset() {
   then
     if ! command -v quectel >/dev/null 2>&1
     then
-      error "quectel command not found in PATH"
+      echo_error "quectel command not found in PATH"
       return 1
     fi
 
@@ -2165,7 +2161,7 @@ modem_reset() {
       reset_log "stopping ModemManager"
       if ! "$service" stop
       then
-        error "failed to stop ModemManager service"
+        echo_error "failed to stop ModemManager service"
         return 1
       fi
       do_service=1
@@ -2174,7 +2170,7 @@ modem_reset() {
     reset_log "issuing quectel reset"
     if ! quectel reset
     then
-      error "quectel reset failed"
+      echo_error "quectel reset failed"
       if [[ -n "$do_service" ]]
       then
         reset_warn "attempting to restart ModemManager after reset failure"
@@ -2188,7 +2184,7 @@ modem_reset() {
       reset_log "starting ModemManager"
       if ! "$service" start
       then
-        error "failed to start ModemManager service"
+        echo_error "failed to start ModemManager service"
         return 1
       fi
     fi
@@ -2211,7 +2207,7 @@ modem_reset() {
     sleep 5
     if ! enable_modem "$MODEM"
     then
-      error "failed to enable modem after reset"
+      echo_error "failed to enable modem after reset"
       return 1
     fi
   fi
@@ -2223,7 +2219,7 @@ modem_reset_all() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
-    error "failed to list modems to reset"
+    echo_error "failed to list modems to reset"
     return 1
   fi
   if (( ${#mids[@]} == 0 ))
@@ -2238,7 +2234,7 @@ modem_reset_all() {
     (
       # shellcheck disable=SC2030
       local MODEM="$mid"
-      modem_reset || error "failed to reset modem $mid"
+      modem_reset || echo_error "failed to reset modem $mid"
     )
   done
 }
@@ -2432,7 +2428,7 @@ modem_status_single() {
   then
     if [[ -z $QUIET ]]
     then
-      error "failed to query modem status"
+      echo_error "failed to query modem status"
     fi
     return 1
   fi
@@ -2616,7 +2612,7 @@ modem_status() {
     local mids mid
     if ! mapfile -t mids < <(list_modem_ids_sorted)
     then
-      error "failed to list modems"
+      echo_error "failed to list modems"
       return 1
     fi
     if (( ${#mids[@]} == 0 ))
@@ -2669,16 +2665,16 @@ modem_number() {
     local load_rc=$?
     if (( load_rc == 1 ))
     then
-      error "could not query modem for own number"
+      echo_error "could not query modem for own number"
     else
-      error "modem did not report own number"
+      echo_error "modem did not report own number"
     fi
     return 1
   fi
 
   if [[ -z "$OWN_NUMBER" ]]
   then
-    error "modem did not report own number"
+    echo_error "modem did not report own number"
     return 2
   fi
 
@@ -2918,7 +2914,7 @@ main() {
       -m|--modem)
         if (( $# < 2 ))
         then
-          error "missing value for $1"
+          echo_error "missing value for $1"
           return 2
         fi
         DEBUG_FLAGS+=("${opt}=$2")
@@ -2960,12 +2956,12 @@ main() {
       -R|--retry)
         if (( $# < 2 ))
         then
-          error "missing value for $1"
+          echo_error "missing value for $1"
           return 2
         fi
         if [[ ! "$2" =~ ^[0-9]+$ ]]
         then
-          error "--retry requires a non-negative integer"
+          echo_error "--retry requires a non-negative integer"
           return 2
         fi
         DEBUG_FLAGS+=("${opt}=$2")
@@ -2996,7 +2992,7 @@ main() {
       -c|--config)
         if (( $# < 2 ))
         then
-          error "missing value for $1"
+          echo_error "missing value for $1"
           return 2
         fi
         DEBUG_FLAGS+=("${opt}=$2")
@@ -3185,13 +3181,13 @@ main() {
         -R|--retry)
           if (( i + 1 >= ${#ARGS[@]} ))
           then
-            error "missing value for ${ARGS[i]}"
+            echo_error "missing value for ${ARGS[i]}"
             return 2
           fi
           local _retry=${ARGS[i+1]}
           if [[ ! "$_retry" =~ ^[0-9]+$ ]]
           then
-            error "--retry requires a non-negative integer"
+            echo_error "--retry requires a non-negative integer"
             return 2
           fi
           DEBUG_FLAGS+=("${ARGS[i]}=${_retry}")
@@ -3246,7 +3242,7 @@ main() {
 
   if [[ "$command" == -* ]]
   then
-    error "unknown option: $command"
+    echo_error "unknown option: $command"
     usage >&2
     return 2
   fi
@@ -3375,14 +3371,15 @@ main() {
       sms_list_pretty
       ;;
     logs)
-      logread_mmsms "${ARGS[@]}" "${CMD_ARGS[@]}"
+      # FIXME The passed args are always empty
+      logread_mmsms "${ARGS[@]}"
       ;;
     read)
       if (( ${#ARGS[@]} < 1 ))
       then
-        error "No SMS ID/path specified"
+        echo_error "No SMS ID/path specified"
         # Show the message list in the same pretty/JSON/raw style
-        sms_list_pretty || error "failed to list SMS messages"
+        sms_list_pretty || echo_error "failed to list SMS messages"
         return 1
       fi
       if [[ -n "$RAW_OUTPUT" ]]
@@ -3440,13 +3437,13 @@ main() {
       # Config already sourced earlier; ensure whitelist is populated
       if (( ${#SMS_WHITELIST[@]} == 0 ))
       then
-        error "watch requires at least one whitelisted number (SMS_WHITELIST)"
+        echo_error "watch requires at least one whitelisted number (SMS_WHITELIST)"
         return 2
       fi
       watch_messages
       ;;
     *)
-      error "unknown command: $command"
+      echo_error "unknown command: $command"
       usage >&2
       return 2
       ;;
