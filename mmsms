@@ -3745,7 +3745,7 @@ watch_handle_sms() {
     sender_cc="$(phone_cc_label "$sender")"
     echo_info "received message={id='$id' sender='$sender' (cc='$sender_cc') recipient='$log_recipient' text='$log_text'}"
 
-    local sender_whitelisted=0
+    local sender_whitelisted
     if watch_in_whitelist "$sender"
     then
       sender_whitelisted=1
@@ -3754,7 +3754,7 @@ watch_handle_sms() {
     local handled=0
     if [[ "$text" == "!"* ]]
     then
-      if (( sender_whitelisted ))
+      if [[ -n $sender_whitelisted ]]
       then
         local cmd="${text#!}"
         # remove leading ws
@@ -3799,6 +3799,7 @@ watch_handle_sms() {
       else
         code="${resp##*$'\n'}"
         body="${resp%$'\n'*}"
+
         if [[ "$code" =~ ^[0-9]{3}$ ]]
         then
           log_body="$(abbrev_text_for_log "$body")"
@@ -3806,6 +3807,7 @@ watch_handle_sms() {
           code="n/a"
           log_body="$(abbrev_text_for_log "$resp")"
         fi
+
         if [[ "$code" =~ ^2 ]]
         then
           echo_info "webhook response code='$code' body='$log_body'"
@@ -3817,7 +3819,7 @@ watch_handle_sms() {
 
     if (( WATCH_DELETE_AFTER == 1 ))
     then
-      if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1
+      if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null
       then
         echo_warning "failed to delete processed SMS $id"
       else
