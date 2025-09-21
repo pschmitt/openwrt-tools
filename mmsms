@@ -1591,6 +1591,47 @@ configure_modem_vendor() {
   esac
 }
 
+reset_quectel_modem() {
+  reset_log "quectel: sending AT+QPOWD=0"
+
+  local resp=""
+  if ! resp="$(at_command 'AT+QPOWD=0')"
+  then
+    echo_error "quectel reset failed"
+  fi
+
+  local formatted_resp
+  formatted_resp="$(format_at_response "$resp")"
+  reset_log "quectel: AT+QPOWD=0 -> $formatted_resp"
+
+  return 0
+}
+
+reset_modem_vendor() {
+  local info_json="${1:-}"
+  local vendor="${2:-}"
+
+  if [[ -z "$vendor" ]]
+  then
+    if [[ -z "$info_json" ]]
+    then
+      return 0
+    fi
+    if ! vendor="$(modem_vendor_from_info_json "$info_json")"
+    then
+      return 0
+    fi
+  fi
+
+  case "$vendor" in
+    quectel)
+      reset_quectel_modem
+      ;;
+  esac
+
+  return 0
+}
+
 # Resolve default recipient based on modem/country-specific variables.
 # Order:
 #  - DEFAULT_RECIPIENT_<LABEL> (US/FR/DE)
@@ -3060,19 +3101,7 @@ modem_reset() {
     fi
   fi
 
-  if [[ "$vendor" == quectel ]]
-  then
-    reset_log "quectel: sending AT+QPOWD=0"
-    local resp
-    if ! resp="$(at_command 'AT+QPOWD=0')"
-    then
-      echo_error "quectel reset failed"
-    fi
-
-    local formatted_resp
-    formatted_resp="$(format_at_response "$resp")"
-    reset_log "quectel: AT+QPOWD=0 -> $formatted_resp"
-  fi
+  reset_modem_vendor "$info_json" "$vendor"
 
   if [[ -n "$HARD_RESET" && -n "$has_service" ]]
   then
