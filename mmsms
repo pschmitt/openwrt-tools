@@ -703,13 +703,12 @@ configure_huawei_modem() {
 
 configure_modem_vendor() {
   local info_json="$1"
+
   local plugin manufacturer
   plugin="$(jq -r '.modem.generic.plugin // ""' <<<"$info_json")"
   manufacturer="$(jq -r '.modem.generic.manufacturer // ""' <<<"$info_json")"
-  local lower_plugin="${plugin,,}"
-  local lower_manufacturer="${manufacturer,,}"
 
-  if [[ "$lower_plugin" == huawei || "$lower_manufacturer" == huawei* ]]
+  if [[ "${plugin,,}" == huawei || "${manufacturer,,}" == huawei* ]]
   then
     configure_huawei_modem
   fi
