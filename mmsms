@@ -1047,7 +1047,7 @@ get_modem_id() {
   fi
 
   # Helper to show available modems for disambiguation
-  echo_echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
+  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)" >&2
   echo_info "Available modems:" >&2
 
   for id in "${ids[@]}"
