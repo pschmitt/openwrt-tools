@@ -120,8 +120,10 @@ Options:
   -h, --help            Show this help and exit
 
 Commands:
+  at [AT_COMMAND]            Issue AT command to modem (interactive if no COMMAND)
   enable                     Wait for ModemManager and enable the modem
   list                       List SMS messages on the modem
+  logs [LOGREAD_ARGS]        Show log entries from logread
   number|phone               Print modem's own phone number
   prune                      Delete all SMS messages from the modem
   read MESSAGE_ID            Show details for a specific SMS
@@ -168,6 +170,14 @@ Relevant flags:
   -a, --all    Include messages from all modems
   -j, --json   Output custom JSON array
   -r, --raw    Output raw mmcli objects array
+USAGE
+}
+
+usage_logs() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] logs [LOGREAD_ARGS]
+
+Prints $SCRIPT_NAME-related log entries from logread (if available). Extra args passed to logread.
 USAGE
 }
 
@@ -264,6 +274,7 @@ print_subcommand_usage() {
     at)     usage_at     ;;
     send)   usage_send   ;;
     list)   usage_list   ;;
+    logs)   usage_logs   ;;
     read)   usage_read   ;;
     prune)  usage_prune  ;;
     enable) usage_enable ;;
@@ -813,6 +824,11 @@ at_command_interactive() {
   fi
 
   socat - "${port},crnl"
+}
+
+logread_mmsms() {
+  echo_info "logread args: $*"
+  logread -e mmsms "$@"
 }
 
 format_at_response() {
@@ -3037,8 +3053,9 @@ main() {
 
   if ! load_config post-args
   then
-    return $?  # load_config already logged details
+    return $?
   fi
+
   if [[ -n "$DEFAULT_MODEM" ]]
   then
     echo_debug "default modem configured: $DEFAULT_MODEM"
@@ -3060,16 +3077,18 @@ main() {
     else
       case "$topic" in
         at|ati) topic="at" ;;
-        s|send) topic="send" ;;
-        l|ls|list) topic="list" ;;
-        r|get|read) topic="read" ;;
         en|enable|start) topic="enable" ;;
-        st|stat|status) topic="status" ;;
-        rst|reset|restart) topic="reset" ;;
-        w|watch) topic="watch" ;;
+        log*) topic="logs" ;;
+        l|ls|list) topic="list" ;;
         number|phone) topic="number" ;;
+        rst|reset|restart) topic="reset" ;;
+        r|get|read) topic="read" ;;
         smsc) topic="smsc" ;;
+        st|stat|status) topic="status" ;;
+        s|send) topic="send" ;;
+        w|watch) topic="watch" ;;
       esac
+
       print_subcommand_usage "$topic"
     fi
     return 0
@@ -3084,6 +3103,9 @@ main() {
       ;;
     list|ls|l|-l)
       command="list"
+      ;;
+    log*)
+      command="logs"
       ;;
     read|get|r)
       command="read"
@@ -3351,6 +3373,9 @@ main() {
       ;;
     list)
       sms_list_pretty
+      ;;
+    logs)
+      logread_mmsms "${ARGS[@]}" "${CMD_ARGS[@]}"
       ;;
     read)
       if (( ${#ARGS[@]} < 1 ))
