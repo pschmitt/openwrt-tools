@@ -40,6 +40,9 @@ HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
 
+PARSED_ARGS=()
+PARSE_SHIFT=0
+
 CONFIG_LOADED=""
 MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
@@ -278,6 +281,845 @@ print_subcommand_usage() {
     number)  usage_number  ;;
     smsc)    usage_smsc    ;;
     *)       usage         ;;
+  esac
+}
+
+is_command_token() {
+  local token="$1"
+
+  case "$token" in
+    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|service|svc|watch|w|smsc|help)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+parse_common_option() {
+  PARSE_SHIFT=0
+  local opt="$1"
+  local value="${2:-}"
+
+  case "$opt" in
+    -m|--modem)
+      if [[ -z "$value" ]]
+      then
+        echo_error "missing value for $opt"
+        return 2
+      fi
+      DEBUG_FLAGS+=("${opt}=$value")
+      MODEM="$value"
+      MODEM_EXPLICIT=1
+      PARSE_SHIFT=2
+      return 0
+      ;;
+    -d|--debug)
+      DEBUG_FLAGS+=("$opt")
+      # shellcheck disable=SC2034
+      DEBUG=1
+      PARSE_SHIFT=1
+      return 0
+      ;;
+    -q|--quiet|--silent)
+      DEBUG_FLAGS+=("$opt")
+      QUIET=1
+      PARSE_SHIFT=1
+      return 0
+      ;;
+    -x|--trace)
+      DEBUG_FLAGS+=("$opt")
+      PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+      set -x
+      PARSE_SHIFT=1
+      return 0
+      ;;
+    -s|--syslog)
+      DEBUG_FLAGS+=("$opt")
+      # shellcheck disable=SC2034
+      ECHO_SYSLOG=1
+      PARSE_SHIFT=1
+      return 0
+      ;;
+    -c|--config)
+      if [[ -z "$value" ]]
+      then
+        echo_error "missing value for $opt"
+        return 2
+      fi
+      DEBUG_FLAGS+=("${opt}=$value")
+      CONFIG_FILE="$value"
+      CONFIG_LOADED=""
+      PARSE_SHIFT=2
+      return 0
+      ;;
+  esac
+
+  PARSE_SHIFT=0
+  return 1
+}
+
+parse_at_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage at
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_send_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage send
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -A|--auto|--auto-recipient)
+        DEBUG_FLAGS+=("$1")
+        AUTO_RECIPIENT=1
+        shift
+        continue
+        ;;
+      -F|--fallback)
+        DEBUG_FLAGS+=("$1")
+        FALLBACK=1
+        shift
+        continue
+        ;;
+      -f|--allow-foreign)
+        DEBUG_FLAGS+=("$1")
+        ALLOW_FOREIGN=1
+        shift
+        continue
+        ;;
+      -R|--retry)
+        if (( $# < 2 ))
+        then
+          echo_error "missing value for $1"
+          return 2
+        fi
+        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        then
+          echo_error "--retry requires a non-negative integer"
+          return 2
+        fi
+        DEBUG_FLAGS+=("$1=$2")
+        SMS_RETRY_COUNT="$2"
+        shift 2
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_list_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage list
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        shift
+        continue
+        ;;
+      -r|--raw)
+        DEBUG_FLAGS+=("$1")
+        RAW_OUTPUT=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_logs_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage logs
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_read_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage read
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        shift
+        continue
+        ;;
+      -r|--raw)
+        DEBUG_FLAGS+=("$1")
+        RAW_OUTPUT=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_prune_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage prune
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -S|--sent)
+        DEBUG_FLAGS+=("$1")
+        SENT_ONLY=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_enable_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage enable
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_service_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage service
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_status_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage status
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        RAW_OUTPUT=""
+        shift
+        continue
+        ;;
+      -r|--raw)
+        DEBUG_FLAGS+=("$1")
+        RAW_OUTPUT=1
+        JSON_OUTPUT=""
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_reset_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage reset
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -H|--hard)
+        DEBUG_FLAGS+=("$1")
+        HARD_RESET=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_watch_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage watch
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -A|--auto|--auto-recipient)
+        DEBUG_FLAGS+=("$1")
+        AUTO_RECIPIENT=1
+        shift
+        continue
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -F|--fallback)
+        DEBUG_FLAGS+=("$1")
+        FALLBACK=1
+        shift
+        continue
+        ;;
+      -f|--allow-foreign)
+        DEBUG_FLAGS+=("$1")
+        ALLOW_FOREIGN=1
+        shift
+        continue
+        ;;
+      -R|--retry)
+        if (( $# < 2 ))
+        then
+          echo_error "missing value for $1"
+          return 2
+        fi
+        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        then
+          echo_error "--retry requires a non-negative integer"
+          return 2
+        fi
+        DEBUG_FLAGS+=("$1=$2")
+        SMS_RETRY_COUNT="$2"
+        shift 2
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_number_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage number
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_smsc_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage smsc
+        PARSED_ARGS=()
+        return 64
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
+parse_command_args() {
+  local command="$1"
+  shift || true
+
+  case "$command" in
+    at)
+      parse_at_args "$@"
+      return $?
+      ;;
+    send)
+      parse_send_args "$@"
+      return $?
+      ;;
+    list)
+      parse_list_args "$@"
+      return $?
+      ;;
+    logs)
+      parse_logs_args "$@"
+      return $?
+      ;;
+    read)
+      parse_read_args "$@"
+      return $?
+      ;;
+    prune)
+      parse_prune_args "$@"
+      return $?
+      ;;
+    enable)
+      parse_enable_args "$@"
+      return $?
+      ;;
+    service)
+      parse_service_args "$@"
+      return $?
+      ;;
+    status)
+      parse_status_args "$@"
+      return $?
+      ;;
+    reset)
+      parse_reset_args "$@"
+      return $?
+      ;;
+    watch)
+      parse_watch_args "$@"
+      return $?
+      ;;
+    number)
+      parse_number_args "$@"
+      return $?
+      ;;
+    smsc)
+      parse_smsc_args "$@"
+      return $?
+      ;;
+    *)
+      PARSED_ARGS=("$@")
+      return 0
+      ;;
   esac
 }
 
@@ -835,8 +1677,7 @@ at_command_interactive() {
 
 mmsms_logread() {
   echo_debug "logread args: $*"
-  # FIXME the -f should come from the args and not be hardcoded
-  logread -e mmsms -f "$@"
+  logread -e mmsms "$@"
 }
 
 mmsms_service_action() {
@@ -2916,14 +3757,13 @@ watch_messages() {
 }
 
 main() {
-  local command
+  local command=""
+  local -a PRE_ARGS=()
   local -a ARGS=()
   local -a DEBUG_FLAGS=()
 
-  # Global options can appear anywhere; collect non-option args into ARGS
   while (( $# > 0 ))
   do
-    local opt="$1"
     case "$1" in
       -m|--modem)
         if (( $# < 2 ))
@@ -2931,77 +3771,38 @@ main() {
           echo_error "missing value for $1"
           return 2
         fi
-        DEBUG_FLAGS+=("${opt}=$2")
+        DEBUG_FLAGS+=("$1=$2")
         MODEM="$2"
         MODEM_EXPLICIT=1
         shift 2
+        continue
         ;;
       -d|--debug)
-        DEBUG_FLAGS+=("${opt}")
+        DEBUG_FLAGS+=("$1")
         # shellcheck disable=SC2034
         DEBUG=1
         shift
-        ;;
-      -j|--json)
-        DEBUG_FLAGS+=("${opt}")
-        JSON_OUTPUT=1
-        shift
-        ;;
-      -r|--raw)
-        DEBUG_FLAGS+=("${opt}")
-        RAW_OUTPUT=1
-        shift
-        ;;
-      -H|--hard)
-        DEBUG_FLAGS+=("${opt}")
-        HARD_RESET=1
-        shift
-        ;;
-      -a|--all)
-        DEBUG_FLAGS+=("${opt}")
-        ALL_MODEMS=1
-        shift
-        ;;
-      -A|--auto|--auto-recipient)
-        DEBUG_FLAGS+=("${opt}")
-        AUTO_RECIPIENT=1
-        shift
-        ;;
-      -R|--retry)
-        if (( $# < 2 ))
-        then
-          echo_error "missing value for $1"
-          return 2
-        fi
-        if [[ ! "$2" =~ ^[0-9]+$ ]]
-        then
-          echo_error "--retry requires a non-negative integer"
-          return 2
-        fi
-        DEBUG_FLAGS+=("${opt}=$2")
-        SMS_RETRY_COUNT="$2"
-        shift 2
-        ;;
-      -S|--sent)
-        DEBUG_FLAGS+=("${opt}")
-        SENT_ONLY=1
-        shift
-        ;;
-      -f|--allow-foreign)
-        DEBUG_FLAGS+=("${opt}")
-        ALLOW_FOREIGN=1
-        shift
+        continue
         ;;
       -q|--quiet|--silent)
-        DEBUG_FLAGS+=("${opt}")
+        DEBUG_FLAGS+=("$1")
         QUIET=1
         shift
+        continue
         ;;
       -x|--trace)
-        DEBUG_FLAGS+=("${opt}")
+        DEBUG_FLAGS+=("$1")
         PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
         set -x
         shift
+        continue
+        ;;
+      -s|--syslog)
+        DEBUG_FLAGS+=("$1")
+        # shellcheck disable=SC2034
+        ECHO_SYSLOG=1
+        shift
+        continue
         ;;
       -c|--config)
         if (( $# < 2 ))
@@ -3009,100 +3810,48 @@ main() {
           echo_error "missing value for $1"
           return 2
         fi
-        DEBUG_FLAGS+=("${opt}=$2")
+        DEBUG_FLAGS+=("$1=$2")
         CONFIG_FILE="$2"
         CONFIG_LOADED=""
         shift 2
-        ;;
-      -F|--fallback)
-        DEBUG_FLAGS+=("${opt}")
-        FALLBACK=1
-        shift
-        ;;
-      -s|--syslog)
-        DEBUG_FLAGS+=("${opt}")
-        # shellcheck disable=SC2034
-        ECHO_SYSLOG=1
-        shift
+        continue
         ;;
       -h|--help)
-        DEBUG_FLAGS+=("${opt}")
-        # If a subcommand is already captured in ARGS, defer help to subcommand usage
-        if (( ${#ARGS[@]} > 0 )) && [[ "${ARGS[0]}" != -* ]]
-        then
-          ARGS+=("$1")
-          shift
-        else
-          usage
-          return 0
-        fi
+        usage
+        return 0
         ;;
       --)
         shift
-        while (( $# > 0 ))
-        do
-          ARGS+=("$1")
-          shift
-        done
         break
         ;;
       *)
-        ARGS+=("$1")
+        if [[ -z "$command" ]] && is_command_token "$1"
+        then
+          command="$1"
+          shift
+          break
+        fi
+        PRE_ARGS+=("$1")
         shift
         ;;
     esac
   done
 
-  if (( ${#ARGS[@]} == 0 ))
+  if [[ -z "$command" && $# -gt 0 ]]
+  then
+    command="$1"
+    shift
+  fi
+
+  ARGS=("${PRE_ARGS[@]}")
+  if (( $# > 0 ))
+  then
+    ARGS+=("$@")
+  fi
+
+  if [[ -z "$command" ]]
   then
     command="status"
-  else
-    command="${ARGS[0]}"
-    ARGS=("${ARGS[@]:1}")
-  fi
-
-  if ! load_config post-args
-  then
-    return $?
-  fi
-
-  if [[ -n "$DEFAULT_MODEM" ]]
-  then
-    echo_debug "default modem configured: $DEFAULT_MODEM"
-  fi
-
-  if [[ -z "$ALL_MODEMS" && -z "$MODEM_EXPLICIT" && -n "$DEFAULT_MODEM" ]]
-  then
-    MODEM="$DEFAULT_MODEM"
-    echo_debug "using default modem $MODEM"
-  fi
-
-  # Support a 'help' command and per-subcommand --help/-h after command
-  if [[ "$command" == "help" ]]
-  then
-    local topic="${ARGS[0]:-}"
-    if [[ -z "$topic" ]]
-    then
-      usage
-    else
-      case "$topic" in
-        at|ati) topic="at" ;;
-        en|enable|start) topic="enable" ;;
-        log*) topic="logs" ;;
-        l|ls|list) topic="list" ;;
-        number|phone) topic="number" ;;
-        rst|reset|restart) topic="reset" ;;
-        r|get|read) topic="read" ;;
-        service|svc) topic="service" ;;
-        smsc) topic="smsc" ;;
-        st|stat|status) topic="status" ;;
-        s|send) topic="send" ;;
-        w|watch) topic="watch" ;;
-      esac
-
-      print_subcommand_usage "$topic"
-    fi
-    return 0
   fi
 
   case "$command" in
@@ -3145,124 +3894,66 @@ main() {
     smsc)
       command="smsc"
       ;;
-  esac
-
-  # Per-subcommand --help/-h anywhere in ARGS
-  for _arg in "${ARGS[@]}"
-  do
-    if [[ "$_arg" == "--help" || "$_arg" == "-h" ]]
-    then
-      print_subcommand_usage "$command"
-      return 0
-    fi
-  done
-  # Per-subcommand --help/-h before any modem resolution/logging
-  if [[ "$command" != "help" ]]
-  then
-    for _arg in "${ARGS[@]}"
-    do
-      if [[ "$_arg" == "--help" || "$_arg" == "-h" ]]
+    help)
+      local topic="${ARGS[0]:-}"
+      if [[ -z "$topic" ]]
       then
-        print_subcommand_usage "$command"
-        return 0
-      fi
-    done
-  fi
+        usage
+      else
+        case "$topic" in
+          at|ati) topic="at" ;;
+          en|enable|start) topic="enable" ;;
+          log*) topic="logs" ;;
+          l|ls|list) topic="list" ;;
+          number|phone) topic="number" ;;
+          rst|reset|restart) topic="reset" ;;
+          r|get|read) topic="read" ;;
+          service|svc) topic="service" ;;
+          smsc) topic="smsc" ;;
+          st|stat|status) topic="status" ;;
+          s|send) topic="send" ;;
+          w|watch) topic="watch" ;;
+        esac
 
-  # Normalize and pull global flags that appear after the subcommand,
-  # while preserving positional args for the subcommand.
-  if (( ${#ARGS[@]} > 0 ))
-  then
-    local -a CMD_ARGS=()
-    local i=0
-    while (( i < ${#ARGS[@]} ))
-    do
-      case "${ARGS[i]}" in
-        -f|--allow-foreign)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          ALLOW_FOREIGN=1
-          i=$((i+1))
-          continue
-          ;;
-        -F|--fallback)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          FALLBACK=1
-          i=$((i+1))
-          continue
-          ;;
-        -A|--auto|--auto-recipient)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          AUTO_RECIPIENT=1
-          i=$((i+1))
-          continue
-          ;;
-        -R|--retry)
-          if (( i + 1 >= ${#ARGS[@]} ))
-          then
-            echo_error "missing value for ${ARGS[i]}"
-            return 2
-          fi
-          local _retry=${ARGS[i+1]}
-          if [[ ! "$_retry" =~ ^[0-9]+$ ]]
-          then
-            echo_error "--retry requires a non-negative integer"
-            return 2
-          fi
-          DEBUG_FLAGS+=("${ARGS[i]}=${_retry}")
-          SMS_RETRY_COUNT="$_retry"
-          i=$((i+2))
-          continue
-          ;;
-        -a|--all)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          ALL_MODEMS=1
-          i=$((i+1))
-          continue
-          ;;
-        -S|--sent)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          SENT_ONLY=1
-          i=$((i+1))
-          continue
-          ;;
-        -c|--config)
-          if (( i + 1 < ${#ARGS[@]} ))
-          then
-            DEBUG_FLAGS+=("${ARGS[i]}=${ARGS[i+1]}")
-            CONFIG_FILE="${ARGS[i+1]}"
-            i=$((i+2))
-            continue
-          fi
-          ;;
-        -s|--syslog)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          # shellcheck disable=SC2034
-          ECHO_SYSLOG=1
-          i=$((i+1))
-          continue
-          ;;
-        --)
-          DEBUG_FLAGS+=("${ARGS[i]}")
-          # Copy the rest verbatim
-          while (( i < ${#ARGS[@]} ))
-          do
-            CMD_ARGS+=("${ARGS[i]}")
-            i=$((i+1))
-          done
-          break
-          ;;
-      esac
-      CMD_ARGS+=("${ARGS[i]}")
-      i=$((i+1))
-    done
-    ARGS=("${CMD_ARGS[@]}")
-  fi
+        print_subcommand_usage "$topic"
+      fi
+      return 0
+      ;;
+  esac
 
   if [[ "$command" == -* ]]
   then
     echo_error "unknown option: $command"
     usage >&2
     return 2
+  fi
+
+  parse_command_args "$command" "${ARGS[@]}"
+  local parse_rc=$?
+  if (( parse_rc == 64 ))
+  then
+    return 0
+  elif (( parse_rc != 0 ))
+  then
+    return $parse_rc
+  fi
+
+  local -a CMD_ARGS=("${PARSED_ARGS[@]}")
+
+  if ! load_config post-args
+  then
+    return $?
+  fi
+
+  if [[ -n "$DEFAULT_MODEM" ]]
+  then
+    echo_debug "default modem configured: $DEFAULT_MODEM"
+  fi
+
+  if [[ -z "$ALL_MODEMS" && -z "$MODEM_EXPLICIT" && -n "$DEFAULT_MODEM" ]]
+  then
+    MODEM="$DEFAULT_MODEM"
+    echo_debug "using default modem $MODEM"
   fi
 
   # Resolve human-friendly modem selector to a concrete id, once
@@ -3352,19 +4043,19 @@ main() {
     printf -v dbg_flags_str '%q ' "${DEBUG_FLAGS[@]}"
     dbg_flags=" flags=${dbg_flags_str%% }"
   fi
-  if (( ${#ARGS[@]} > 0 ))
+  if (( ${#CMD_ARGS[@]} > 0 ))
   then
     local dbg_args_str
-    printf -v dbg_args_str '%q ' "${ARGS[@]}"
+    printf -v dbg_args_str '%q ' "${CMD_ARGS[@]}"
     dbg_args=" args=${dbg_args_str%% }"
   fi
   echo_debug "command=$command${dbg_flags}${dbg_args}"
 
   case "$command" in
     at)
-      if [[ -n ${ARGS[0]} ]]
+      if [[ -n ${CMD_ARGS[0]} ]]
       then
-        at_command "${ARGS[@]}"
+        at_command "${CMD_ARGS[@]}"
       else
         echo_info "Starting interactive AT command session (exit with Ctrl-D)"
         at_command_interactive
@@ -3373,12 +4064,12 @@ main() {
     send)
       if [[ -n "$FALLBACK" ]]
       then
-        if ! sms_send_with_fallback "${ARGS[@]}"
+        if ! sms_send_with_fallback "${CMD_ARGS[@]}"
         then
           return 1
         fi
       else
-        if ! sms_send "${ARGS[@]}"
+        if ! sms_send "${CMD_ARGS[@]}"
         then
           echo_warning "send failed; fallback disabled, not trying other modems"
           return 1
@@ -3389,11 +4080,10 @@ main() {
       sms_list_pretty
       ;;
     logs)
-      # FIXME The passed args are always empty
-      mmsms_logread "${ARGS[@]}"
+      mmsms_logread "${CMD_ARGS[@]}"
       ;;
     read)
-      if (( ${#ARGS[@]} < 1 ))
+      if (( ${#CMD_ARGS[@]} < 1 ))
       then
         echo_error "No SMS ID/path specified"
         # Show the message list in the same pretty/JSON/raw style
@@ -3402,16 +4092,16 @@ main() {
       fi
       if [[ -n "$RAW_OUTPUT" ]]
       then
-        mmcli_cmd --sms "${ARGS[0]}" -J | jq
+        mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq
       elif [[ -n "$JSON_OUTPUT" ]]
       then
-        sms_read_json "${ARGS[0]}"
+        sms_read_json "${CMD_ARGS[0]}"
       else
-        sms_read "${ARGS[@]}"
+        sms_read "${CMD_ARGS[@]}"
       fi
       ;;
     service)
-      mmsms_service_action "${ARGS[@]}"
+      mmsms_service_action "${CMD_ARGS[@]}"
       ;;
     prune)
       if [[ -n "$SENT_ONLY" && -n "$ALL_MODEMS" ]]
@@ -3436,7 +4126,7 @@ main() {
       fi
       ;;
     status)
-      modem_status "$@"
+      modem_status "${CMD_ARGS[@]}"
       ;;
     number)
       modem_number
