@@ -824,7 +824,8 @@ at_command_interactive() {
 
 logread_mmsms() {
   echo_debug "logread args: $*"
-  logread -e mmsms "$@"
+  # FIXME the -f should come from the args and not be hardcoded
+  logread -e mmsms -f "$@"
 }
 
 format_at_response() {
