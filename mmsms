@@ -2325,7 +2325,7 @@ get_modem_id() {
     return 1
   fi
 
-  # FIXME Ambiguous
+  # Ambiguous modem selector, the user is at fault!
   return 2
 }
 
