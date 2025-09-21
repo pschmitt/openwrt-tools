@@ -2911,7 +2911,7 @@ enable_modem() {
         then
           # Capture brief modem details for logging once detection succeeds
           local _brief
-          _brief="$(modem_info_brief "$expect_id" 2>/dev/null)"
+          _brief="$(modem_info_brief "$expect_id")"
           break
         fi
       else
@@ -3192,7 +3192,7 @@ watch_enable_monitor_loop() {
   declare -A enabled_modems=()
   local -a mids=()
 
-  if mapfile -t mids < <(list_modem_ids_sorted 2>/dev/null)
+  if mapfile -t mids < <(list_modem_ids_sorted)
   then
     local mid
     for mid in "${mids[@]}"
@@ -3211,7 +3211,7 @@ watch_enable_monitor_loop() {
   while :
   do
     mids=()
-    if mapfile -t mids < <(list_modem_ids_sorted 2>/dev/null)
+    if mapfile -t mids < <(list_modem_ids_sorted)
     then
       local mid
       for mid in "${mids[@]}"
