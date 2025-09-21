@@ -2775,10 +2775,9 @@ watch_handle_sms() {
       if (( sender_whitelisted ))
       then
         local cmd="${text#!}"
-        while [[ "$cmd" == " "* ]]
-        do
-          cmd="${cmd# }"
-        done
+        # remove leading ws
+        cmd=$(sed -E 's/^[[:space:]]+//' <<< "$cmd")
+
         if [[ -z "$cmd" ]]
         then
           watch_send_reply "$sender" "ERR: empty command"
@@ -2791,6 +2790,7 @@ watch_handle_sms() {
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
           watch_send_reply "$sender" "rc=${WATCH_CMD_RC}\n${output}"
         fi
+
         handled=1
       else
         echo_info "command from $sender ignored (not whitelisted)"
@@ -2813,7 +2813,7 @@ watch_handle_sms() {
       if (( rc != 0 ))
       then
         log_body="$(abbrev_text_for_log "$resp")"
-        echo_warning "webhook delivery error rc=$rc output='$log_body'"
+        echo_warning "webhook delivery error rc='$rc' output='$log_body'"
       else
         code="${resp##*$'\n'}"
         body="${resp%$'\n'*}"
@@ -2826,9 +2826,9 @@ watch_handle_sms() {
         fi
         if [[ "$code" =~ ^2 ]]
         then
-          echo_info "webhook response code=$code body='$log_body'"
+          echo_info "webhook response code='$code' body='$log_body'"
         else
-          echo_warning "webhook response code=$code body='$log_body'"
+          echo_warning "webhook response code='$code' body='$log_body'"
         fi
       fi
     fi
@@ -2838,6 +2838,8 @@ watch_handle_sms() {
       if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null 2>&1
       then
         echo_warning "failed to delete processed SMS $id"
+      else
+        echo_info "deleted processed SMS $id"
       fi
     fi
     return
