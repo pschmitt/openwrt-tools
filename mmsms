@@ -834,6 +834,7 @@ at_command_interactive() {
   local port
   if ! port="$(get_modem_at_port)"
   then
+    echo_error "Failed to determine AT port for modem $MODEM"
     return 1
   fi
 
