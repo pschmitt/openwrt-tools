@@ -98,20 +98,20 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
-  -A, --auto, --auto-recipient  Fallback: if foreign blocked, use modem's default recipient
+  -A, --auto            Fallback: if foreign blocked, use modem's default recipient
   -a, --all             List/Prune/Enable/Reset: operate on all modems
-  -c, --config PATH    Use alternate config file for watch
-  -d, --debug          Enable debug output
+  -c, --config PATH     Use alternate config file for watch
+  -d, --debug           Enable debug output
   -F, --fallback        Send/Watch: on failure, try other modem(s)
-  -f, --allow-foreign  Send: allow sending to foreign country codes
+  -f, --allow-foreign   Send: allow sending to foreign country codes
   -H, --hard            Reset: also stop/start modemmanager (hard reset)
   -j, --json            Output JSON (for list/status/read)
   -m, --modem MODEM     Modem selector or id (default: $MODEM)
-                       Accepts id (e.g. 2), dbus path, 'any', or
-                       a string matching manufacturer/plugin/ttyUSB/phone-number
-                       or country (fr/de/us) or country name (france/germany/us)
+                        Accepts id (e.g. 2), dbus path, 'any', or
+                        a string matching manufacturer/plugin/ttyUSB/phone-number
+                        or country (fr/de/us) or country name (france/germany/us)
   -q, --quiet           Suppress info output (warnings/errors only) and status output (exit code only)
-      --silent         Same as --quiet
+      --silent          Same as --quiet
   -r, --raw             List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
   -R, --retry COUNT     Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
   -s, --syslog          Mirror logs to syslog (in addition to stderr)
@@ -129,6 +129,7 @@ Commands:
   read MESSAGE_ID            Show details for a specific SMS
   restart                    Restart modemmanager, issue quectel reset, re-enable modem
   send RECIPIENT [TEXT|-]    Send SMS; use '-' or stdin for TEXT
+  service [ACTION]           Control the ${SCRIPT_NAME} service (start|stop|restart|status)
   smsc                       Print modem's configured SMSC number
   status                     Show modem status summary
   watch                      Monitor incoming SMS and forward/execute actions
