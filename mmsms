@@ -89,6 +89,17 @@ WATCH_MODEM_MONITOR_PID=""
 WATCH_CMD_RC=0
 MODEM_DETAILS_LOGGED=""
 
+# DIRTYFIX OpenWrt's jq is not compiled with ONIGURUMA
+jq() {
+  if [[ -x /srv/bin/jq ]]
+  then
+    /srv/bin/jq "$@"
+    return $?
+  fi
+
+  command jq "$@"
+}
+
 usage() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
