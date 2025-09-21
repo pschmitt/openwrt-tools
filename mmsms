@@ -45,7 +45,6 @@ AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
 PARSED_ARGS=()
 PARSE_SHIFT=0
 
-CONFIG_LOADED=""
 MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
 
@@ -353,7 +352,6 @@ parse_common_option() {
       fi
       DEBUG_FLAGS+=("${opt}=$value")
       CONFIG_FILE="$value"
-      CONFIG_LOADED=""
       PARSE_SHIFT=2
       return 0
       ;;
@@ -1569,7 +1567,7 @@ modem_vendor_from_info_json() {
 configure_modem_vendor() {
   local info_json="$1"
 
-  local vendor=""
+  local vendor
   if ! vendor="$(modem_vendor_from_info_json "$info_json")"
   then
     return 0
@@ -4068,7 +4066,6 @@ main() {
         fi
         DEBUG_FLAGS+=("$1=$2")
         CONFIG_FILE="$2"
-        CONFIG_LOADED=""
         shift 2
         continue
         ;;
