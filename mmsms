@@ -37,6 +37,7 @@ QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
 HARD_RESET="${HARD_RESET:-}"
+USB_REPLUG="${USB_REPLUG:-}"
 SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
@@ -95,6 +96,7 @@ Options:
   -F, --fallback        Send/Watch: on failure, try other modem(s)
   -f, --allow-foreign   Send: allow sending to foreign country codes
   -H, --hard            Reset: also stop/start modemmanager (hard reset)
+      --replug         Reset: temporarily deauthorize the modem's USB device via sysfs
   -j, --json            Output JSON (for list/status/read)
   -m, --modem MODEM     Modem selector or id (default: $MODEM)
                         Accepts id (e.g. 2), dbus path, 'any', or
@@ -226,13 +228,14 @@ USAGE
 
 usage_reset() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-a|--all] [-H|--hard]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-a|--all] [-H|--hard] [--replug]
 
 Resets the selected modem. Issues vendor-specific resets when supported.
 
 Relevant flags:
   -a, --all    Reset all detected modems
   -H, --hard   Stop/start ModemManager around reset
+      --replug Temporarily deauthorize/reauthorize the modem's USB device
 USAGE
 }
 
@@ -864,6 +867,12 @@ parse_reset_args() {
       -H|--hard)
         DEBUG_FLAGS+=("$1")
         HARD_RESET=1
+        shift
+        continue
+        ;;
+      --replug)
+        DEBUG_FLAGS+=("$1")
+        USB_REPLUG=1
         shift
         continue
         ;;
@@ -1628,6 +1637,183 @@ reset_modem_vendor() {
       reset_quectel_modem
       ;;
   esac
+
+  return 0
+}
+
+usb_sysfs_path_for_port() {
+  local port="$1"
+  local path=""
+  local -a bases=(
+    "/sys/class/tty/$port"
+    "/sys/class/usbmisc/$port"
+    "/sys/class/net/$port"
+  )
+
+  for path in "${bases[@]}"
+  do
+    if [[ -e "$path" ]]
+    then
+      readlink -f "$path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+usb_device_dir_for_path() {
+  local path="$1"
+  local dir="$path"
+
+  while [[ -n "$dir" && "$dir" != "/" ]]
+  do
+    if [[ -f "$dir/idVendor" && -f "$dir/idProduct" ]]
+    then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  return 1
+}
+
+modem_usb_replug() {
+  local info_json="$1"
+
+  if [[ -z "$info_json" ]]
+  then
+    echo_warning "cannot replug USB device: missing modem info"
+    return 1
+  fi
+
+  local -a ports=()
+  local jq_status=0
+  mapfile -t ports < <(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | map(select(length > 0)) | .[]' <<<"$info_json") || jq_status=$?
+
+  if (( jq_status != 0 )) && (( ${#ports[@]} == 0 ))
+  then
+    echo_warning "failed to parse modem ports for USB replug"
+    return 1
+  fi
+
+  if (( ${#ports[@]} == 0 ))
+  then
+    echo_warning "no modem ports reported; cannot replug USB device"
+    return 1
+  fi
+
+  local port=""
+  declare -A seen_dirs=()
+  declare -A dir_ports=()
+  local -a device_dirs=()
+
+  for port in "${ports[@]}"
+  do
+    [[ -n "$port" ]] || continue
+
+    local sys_path=""
+    if ! sys_path="$(usb_sysfs_path_for_port "$port")"
+    then
+      echo_debug "usb replug: unable to resolve sysfs path for port $port"
+      continue
+    fi
+
+    local device_dir=""
+    if ! device_dir="$(usb_device_dir_for_path "$sys_path")"
+    then
+      echo_debug "usb replug: no USB device directory found for port $port ($sys_path)"
+      continue
+    fi
+
+    if [[ -z "${seen_dirs[$device_dir]:-}" ]]
+    then
+      device_dirs+=("$device_dir")
+      seen_dirs["$device_dir"]=1
+    fi
+
+    if [[ -n "${dir_ports[$device_dir]:-}" ]]
+    then
+      dir_ports["$device_dir"]+=" $port"
+    else
+      dir_ports["$device_dir"]="$port"
+    fi
+  done
+
+  if (( ${#device_dirs[@]} == 0 ))
+  then
+    echo_warning "could not resolve USB device backing modem ports (${ports[*]})"
+    return 1
+  fi
+
+  local bind_path="/sys/bus/usb/drivers/usb/bind"
+  local unbind_path="/sys/bus/usb/drivers/usb/unbind"
+  local success=0
+  local device_dir=""
+
+  for device_dir in "${device_dirs[@]}"
+  do
+    local port_list="${dir_ports[$device_dir]# }"
+    local dev_name="$(basename "$device_dir")"
+    local vendor=""
+    local product=""
+
+    if [[ -f "$device_dir/idVendor" ]]
+    then
+      vendor="$(<"$device_dir/idVendor")"
+    fi
+    if [[ -f "$device_dir/idProduct" ]]
+    then
+      product="$(<"$device_dir/idProduct")"
+    fi
+
+    local authorized_path="$device_dir/authorized"
+    if [[ -w "$authorized_path" ]]
+    then
+      reset_log "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??})"
+      if ! printf '0\n' >"$authorized_path"
+      then
+        echo_warning "failed to deauthorize USB device $dev_name"
+        continue
+      fi
+      sleep 2
+      if ! printf '1\n' >"$authorized_path"
+      then
+        echo_warning "failed to reauthorize USB device $dev_name"
+        continue
+      fi
+      sleep 2
+      success=1
+      continue
+    fi
+
+    if [[ -w "$unbind_path" && -w "$bind_path" ]]
+    then
+      reset_log "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??}) via unbind/bind"
+      if ! printf '%s\n' "$dev_name" >"$unbind_path"
+      then
+        echo_warning "failed to unbind USB device $dev_name"
+        continue
+      fi
+      sleep 2
+      if ! printf '%s\n' "$dev_name" >"$bind_path"
+      then
+        echo_warning "failed to bind USB device $dev_name"
+        continue
+      fi
+      sleep 2
+      success=1
+      continue
+    fi
+
+    echo_warning "no supported USB replug control for device $dev_name (ports: ${port_list:-unknown})"
+  done
+
+  if (( success == 0 ))
+  then
+    return 1
+  fi
 
   return 0
 }
@@ -3102,6 +3288,15 @@ modem_reset() {
   fi
 
   reset_modem_vendor "$info_json" "$vendor"
+
+  if [[ -n "$USB_REPLUG" ]]
+  then
+    if ! modem_usb_replug "$info_json"
+    then
+      echo_error "USB replug failed"
+      return 1
+    fi
+  fi
 
   if [[ -n "$HARD_RESET" && -n "$has_service" ]]
   then
