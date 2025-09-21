@@ -4178,7 +4178,7 @@ main() {
     number|phone)
       command="number"
       ;;
-    reset|rst|restart)
+    reset|rst)
       command="reset"
       ;;
     service|svc)
