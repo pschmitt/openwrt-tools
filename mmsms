@@ -790,36 +790,44 @@ resolve_default_recipient() {
   return 1
 }
 
+modemmanager_running_with_debug() {
+  pgrep -a -f 'ModemManager-wrapper.*--debug' &>/dev/null
+}
+
 # Run an AT command via mmcli and return the response string
 # - Strips the leading "response: '...'") wrapper printed by mmcli
 # - If no such wrapper is present, returns raw stdout/stderr as-is
 at_command() {
   local cmd="$1"
-  local out resp
+  local resp
 
-  out="$(mmcli_cmd --command="$cmd" 2>&1)"
-  local rc=$?
-
-  if (( rc == 0 ))
+  if modemmanager_running_with_debug
   then
-    resp="$(printf '%s\n' "$out" | sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
-    if [[ -z "$resp" ]]
+    echo_debug "MM is in debug mode, running AT command using mmcli"
+
+    local out
+    if out="$(mmcli_cmd --command="$cmd" 2>&1)"
     then
-      resp="$out"
+      resp="$(printf '%s\n' "$out" | \
+        sed -n "s/^response: '\(.*\)'$/\1/p" | head -n1)"
+
+      [[ -z "$resp" ]] && return 1
+
+      printf '%s' "$resp"
+      return 0
     fi
-    printf '%s' "$resp"
-    return 0
+
+    echo_debug "mmcli --command='${cmd}' failed, attempting to issue AT command directly"
   fi
 
-  echo_debug "at_command: mmcli --command failed (rc=$rc), attempting direct fallback"
-  if resp="$(at_command_direct "$cmd")"
+  if ! resp="$(at_command_direct "$cmd")"
   then
-    printf '%s' "$resp"
-    return 0
+    echo_debug "direct AT command failed"
+    return 1
   fi
 
-  printf '%s' "$out"
-  return $rc
+  printf '%s' "$resp"
+  return 0
 }
 
 at_command_interactive() {
