@@ -4287,7 +4287,7 @@ main() {
       else
         if ! sms_send "${CMD_ARGS[@]}"
         then
-          echo_warning "send failed; fallback disabled, not trying other modems"
+          echo_warning "send failed. fallback disabled, not trying other modems"
           return 1
         fi
       fi
@@ -4308,7 +4308,7 @@ main() {
       fi
       if [[ -n "$RAW_OUTPUT" ]]
       then
-        mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq
+        mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq -e
       elif [[ -n "$JSON_OUTPUT" ]]
       then
         sms_read_json "${CMD_ARGS[0]}"
