@@ -31,6 +31,7 @@ WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
 WATCH_ENABLE="${WATCH_ENABLE:-}"
 WATCH_ENABLE_POLL_INTERVAL="${WATCH_ENABLE_POLL_INTERVAL:-5}"
+WATCH_PRUNE="${WATCH_PRUNE:-}"
 
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
@@ -237,7 +238,7 @@ USAGE
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-R|--retry COUNT]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT]
 
 Watches incoming SMS and executes reply/webhook logic.
 
@@ -248,6 +249,7 @@ Relevant flags:
   -E, --enable        Enable selected modem(s) when starting watch; keep enabling new modems with --all
   -F, --fallback      When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
+  -P, --prune         Delete existing SMS on startup before watching
   -R, --retry COUNT   Override SMS resend attempts
 USAGE
 }
@@ -934,6 +936,12 @@ parse_watch_args() {
       -f|--allow-foreign)
         DEBUG_FLAGS+=("$1")
         ALLOW_FOREIGN=1
+        shift
+        continue
+        ;;
+      -P|--prune)
+        DEBUG_FLAGS+=("$1")
+        WATCH_PRUNE=1
         shift
         continue
         ;;
@@ -3855,9 +3863,12 @@ watch_messages() {
     fi
   fi
 
-  if ! sms_prune_all_modems
+  if [[ -n "$WATCH_PRUNE" ]]
   then
-    echo_warning "failed to prune existing SMS messages on all modems"
+    if ! sms_prune_all_modems
+    then
+      echo_warning "failed to prune existing SMS messages on all modems"
+    fi
   fi
 
   if [[ -n "$WATCH_ENABLE" ]]
