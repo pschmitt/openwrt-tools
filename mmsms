@@ -45,29 +45,13 @@ MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
 
 load_config() {
-  local origin="${1:-initial}"
+  echo_debug "loading config: $CONFIG_FILE"
 
-  if [[ -n "$CONFIG_LOADED" ]]
+  # shellcheck disable=SC1090
+  if ! source "$CONFIG_FILE"
   then
-    echo_debug "config already loaded ($origin): $CONFIG_FILE"
-    return 0
-  fi
-
-  if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]
-  then
-    echo_debug "loading config ($origin): $CONFIG_FILE"
-    local source_rc=0
-
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE" || source_rc=$?
-
-    if (( source_rc != 0 ))
-    then
-      echo_warning "failed to load config ($origin): $CONFIG_FILE (rc=$source_rc)"
-      return "$source_rc"
-    fi
-
-    CONFIG_LOADED=1
+    echo_warning "failed to load config: $CONFIG_FILE"
+    return 1
   fi
 }
 
@@ -82,7 +66,8 @@ if [[ -n "${SMS_WHITELIST_OVERRIDE:-}" ]]
 then
   # shellcheck disable=SC2206
   SMS_WHITELIST=( ${SMS_WHITELIST_OVERRIDE//,/ } )
-elif (( ${#SMS_WHITELIST[@]} == 0 )) && declare -p SMS_WHITELIST_DEFAULT >/dev/null 2>&1
+elif (( ${#SMS_WHITELIST[@]} == 0 )) && \
+     declare -p SMS_WHITELIST_DEFAULT &>/dev/null
 then
   SMS_WHITELIST=("${SMS_WHITELIST_DEFAULT[@]}")
 fi
@@ -90,7 +75,6 @@ fi
 WATCH_FIFO=""
 WATCH_DBUS_PID=""
 WATCH_CMD_RC=0
-WATCH_CMD_REASON="exit"
 MODEM_DETAILS_LOGGED=""
 
 usage() {
@@ -2383,7 +2367,6 @@ watch_run_command() {
   fi
 
   WATCH_CMD_RC=$rc
-  WATCH_CMD_REASON=$reason
 
   output="${output%$'\n'}"
   if (( ${#output} > CMD_OUTPUT_MAX_LEN ))
@@ -2803,10 +2786,10 @@ watch_handle_sms() {
           echo_info "executing command from $sender: $cmd"
           local output
           output="$(watch_run_command "$cmd")"
-          echo_info "command from $sender finished rc=$WATCH_CMD_RC reason=${WATCH_CMD_REASON:-exit}"
+          echo_info "command from $sender finished rc=$WATCH_CMD_RC"
           # Before sending our reply, prune already-sent messages on this modem
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
-          watch_send_reply "$sender" "rc=$WATCH_CMD_RC (${WATCH_CMD_REASON:-exit})\n$output"
+          watch_send_reply "$sender" "rc=${WATCH_CMD_RC}\n${output}"
         fi
         handled=1
       else
