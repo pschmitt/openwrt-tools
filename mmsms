@@ -721,8 +721,10 @@ configure_modem_vendor() {
 #  - DEFAULT_RECIPIENT
 resolve_default_recipient() {
   local mid="${1:-}"
-  local cc label var val
+
+  local cc
   cc="$(get_home_cc "$mid")"
+
   echo_debug "resolve_default_recipient: mid=${mid:-} cc=${cc:-}"
 
   # Guard: unknown CC → fall back to global default or fail
@@ -739,6 +741,7 @@ resolve_default_recipient() {
     return 1
   fi
 
+  local label
   case "$cc" in
     1) label=US ;;
     33) label=FR ;;
@@ -747,11 +750,12 @@ resolve_default_recipient() {
   esac
 
   # Try label-specific var
+  local var val
   if [[ -n "$label" ]]
   then
     var="DEFAULT_RECIPIENT_${label}"
     echo_debug "resolve_default_recipient: try $var"
-    if declare -p "$var" >/dev/null 2>&1
+    if declare -p "$var" &>/dev/null
     then
       val="${!var}"
       if [[ -n "$val" ]]
@@ -766,7 +770,7 @@ resolve_default_recipient() {
   # Try numeric-CC specific var
   var="DEFAULT_RECIPIENT_${cc}"
   echo_debug "resolve_default_recipient: try $var"
-  if declare -p "$var" >/dev/null 2>&1
+  if declare -p "$var" &>/dev/null
   then
     val="${!var}"
     if [[ -n "$val" ]]
