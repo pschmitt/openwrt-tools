@@ -1103,9 +1103,6 @@ mmcli() {
 }
 
 mmcli_cmd() {
-  # shellcheck disable=SC2031
-  echo_debug "[mmcli] mmcli --modem $MODEM $*"
-  # shellcheck disable=SC2031
   command mmcli --modem "$MODEM" "$@"
 }
 
