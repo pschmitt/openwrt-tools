@@ -914,12 +914,6 @@ at_first_quoted_decoded() {
   printf '%s' "$q"
 }
 
-# Log and run generic mmcli calls (no implicit --modem)
-mmcli() {
-  echo_debug "\$ mmcli $*"
-  command mmcli "$@"
-}
-
 # Resolve a human-friendly modem selector to a concrete modem id
 # - Accepts: numeric id (e.g., 2), D-Bus path, 'any', or a substring
 #   matching manufacturer, plugin, primary-port, or any ttyUSB/wwan port.
@@ -1100,6 +1094,12 @@ get_modem_id() {
 
   # FIXME Ambiguous
   return 2
+}
+
+# Log and run generic mmcli calls (no implicit --modem)
+mmcli() {
+  echo_debug "\$ mmcli $*"
+  command mmcli "$@"
 }
 
 mmcli_cmd() {
