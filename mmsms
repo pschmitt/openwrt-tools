@@ -61,7 +61,7 @@ load_config() {
 }
 
 # Ensure SMS_WHITELIST is defined as an array if provided by the config
-if ! declare -p SMS_WHITELIST >/dev/null 2>&1
+if ! declare -p SMS_WHITELIST &>/dev/null
 then
   SMS_WHITELIST=()
 fi
@@ -3889,10 +3889,8 @@ watch_messages() {
     if [[ "$line" =~ /org/freedesktop/ModemManager1/Modem/([0-9]+) ]]
     then
       current_modem_id="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ "/org/freedesktop/ModemManager1/Modem/"([0-9]+) ]]
-    then
-      current_modem_id="${BASH_REMATCH[1]}"
     fi
+
     if [[ "$line" == *"/org/freedesktop/ModemManager1/SMS/"* ]]
     then
       local local_path="${line#*\"}"
@@ -3944,6 +3942,7 @@ resolve_modem_selection() {
     # get_modem_id already printed context and list
     return 2
   fi
+
   MODEM="$resolved"
 
   if [[ "$MODEM" == "any" ]]
@@ -3959,15 +3958,40 @@ resolve_modem_selection() {
     fi
   fi
 
-  if [[ -z $QUIET ]]
+  if [[ -n $QUIET ]]
   then
-    if [[ "$cmd" == "watch" && -n "$ALL_MODEMS" ]]
+    [[ -n $MODEM ]]
+    return "$?"
+  fi
+
+  if [[ "$cmd" == "watch" && -n "$ALL_MODEMS" ]]
+  then
+    local _ids=()
+    local _id
+    if mapfile -t _ids < <(list_modem_ids_sorted)
     then
-      local _ids=()
-      local _id
-      if mapfile -t _ids < <(list_modem_ids_sorted)
+      echo_info "listening on all modems: ${#_ids[@]} detected"
+      for _id in "${_ids[@]}"
+      do
+        [[ -z "$_id" ]] && continue
+        log_modem_details "$_id"
+      done
+      MODEM_DETAILS_LOGGED=1
+    else
+      echo_info "listening on all modems"
+    fi
+    return 0
+  fi
+
+  if [[ -n "$ALL_MODEMS" ]]
+  then
+    local _ids=()
+    local _id
+    if mapfile -t _ids < <(list_modem_ids_sorted)
+    then
+      if (( ${#_ids[@]} > 0 ))
       then
-        echo_info "listening on all modems: ${#_ids[@]} detected"
+        echo_info "operating on all modems: ${#_ids[@]} detected"
         for _id in "${_ids[@]}"
         do
           [[ -z "$_id" ]] && continue
@@ -3975,46 +3999,25 @@ resolve_modem_selection() {
         done
         MODEM_DETAILS_LOGGED=1
       else
-        echo_info "listening on all modems"
+        echo_info "operating on all modems: none detected"
       fi
     else
-      if [[ -n "$ALL_MODEMS" ]]
-      then
-        local _ids=()
-        local _id
-        if mapfile -t _ids < <(list_modem_ids_sorted)
-        then
-          if (( ${#_ids[@]} > 0 ))
-          then
-            echo_info "operating on all modems: ${#_ids[@]} detected"
-            for _id in "${_ids[@]}"
-            do
-              [[ -z "$_id" ]] && continue
-              log_modem_details "$_id"
-            done
-            MODEM_DETAILS_LOGGED=1
-          else
-            echo_info "operating on all modems: none detected"
-          fi
-        else
-          echo_info "operating on all modems"
-        fi
-      elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
-      then
-        log_modem_details "$MODEM" "selected "
-      else
-        local _info
-        _info="$(modem_info_brief)"
-        if [[ -n "$_info" && "$_info" != "$MODEM" ]]
-        then
-          echo_info "selected modem={$_info}"
-        elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
-        then
-          echo_info "selected modem={id='$MODEM'}"
-        else
-          echo_info "selected modem: any"
-        fi
-      fi
+      echo_info "operating on all modems"
+    fi
+  elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
+  then
+    log_modem_details "$MODEM" "selected "
+  else
+    local _info
+    _info="$(modem_info_brief)"
+    if [[ -n "$_info" && "$_info" != "$MODEM" ]]
+    then
+      echo_info "selected modem={$_info}"
+    elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
+    then
+      echo_info "selected modem={id='$MODEM'}"
+    else
+      echo_info "selected modem: any"
     fi
   fi
 
