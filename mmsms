@@ -575,7 +575,7 @@ log_modem_details() {
 get_modem_at_port() {
   local json port
 
-  echo_debug "AT fallback resolving modem port"
+  echo_debug "Resolving modem AT port for '$MODEM'"
   if ! json="$(mmcli -m "$MODEM" -J)"
   then
     echo_debug "get_modem_at_port: failed to query modem JSON"
@@ -591,7 +591,7 @@ get_modem_at_port() {
 
   if [[ -z "$port" ]]
   then
-    echo_debug "get_modem_at_port: no AT port detected"
+    echo_error "no AT port detected for modem '$MODEM'"
     return 1
   fi
 
@@ -600,11 +600,11 @@ get_modem_at_port() {
     port="/dev/$port"
   fi
 
-  echo_debug "get_modem_at_port: resolved port to $port"
+  echo_debug "resolved modem '$MODEM' AT port to '${port}'"
 
   if [[ ! -e "$port" ]]
   then
-    echo_debug "get_modem_at_port: port $port not present"
+    echo_error "modem '$MODEM' AT port '$port' does not exist"
     return 1
   fi
 
@@ -622,15 +622,15 @@ at_command_direct() {
 
   if [[ ! -w "$port" ]]
   then
-    echo_debug "at_command_direct: port $port not writable"
+    echo_error "AT port '$port' is not writable"
     return 1
   fi
 
   local fd
-  echo_debug "AT fallback open $port"
+  echo_debug "Opening connection to AT port '$port'"
   if ! exec {fd}<>"$port"
   then
-    echo_debug "at_command_direct: failed to open $port"
+    echo_error "Failed to open '$port'"
     return 1
   fi
 
@@ -640,7 +640,7 @@ at_command_direct() {
     :
   done
 
-  echo_debug "AT fallback TX -> $cmd"
+  echo_debug "AT TX -> $cmd"
   printf '%s\r' "$cmd" >&$fd
 
   local resp="" line="" timeout_count=0
@@ -659,7 +659,7 @@ at_command_direct() {
 
     if [[ -n "$line" ]]
     then
-      echo_debug "AT fallback RX <- $line"
+      echo_debug "AT RX <- $line"
       resp+="$line"$'\n'
       if [[ "$line" == "OK" || "$line" == "ERROR" ]]
       then
