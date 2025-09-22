@@ -3136,11 +3136,13 @@ sms_send() {
     return 1
   fi
 
-  local sms_id=""
+  local sms_id
+  local smsc_params
+
   local smsc_raw
-  local smsc
-  local smsc_params=""
   smsc_raw="$(get_smsc_number)"
+
+  local smsc
   if [[ -n "$smsc_raw" ]]
   then
     smsc="${smsc_raw//[[:space:]]/}"
@@ -3167,15 +3169,15 @@ sms_send() {
   # Create the SMS first (retrying creation only if creation itself fails)
   if (( max_attempts < 1 )); then max_attempts=1; fi
 
+  local create_json
   while (( create_attempt <= max_attempts ))
   do
     sms_id=""
-    local create_json
-    create_json=""
+
     if ! create_json="$(mmcli_cmd -J --messaging-create-sms="number=${recipient}${smsc_params}" \
       --messaging-create-sms-with-text="$tmpfile")"
     then
-      if (( create_attempt == max_attempts ))
+      if (( create_attempt >= max_attempts ))
       then
         echo_error "failed to create SMS after $max_attempts attempts"
         rm -f "$tmpfile"
@@ -3219,7 +3221,7 @@ sms_send() {
       break
     fi
 
-    if (( send_attempt == max_attempts ))
+    if (( send_attempt >= max_attempts ))
     then
       echo_error "failed to send SMS '${sms_id}' after $max_attempts attempts"
       break
@@ -3251,10 +3253,11 @@ recipient_allowed_for_modem() {
 
   if [[ -z "$hcc" ]]
   then
-    echo_warning "Failed to determine home CC for modem id '$mid', blocking foreign recipient $recipient"
+    echo_warning "Failed to determine home CC for modem id '$mid', blocking foreign recipient '$recipient'"
     return 1
   fi
 
+  recipient=$(ensure_plus "$recipient")
   if [[ "$recipient" == +"$hcc"* ]]
   then
     return 0
@@ -3266,8 +3269,8 @@ recipient_allowed_for_modem() {
 sms_send_with_fallback() {
   local orig_args=("$@")
   local args=("$@")
-  local recipient=""
-  local text=""
+  local recipient
+  local text
 
   # First attempt with the original arguments
   if sms_send "${orig_args[@]}"
@@ -3337,7 +3340,7 @@ sms_send_with_fallback() {
     local prev_mode="$MODEM"
     MODEM="$mid"
     local candidate_recipient="$recipient"
-    local used_auto=""
+    local used_auto
     local auto_tried=0
 
     if ! recipient_allowed_for_modem "$candidate_recipient" "$mid"
@@ -3528,17 +3531,16 @@ sms_prune_all_modems() {
 
 sms_list_print_header() {
   local include_mid="$1"
-  local noc="$2"
   local header
 
-  if [[ "$include_mid" == "1" ]]
+  if [[ -n "$include_mid" ]]
   then
     header="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
   else
     header="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
   fi
 
-  if [[ -n "$noc" ]]
+  if [[ -n "$NO_COLOR" || -n "$CRON" ]]
   then
     printf '%s\n' "$header"
   else
@@ -3566,7 +3568,7 @@ sms_list_print_entry() {
     text="${text:0:maxlen}…"
   fi
 
-  if [[ "$include_mid" == "1" ]]
+  if [[ -n "$include_mid" ]]
   then
     printf '%-4s %-4s %-10s %-18s %s\n' "$mid" "$id" "$msg_type" "$sender" "$text"
   else
@@ -3739,20 +3741,17 @@ sms_list_pretty() {
     fi
 
     # Pretty output across all modems: add a MID column
-    local _nocolor=""
-    if [[ -n "$NO_COLOR" || -n "$CRON" ]]
-    then
-      _nocolor=1
-    fi
-    sms_list_print_header 1 "$_nocolor"
+    sms_list_print_header --with-modem-id
 
     for mid in "${mids[@]}"
     do
       [[ -z "$mid" ]] && continue
+
       if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
       then
         continue
       fi
+
       mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
       for id in "${ids[@]}"
       do
@@ -3761,7 +3760,7 @@ sms_list_pretty() {
         then
           continue
         fi
-        sms_list_print_entry "$mid" "$id" "$js" 1 "$maxlen"
+        sms_list_print_entry "$mid" "$id" "$js" --with-modem-id "$maxlen"
         had_any=1
       done
     done
@@ -3840,12 +3839,7 @@ sms_list_pretty() {
   fi
 
   # Header for human-readable list (make entire line bold to preserve alignment)
-  local _nocolor=""
-  if [[ -n "$NO_COLOR" || -n "$CRON" ]]
-  then
-    _nocolor=1
-  fi
-  sms_list_print_header 0 "$_nocolor"
+  sms_list_print_header
 
   for id in "${ids[@]}"
   do
@@ -3854,7 +3848,7 @@ sms_list_pretty() {
     then
       continue
     fi
-    sms_list_print_entry "" "$id" "$js" 0 "$maxlen"
+    sms_list_print_entry "" "$id" "$js" "" "$maxlen"
   done
 }
 
@@ -4644,12 +4638,12 @@ watch_send_reply() {
 watch_run_command() {
   local user_cmd="$1"
   local cmd="NO_COLOR=1 $1"
-  local output rc status="exit" json now
-  rc=0
+  local output status="exit" json now
+  local rc=0
 
-  if command -v timeout >/dev/null 2>&1
+  if command -v timeout &>/dev/null
   then
-    output="$(timeout -k "${WATCH_CMD_KILL_TIMEOUT}s" "${WATCH_CMD_TIMEOUT}s" bash -c "$cmd" 2>&1)"
+    output="$(timeout -k "${WATCH_CMD_KILL_TIMEOUT}s" "${WATCH_CMD_TIMEOUT}s" bash -c "NO_COLOR=1 $cmd" 2>&1)"
     rc=$?
     if (( rc == 124 ))
     then
@@ -4659,7 +4653,7 @@ watch_run_command() {
       status="killed"
     fi
   else
-    output="$(bash -c "$cmd" 2>&1)"
+    output="$(bash -c "NO_COLOR=1 $cmd" 2>&1)"
     rc=$?
   fi
 
@@ -4670,15 +4664,14 @@ watch_run_command() {
   fi
 
   now="$(date -Iseconds)"
-  json="$(jq -cn \
+
+  jq -cen \
     --arg cmd "$user_cmd" \
     --argjson rc "$rc" \
     --arg status "$status" \
     --arg date "$now" \
     --arg output "$output" \
-    '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}')"
-
-  printf '%s' "$json"
+    '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}'
 }
 
 load_own_number() {
@@ -4700,12 +4693,9 @@ load_own_number() {
     return 1
   fi
 
-  if [[ "$number" != +* ]]
-  then
-    number="+$number"
-  fi
-
+  number=$(ensure_plus "$number")
   OWN_NUMBER="$number"
+
   return 0
 }
 
@@ -4734,7 +4724,7 @@ get_smsc_number() {
 
   # No SMSC detected; leave empty so callers skip forcing one
   SMSC_NUMBER=""
-  printf '%s' "$SMSC_NUMBER"
+  return 1
 }
 
 modem_status_details_json() {
@@ -4868,8 +4858,7 @@ modem_status_details_json() {
     return 1
   fi
 
-  printf '%s
-' "$payload"
+  printf '%s\n' "$payload"
 }
 
 modem_status_single() {
@@ -5526,12 +5515,13 @@ resolve_modem_selection() {
   if [[ -n "$ALL_MODEMS" ]]
   then
     local _ids=()
-    local _id
     if mapfile -t _ids < <(list_modem_ids_sorted)
     then
       if (( ${#_ids[@]} > 0 ))
       then
         echo_info "operating on all modems: ${#_ids[@]} detected"
+
+        local _id
         for _id in "${_ids[@]}"
         do
           [[ -z "$_id" ]] && continue
