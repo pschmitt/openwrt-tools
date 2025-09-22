@@ -3793,10 +3793,7 @@ sms_list_pretty() {
         if info_json="$(mmcli --modem "$mid" -J)"
         then
           own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$info_json")"
-          if [[ -n "$own" && "$own" != +* ]]
-          then
-            own="+$own"
-          fi
+          own=$(ensure_plus "$own")
         fi
 
         for id in "${ids[@]}"
@@ -3992,7 +3989,7 @@ enable_modem() {
   echo_info "waiting for modem detection"
   elapsed=0
   local list_json
-  local modem_count=0
+  local modem_count
   while :
   do
     list_json=""
