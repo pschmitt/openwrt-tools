@@ -409,9 +409,17 @@ USAGE
 # Print usage details for the service subcommand.
 usage_service() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] service start|stop|restart|status"
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] service start|stop|restart|status|debug [-- WATCH_FLAGS...]
 
 Control the $SCRIPT_NAME service.
+
+Actions:
+  start                     Start the $SCRIPT_NAME service
+  stop                      Stop the $SCRIPT_NAME service
+  restart                   Restart the $SCRIPT_NAME service
+  status                    Show current service status
+  debug [-- WATCH_FLAGS...] Stop the service, run $SCRIPT_NAME watch with WATCH_FLAGS (defaults:
+                            --debug --all --enable), then start the service again
 USAGE
 }
 
@@ -2798,6 +2806,87 @@ mmsms_logread() {
 # Call the init script for the mmsms service with given arguments.
 mmsms_service_action() {
   "/etc/init.d/${SCRIPT_NAME}" "$@"
+}
+
+# Stop the service, run a debug watch session with optional flags, then start service again.
+mmsms_service_debug() {
+  local -a default_flags=(--debug --all --enable)
+  local -a watch_flags=()
+  local -a extra_flags=("$@")
+
+  if (( ${#extra_flags[@]} == 0 ))
+  then
+    watch_flags=("${default_flags[@]}")
+  else
+    if [[ "${extra_flags[0]}" == "--" ]]
+    then
+      extra_flags=("${extra_flags[@]:1}")
+    fi
+
+    if (( ${#extra_flags[@]} == 0 ))
+    then
+      watch_flags=("${default_flags[@]}")
+    else
+      watch_flags=("${extra_flags[@]}")
+    fi
+  fi
+
+  local watch_flags_desc=""
+  if (( ${#watch_flags[@]} > 0 ))
+  then
+    printf -v watch_flags_desc '%q ' "${watch_flags[@]}"
+    watch_flags_desc="${watch_flags_desc%% }"
+  fi
+
+  echo_info "Stopping $SCRIPT_NAME service for debug session"
+  local stop_rc=0
+  if ! mmsms_service_action stop
+  then
+    echo_error "failed to stop $SCRIPT_NAME service"
+    stop_rc=1
+  fi
+
+  local debug_prev="$DEBUG"
+  if [[ -r "$CONFIG_FILE" ]]
+  then
+    DEBUG=1
+    echo_debug "dumping config from $CONFIG_FILE"
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]
+    do
+      echo_debug "cfg> $line"
+    done < "$CONFIG_FILE"
+  else
+    echo_warning "config file not readable: $CONFIG_FILE"
+  fi
+  DEBUG="$debug_prev"
+
+  if [[ -n "$watch_flags_desc" ]]
+  then
+    echo_debug "service debug watch flags: $watch_flags_desc"
+    echo_info "Starting $SCRIPT_NAME watch for debug session ($watch_flags_desc)"
+  else
+    echo_debug "service debug watch has no flags"
+    echo_info "Starting $SCRIPT_NAME watch for debug session"
+  fi
+  local watch_rc=0
+  CONFIG_FILE="$CONFIG_FILE" MODEM="$MODEM" QUIET="$QUIET" ECHO_SYSLOG="$ECHO_SYSLOG" \
+    VERBOSE="$VERBOSE" NO_COLOR="$NO_COLOR" "$0" watch "${watch_flags[@]}"
+  watch_rc=$?
+
+  echo_info "Restarting $SCRIPT_NAME service after debug session"
+  local start_rc=0
+  if ! mmsms_service_action start
+  then
+    echo_error "failed to start $SCRIPT_NAME service"
+    start_rc=1
+  fi
+
+  local rc="$stop_rc"
+  (( watch_rc != 0 )) && rc="$watch_rc"
+  (( start_rc != 0 )) && rc="$start_rc"
+
+  return "$rc"
 }
 
 # Update the repository and optionally restart the service after pulling.
@@ -6319,7 +6408,12 @@ main() {
         fi
       ;;
     service)
-      mmsms_service_action "${CMD_ARGS[@]}"
+      if (( ${#CMD_ARGS[@]} > 0 )) && [[ "${CMD_ARGS[0]}" == "debug" ]]
+      then
+        mmsms_service_debug "${CMD_ARGS[@]:1}"
+      else
+        mmsms_service_action "${CMD_ARGS[@]}"
+      fi
       ;;
     pull)
       if (( ${#CMD_ARGS[@]} > 0 ))
