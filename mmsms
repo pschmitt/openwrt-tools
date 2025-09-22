@@ -4641,9 +4641,8 @@ modem_status_single() {
 
   if custom_json_requested
   then
-    printf '%s
-' "$payload"
-    return 0
+    jq -e <<< "$payload"
+    return "$?"
   fi
 
   local color_reset color_white color_cyan color_blue color_green color_yellow color_red color_magenta
