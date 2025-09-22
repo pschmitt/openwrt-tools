@@ -3254,8 +3254,8 @@ sms_read_json() {
 
 # Send an SMS, handling defaults, validation, and optional chunking.
 sms_send() {
-  local recipient=""
-  local text=""
+  local recipient
+  local text
   local recipient_was_default=0
 
   # Parse args: allow default recipient when not specified
@@ -3278,10 +3278,12 @@ sms_send() {
       echo_error "no SMS text provided"
       return 2
     fi
+    echo_info "Reading SMS text from stdin... Ctrl-D to end"
     text="$(cat)"
   elif [[ "$1" == "-" ]]
   then
     shift
+    echo_info "Reading SMS text from stdin... Ctrl-D to end"
     text="$(cat)"
   else
     text="$*"
