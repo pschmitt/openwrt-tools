@@ -238,6 +238,16 @@ jq() {
   command jq "$@"
 }
 
+# Log and run generic mmcli calls (no implicit --modem)
+mmcli() {
+  echo_debug "\$ mmcli $*"
+  command mmcli "$@"
+}
+
+mmcli_cmd() {
+  command mmcli --modem "$MODEM" "$@"
+}
+
 usage() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
@@ -1611,54 +1621,6 @@ get_home_cc() {
   return 1
 }
 
-# Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
-modem_info_brief() {
-  local j info id manufacturer model plugin primary own ports cc=""
-
-  if j="$(mmcli_cmd -J)"
-  then
-    id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$j")"
-    manufacturer="$(jq -r '.modem.generic.manufacturer // "--"' <<<"$j")"
-    model="$(jq -r '.modem.generic.model // "--"' <<<"$j")"
-    plugin="$(jq -r '.modem.generic.plugin // "--"' <<<"$j")"
-    primary="$(jq -r '.modem.generic["primary-port"] // "--"' <<<"$j")"
-    ports="$(jq -r '(.modem.generic.ports // []) | map(split(" ")[0]) | join(",")' <<<"$j")"
-    own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j")"
-    own="$(ensure_plus "$own")"
-    [[ -n "$ports" ]] || ports="--"
-    [[ -n "$own" ]] || own="--"
-
-    if [[ "$own" == +* ]]
-    then
-      local digits="${own#+}"
-      if [[ "$digits" == 1* ]]
-      then
-        cc="1"
-      else
-        cc="${digits:0:2}"
-      fi
-    fi
-
-    if [[ -n "$id" ]]
-    then
-      info="id='$id' manufacturer='$manufacturer' model='$model' plugin='$plugin' primary='$primary'"
-      if [[ -n "$ports" ]]
-      then
-        info+=" ports='$ports'"
-      fi
-      info+=" phone='$own'"
-      if [[ -n "$cc" ]]
-      then
-        info+=" cc='$(cc_to_label "$cc")'"
-      fi
-      printf '%s' "$info"
-      return 0
-    fi
-  fi
-
-  printf "id='%s'" "$MODEM"
-}
-
 # Derive a simple country code from a phone number in +E.164 form
 phone_cc() {
   local n="$1"
@@ -1871,14 +1833,166 @@ modem_info_matches_selector() {
   return 1
 }
 
-log_modem_details() {
-  local mid="$1" prefix="${2:-}"
-  [[ -z "$mid" ]] && return 1
-
-  local mjson fields id manufacturer model plugin primary ports phone info
-  if mjson="$(mmcli -m "$mid" -J)"
+# Resolve a human-friendly modem selector to a concrete modem id
+# - Accepts: numeric id (e.g., 2), D-Bus path, 'any', or a substring
+#   matching manufacturer, model, plugin, primary-port, or any ttyUSB/wwan port.
+# - On multiple matches, prints a modem list to stderr and returns non-zero.
+# - On no match, reports an error and shows the list.
+get_modem_id() {
+  local sel_raw="${1:-}"
+  # Default / passthrough cases
+  if [[ -z "$sel_raw" || "$sel_raw" == any ]]
   then
-    fields="$(jq -r '
+    printf '%s' "any"
+    return 0
+  fi
+
+  # If a D-Bus path (/org/.../Modem/N)
+  if [[ "$sel_raw" == */Modem/* ]]
+  then
+    printf '%s' "${sel_raw##*/}"
+    return 0
+  fi
+
+  local list_json ids id json
+  if ! list_json="$(mmcli -L -J)"
+  then
+    echo_error "could not query modem list via mmcli"
+    return 1
+  fi
+
+  # Collect modem ids
+  mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json")
+  if (( ${#ids[@]} == 0 ))
+  then
+    echo_error "no modems detected"
+    return 1
+  fi
+
+  # If pure numeric input, treat as id only if it matches a detected id; otherwise
+  # continue with fuzzy matching (e.g., phone number fragment)
+  if [[ "$sel_raw" =~ ^[0-9]+$ ]]
+  then
+    local _id
+    for _id in "${ids[@]}"
+    do
+      if [[ "$_id" == "$sel_raw" ]]
+      then
+        printf '%s' "$sel_raw"
+        return 0
+      fi
+    done
+  fi
+
+  local matches=()
+
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+    if ! json="$(mmcli -m "$id" -J)"
+    then
+      continue
+    fi
+
+    if modem_info_matches_selector "$sel_raw" "$json" >/dev/null
+    then
+      matches+=("$id")
+    fi
+  done
+
+  if (( ${#matches[@]} == 1 ))
+  then
+    printf '%s' "${matches[0]}"
+    return 0
+  fi
+
+  # Helper to show available modems for disambiguation
+  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)"
+  echo_info "Available modems:"
+
+  for id in "${ids[@]}"
+  do
+    [[ -z "$id" ]] && continue
+
+    if ! json="$(mmcli -m "$id" -J)"
+    then
+      continue
+    fi
+
+    jq -r '
+      .modem as $m
+      | {
+          id: ($m["dbus-path"] | split("/")[-1]),
+          manufacturer: ($m.generic.manufacturer // "--"),
+          model: ($m.generic.model // "--"),
+          plugin: ($m.generic.plugin // "--"),
+          primary: ($m.generic["primary-port"] // "--"),
+          ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
+        }
+      | ("  " + .id + ": " + .manufacturer + " " + .model
+         + " plugin=" + .plugin
+         + " primary=" + .primary
+         + " ports=" + .ports)
+    ' <<<"$json" >&2
+  done
+
+  if (( ${#matches[@]} == 0 ))
+  then
+    return 1
+  fi
+
+  # Ambiguous modem selector, the user is at fault!
+  return 2
+}
+
+
+get_modem() {
+  local selector="${1:-}"
+
+  if [[ -z "$selector" ]]
+  then
+    if [[ -n "$MODEM" ]]
+    then
+      selector="$MODEM"
+    else
+      selector="any"
+    fi
+  fi
+
+  selector="$(trim "$selector")"
+  if [[ -z "$selector" ]]
+  then
+    selector="any"
+  fi
+
+  local mmcli_target="$selector"
+  if [[ "$mmcli_target" != "any" && "$mmcli_target" != */Modem/* && ! "$mmcli_target" =~ ^[0-9]+$ ]]
+  then
+    if ! mmcli_target="$(get_modem_id "$mmcli_target")"
+    then
+      return "$?"
+    fi
+  fi
+
+  mmcli -m "$mmcli_target" -J
+}
+
+modem_info_string_from_json() {
+  local info_json="$1"
+  local fallback_id="${2:-}"
+
+  if [[ -z "$info_json" ]]
+  then
+    return 1
+  fi
+
+  if [[ -n "$fallback_id" ]]
+  then
+    fallback_id="$(trim "$fallback_id")"
+  fi
+
+  local fields
+  if ! fields="$(jq -r '
       .modem as $m
       | [
           ($m["dbus-path"] | split("/")[-1] // ""),
@@ -1890,30 +2004,93 @@ log_modem_details() {
           ($m.generic["own-numbers"][0] // "")
         ]
       | @tsv
-    ' <<<"$mjson")"
+    ' <<<"$info_json")"
+  then
+    return 1
+  fi
 
-    if [[ -z "$fields" ]]
+  if [[ -z "$fields" ]]
+  then
+    return 1
+  fi
+
+  local id manufacturer model plugin primary ports phone cc_label
+  IFS=$'\t' read -r id manufacturer model plugin primary ports phone <<<"$fields" || return 1
+
+  phone="$(ensure_plus "$phone")"
+
+  [[ -n "$ports" ]] || ports="--"
+  if [[ -z "$id" ]]
+  then
+    id="$fallback_id"
+  fi
+  [[ -n "$id" ]] || id="$MODEM"
+  [[ -n "$phone" ]] || phone="--"
+
+  cc_label="$(phone_cc_label "$phone")"
+  [[ -n "$cc_label" ]] || cc_label="--"
+
+  printf "id='%s' manufacturer='%s' model='%s' plugin='%s' primary='%s' ports='%s' phone='%s' cc='%s'" \
+    "$id" "$manufacturer" "$model" "$plugin" "$primary" "$ports" "$phone" "$cc_label"
+}
+
+get_modem_info() {
+  local selector="${1:-}"
+  local prefix="${2:-}"
+  local fallback_id="${selector:-$MODEM}"
+
+  if [[ -n "$fallback_id" ]]
+  then
+    fallback_id="$(trim "$fallback_id")"
+  fi
+
+  local info_json
+  if ! info_json="$(get_modem "$selector")"
+  then
+    return 1
+  fi
+
+  local info_string
+  if ! info_string="$(modem_info_string_from_json "$info_json" "$fallback_id")"
+  then
+    return 1
+  fi
+
+  printf '%smodem={%s}' "$prefix" "$info_string"
+}
+
+# Return a concise modem info string for logs: id=.. manufacturer=.. model=.. plugin=.. primary=..
+modem_info_brief() {
+  local fallback="$MODEM"
+  local info_json info_string
+
+  if info_json="$(mmcli_cmd -J)"
+  then
+    if info_string="$(modem_info_string_from_json "$info_json" "$fallback")"
     then
-      echo_info "${prefix}modem={id='$mid'}"
+      printf '%s' "$info_string"
       return 0
     fi
+  fi
 
-    IFS=$'\t' read -r id manufacturer model plugin primary ports phone <<<"$fields"
-    phone="$(ensure_plus "$phone")"
+  printf "id='%s'" "$fallback"
+}
 
-    [[ -n "$ports" ]] || ports="--"
-    [[ -n "$id" ]] || id="$mid"
-    [[ -n "$phone" ]] || phone="--"
+log_modem_details() {
+  local mid="$1" prefix="${2:-}"
+  local info
 
-    local cc_label
-    cc_label="$(phone_cc_label "$phone")"
-    [[ -n "$cc_label" ]] || cc_label="--"
+  if info="$(get_modem_info "$mid" "$prefix")"
+  then
+    echo_info "$info"
+    return 0
+  fi
 
-    printf -v info "id='%s' manufacturer='%s' model='%s' plugin='%s' primary='%s' ports='%s' phone='%s' cc='%s'" \
-      "$id" "$manufacturer" "$model" "$plugin" "$primary" "$ports" "$phone" "$cc_label"
-    echo_info "${prefix}modem={${info}}"
-  else
+  if [[ -n "$mid" ]]
+  then
     echo_info "${prefix}modem={id='$mid'}"
+  else
+    echo_info "${prefix}modem={}"
   fi
 }
 
@@ -2648,128 +2825,6 @@ at_first_quoted_decoded() {
   fi
 
   printf '%s' "$q"
-}
-
-# Resolve a human-friendly modem selector to a concrete modem id
-# - Accepts: numeric id (e.g., 2), D-Bus path, 'any', or a substring
-#   matching manufacturer, model, plugin, primary-port, or any ttyUSB/wwan port.
-# - On multiple matches, prints a modem list to stderr and returns non-zero.
-# - On no match, reports an error and shows the list.
-get_modem_id() {
-  local sel_raw="${1:-}"
-  # Default / passthrough cases
-  if [[ -z "$sel_raw" || "$sel_raw" == any ]]
-  then
-    printf '%s' "any"
-    return 0
-  fi
-
-  # If a D-Bus path (/org/.../Modem/N)
-  if [[ "$sel_raw" == */Modem/* ]]
-  then
-    printf '%s' "${sel_raw##*/}"
-    return 0
-  fi
-
-  local list_json ids id json
-  if ! list_json="$(mmcli -L -J)"
-  then
-    echo_error "could not query modem list via mmcli"
-    return 1
-  fi
-
-  # Collect modem ids
-  mapfile -t ids < <(jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json")
-  if (( ${#ids[@]} == 0 ))
-  then
-    echo_error "no modems detected"
-    return 1
-  fi
-
-  # If pure numeric input, treat as id only if it matches a detected id; otherwise
-  # continue with fuzzy matching (e.g., phone number fragment)
-  if [[ "$sel_raw" =~ ^[0-9]+$ ]]
-  then
-    local _id
-    for _id in "${ids[@]}"
-    do
-      if [[ "$_id" == "$sel_raw" ]]
-      then
-        printf '%s' "$sel_raw"
-        return 0
-      fi
-    done
-  fi
-
-  local matches=()
-
-  for id in "${ids[@]}"
-  do
-    [[ -z "$id" ]] && continue
-    if ! json="$(mmcli -m "$id" -J)"
-    then
-      continue
-    fi
-
-    if modem_info_matches_selector "$sel_raw" "$json" >/dev/null
-    then
-      matches+=("$id")
-    fi
-  done
-
-  if (( ${#matches[@]} == 1 ))
-  then
-    printf '%s' "${matches[0]}"
-    return 0
-  fi
-
-  # Helper to show available modems for disambiguation
-  echo_error "${SCRIPT_NAME}: modem selector '${sel_raw}' matched ${#matches[@]} modem(s)"
-  echo_info "Available modems:"
-
-  for id in "${ids[@]}"
-  do
-    [[ -z "$id" ]] && continue
-
-    if ! json="$(mmcli -m "$id" -J)"
-    then
-      continue
-    fi
-
-    jq -r '
-      .modem as $m
-      | {
-          id: ($m["dbus-path"] | split("/")[-1]),
-          manufacturer: ($m.generic.manufacturer // "--"),
-          model: ($m.generic.model // "--"),
-          plugin: ($m.generic.plugin // "--"),
-          primary: ($m.generic["primary-port"] // "--"),
-          ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(","))
-        }
-      | ("  " + .id + ": " + .manufacturer + " " + .model
-         + " plugin=" + .plugin
-         + " primary=" + .primary
-         + " ports=" + .ports)
-    ' <<<"$json" >&2
-  done
-
-  if (( ${#matches[@]} == 0 ))
-  then
-    return 1
-  fi
-
-  # Ambiguous modem selector, the user is at fault!
-  return 2
-}
-
-# Log and run generic mmcli calls (no implicit --modem)
-mmcli() {
-  echo_debug "\$ mmcli $*"
-  command mmcli "$@"
-}
-
-mmcli_cmd() {
-  command mmcli --modem "$MODEM" "$@"
 }
 
 sms_state_color() { # $1=state
@@ -4259,9 +4314,10 @@ enable_modem() {
 
   if [[ -z "$QUIET" ]]
   then
-    if [[ "$enable_target" =~ ^[0-9]+$ ]]
+    local _info
+    if _info="$(get_modem_info "$enable_target" "detected ")"
     then
-      log_modem_details "$enable_target" "detected "
+      echo_info "$_info"
     else
       echo_info "resolved modem selector '$selector' to '$enable_target'"
     fi
@@ -4274,44 +4330,18 @@ enable_modem() {
     # Log enabled modem details similar to selection log
     if [[ -z $QUIET ]]
     then
-      local _ej _eln
-      _ej="$(mmcli -m "$enable_target" -J)"
-      if [[ -n "$_ej" ]]
+      local _json _formatted
+      if _json="$(get_modem "$enable_target")"
       then
-        _eln="$(jq -r '
-          .modem as $m
-          | {
-              id: ($m["dbus-path"] | split("/")[-1]),
-              manufacturer: ($m.generic.manufacturer // "--"),
-              model: ($m.generic.model // "--"),
-              plugin: ($m.generic.plugin // "--"),
-              primary: ($m.generic["primary-port"] // "--"),
-              ports: (($m.generic.ports // []) | map(split(" ")[0]) | join(",")),
-              phone: (($m.generic["own-numbers"][0] // "")
-                      | if . == "" then "--"
-                        else (if startswith("+") then . else "+" + . end) end),
-              cc: ((($m.generic["own-numbers"][0] // "") ) as $p
-                   | if $p|startswith("+1") then "1"
-                     elif $p|startswith("+") then ($p[1:3])
-                     else "--" end)
-            }
-          | ("enabled modem: id=" + .id
-             + " manufacturer=" + .manufacturer
-             + " model=" + .model
-             + " plugin=" + .plugin
-             + " primary=" + .primary
-             + " ports=" + .ports
-             + " phone=" + .phone
-             + " cc=" + (if .phone|startswith("+1") then "US"
-                         elif .phone|startswith("+33") then "FR"
-                         elif .phone|startswith("+49") then "DE"
-                         else "--" end))
-        ' <<<"$_ej")"
-        if [[ -n "$_eln" ]]
+        configure_modem_vendor "$_json"
+        if _formatted="$(modem_info_string_from_json "$_json" "$enable_target")"
         then
-          echo_info "$_eln"
+          echo_info "enabled modem={$_formatted}"
+        else
+          echo_info "enabled modem={id='${enable_target}'}"
         fi
-        configure_modem_vendor "$_ej"
+      else
+        echo_info "enabled modem={id='${enable_target}'}"
       fi
     fi
     return 0
@@ -5850,13 +5880,18 @@ resolve_modem_selection() {
     fi
   elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
   then
-    log_modem_details "$MODEM" "selected "
+    local _info
+    if _info="$(get_modem_info "$MODEM" "selected ")"
+    then
+      echo_info "$_info"
+    else
+      echo_info "selected modem={id='$MODEM'}"
+    fi
   else
     local _info
-    _info="$(modem_info_brief)"
-    if [[ -n "$_info" && "$_info" != "$MODEM" ]]
+    if _info="$(get_modem_info "$MODEM" "selected ")"
     then
-      echo_info "selected modem={$_info}"
+      echo_info "$_info"
     elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
     then
       echo_info "selected modem={id='$MODEM'}"
