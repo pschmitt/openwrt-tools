@@ -17,16 +17,18 @@ echo_fancy() {
   local line
   line="$prefix $*"
 
-  if [[ -n "$NO_COLOR" || -n "$CRON" ]]
+  local line_fmt="$line"
+
+  if [[ -z "$NO_COLOR" && -z "$CRON" ]]
   then
-    echo "$line" >&2
-  else
-    echo -e "${color}${prefix}\e[0m $*" >&2
+    line_fmt="${color}${prefix}\e[0m $*"
   fi
 
-  # Guard-clause: mirror to syslog only when enabled
+  echo -e "$line_fmt" >&2
+
+  # Optionally log to syslog
   [[ -z "$ECHO_SYSLOG" ]] && return 0
-  logger -t "$SCRIPT_NAME" "$line"
+  logger -t "$SCRIPT_NAME" "$(echo -e "$line_fmt")"
 }
 
 echo_info() {
