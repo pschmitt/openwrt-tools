@@ -2884,9 +2884,23 @@ sms_read_pretty() {
   printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
   rows+=("$row")
 
-  printf -v row '%s\t%s\t%s' "$remote_label" "$COLOR_BOLD_BLUE" "$remote_value"
+  local remote_display="$remote_value"
+  local local_display="$local_value"
+  if [[ -n "$own" && "$own" != "--" ]]
+  then
+    if [[ "$remote_display" == "$own" ]]
+    then
+      remote_display+="*"
+    fi
+    if [[ "$local_display" == "$own" ]]
+    then
+      local_display+="*"
+    fi
+  fi
+
+  printf -v row '%s\t%s\t%s' "$remote_label" "$COLOR_BOLD_BLUE" "$remote_display"
   rows+=("$row")
-  printf -v row '%s\t%s\t%s' "$local_label" "$COLOR_BOLD_BLUE" "$local_value"
+  printf -v row '%s\t%s\t%s' "$local_label" "$COLOR_BOLD_BLUE" "$local_display"
   rows+=("$row")
   printf -v row '%s\t%s\t%s' "SMSC" "$COLOR_BOLD_BLUE" "$smsc_display"
   rows+=("$row")
@@ -4503,10 +4517,11 @@ render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tc
 }
 
 modem_status_single() {
-  local json state power reg signal signal_num carrier own smsc mid_label
+  local json state power reg signal signal_num carrier_name carrier_code carrier_display own smsc mid_label
+  local firmware hardware_revision equipment_id device_path device_identifier carrier_config carrier_config_revision imei meid cdma_sid cdma_nid
   local manufacturer model plugin primary_port ports_display ports_json="[]" at_port
-  local country_code country_label country_display="unknown"
-  local info_tsv
+  local country_code country_label country_display="--"
+  local info_tsv details_tsv
 
   if raw_plain_requested
   then
@@ -4560,8 +4575,72 @@ modem_status_single() {
   power="$(jq -r '(.modem.generic["power-state"] // empty)' <<<"$json")"
   reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
   signal_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
-  carrier="$(jq -r '(.modem["3gpp"]["operator-name"] // .modem["3gpp"]["operator-code"] // .modem.cdma.sid // empty)' <<<"$json")"
   own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
+
+  # Join fields with the ASCII Unit Separator so empty values are preserved when splitting
+  details_blob="$(jq -r '
+    def clean:
+      if . == null or . == "" or . == "--" then "" else . end;
+    [
+      (.modem["3gpp"]["operator-name"] | clean),
+      (.modem["3gpp"]["operator-code"] | clean),
+      (.modem.cdma.sid | clean),
+      (.modem.cdma.nid | clean),
+      (.modem.generic.revision | clean),
+      (.modem.generic["hardware-revision"] | clean),
+      (.modem.generic["equipment-identifier"] | clean),
+      (.modem.generic.device | clean),
+      (.modem.generic["device-identifier"] | clean),
+      (.modem.generic["carrier-configuration"] | clean),
+      (.modem.generic["carrier-configuration-revision"] | clean),
+      (.modem["3gpp"].imei | clean),
+      (.modem.cdma.meid | clean)
+    ]
+    | join("\u001f")
+  ' <<<"$json")"
+
+  if [[ -n "$details_blob" ]]
+  then
+    IFS=$'\x1f' read -r carrier_name carrier_code cdma_sid cdma_nid firmware hardware_revision equipment_id device_path device_identifier carrier_config carrier_config_revision imei meid <<<"$details_blob"
+  fi
+
+  if [[ -z "$carrier_name" && -n "$cdma_sid" ]]
+  then
+    carrier_name="$cdma_sid"
+  fi
+  if [[ -z "$carrier_code" && -n "$cdma_nid" ]]
+  then
+    carrier_code="$cdma_nid"
+  fi
+  if [[ -z "$carrier_code" && -n "$cdma_sid" ]]
+  then
+    carrier_code="$cdma_sid"
+  fi
+
+  if [[ -n "$carrier_name" && -n "$carrier_code" ]]
+  then
+    if [[ "$carrier_name" == "$carrier_code" ]]
+    then
+      carrier_display="$carrier_name"
+    else
+      carrier_display="$carrier_name ($carrier_code)"
+    fi
+  elif [[ -n "$carrier_name" ]]
+  then
+    carrier_display="$carrier_name"
+  elif [[ -n "$carrier_code" ]]
+  then
+    carrier_display="$carrier_code"
+  else
+    carrier_display=""
+  fi
+
+  local carrier_pretty="$carrier_display"
+  if [[ -z "$carrier_pretty" ]]
+  then
+    carrier_pretty="--"
+  fi
+  local carrier_value="$carrier_pretty"
 
   info_tsv="$(jq -r '
     def normalize_port:
@@ -4618,17 +4697,42 @@ modem_status_single() {
   then
     signal="${signal_num}%"
   else
-    signal=unknown
+    signal="--"
   fi
-  if [[ -z "$carrier" ]]
+  local firmware_display="$firmware"
+  [[ -n "$firmware_display" ]] || firmware_display="--"
+  local hardware_revision_display="$hardware_revision"
+  [[ -n "$hardware_revision_display" ]] || hardware_revision_display="--"
+  local equipment_id_display="$equipment_id"
+  [[ -n "$equipment_id_display" ]] || equipment_id_display="--"
+  local device_path_display="$device_path"
+  [[ -n "$device_path_display" ]] || device_path_display="--"
+  local device_identifier_display="$device_identifier"
+  [[ -n "$device_identifier_display" ]] || device_identifier_display="--"
+  local imei_display="$imei"
+  [[ -n "$imei_display" ]] || imei_display="--"
+  local meid_display="$meid"
+  [[ -n "$meid_display" ]] || meid_display="--"
+  local carrier_config_display=""
+  if [[ -n "$carrier_config" && -n "$carrier_config_revision" ]]
   then
-    carrier=unknown
+    carrier_config_display="$carrier_config ($carrier_config_revision)"
+  elif [[ -n "$carrier_config" ]]
+  then
+    carrier_config_display="$carrier_config"
+  elif [[ -n "$carrier_config_revision" ]]
+  then
+    carrier_config_display="$carrier_config_revision"
+  else
+    carrier_config_display=""
   fi
+  [[ -n "$carrier_config_display" ]] || carrier_config_display="--"
   own="$(ensure_plus "$own")"
   local own_for_country="$own"
-  if [[ -z "$own" ]]
+  local own_display="$own"
+  if [[ -z "$own_display" ]]
   then
-    own=unknown
+    own_display="--"
   else
     OWN_NUMBER="$own"
   fi
@@ -4657,27 +4761,28 @@ modem_status_single() {
       country_display="+$country_code"
     fi
   else
-    country_display="unknown"
+    country_display="--"
   fi
 
   local manufacturer_display="$manufacturer"
-  [[ -n "$manufacturer_display" ]] || manufacturer_display="unknown"
+  [[ -n "$manufacturer_display" ]] || manufacturer_display="--"
   local model_display="$model"
-  [[ -n "$model_display" ]] || model_display="unknown"
+  [[ -n "$model_display" ]] || model_display="--"
   local plugin_display="$plugin"
-  [[ -n "$plugin_display" ]] || plugin_display="unknown"
+  [[ -n "$plugin_display" ]] || plugin_display="--"
   local primary_port_display="$primary_port"
-  [[ -n "$primary_port_display" ]] || primary_port_display="unknown"
+  [[ -n "$primary_port_display" ]] || primary_port_display="--"
   local at_port_display_value="$at_port"
-  [[ -n "$at_port_display_value" ]] || at_port_display_value="unknown"
+  [[ -n "$at_port_display_value" ]] || at_port_display_value="--"
   local ports_display_pretty="$ports_display"
-  [[ -n "$ports_display_pretty" ]] || ports_display_pretty="unknown"
+  [[ -n "$ports_display_pretty" ]] || ports_display_pretty="--"
 
   # Derive SMSC (may use OWN_NUMBER or config); do not fail hard if empty
   smsc="$(get_smsc_number)"
-  if [[ -z "$smsc" ]]
+  local smsc_display="$smsc"
+  if [[ -z "$smsc_display" ]]
   then
-    smsc=unknown
+    smsc_display="--"
   fi
 
   # JSON output if requested
@@ -4694,7 +4799,9 @@ modem_status_single() {
       --arg state "$state" \
       --arg power "$power" \
       --arg registered "$reg" \
-      --arg carrier "$carrier" \
+      --arg carrier "$carrier_display" \
+      --arg carrier_name "$carrier_name" \
+      --arg carrier_code "$carrier_code" \
       --arg phone "$own" \
       --arg smsc "$smsc" \
       --arg sig "$sig_num_json" \
@@ -4703,6 +4810,15 @@ modem_status_single() {
       --arg plugin "$plugin" \
       --arg primary "$primary_port" \
       --arg at_port "$at_port" \
+      --arg firmware "$firmware" \
+      --arg hardware_revision "$hardware_revision" \
+      --arg equipment_id "$equipment_id" \
+      --arg device "$device_path" \
+      --arg device_identifier "$device_identifier" \
+      --arg carrier_config "$carrier_config" \
+      --arg carrier_config_revision "$carrier_config_revision" \
+      --arg imei "$imei" \
+      --arg meid "$meid" \
       --arg country_code "$country_code" \
       --arg country_label "$country_label" \
       --argjson ports "$ports_json_arg" \
@@ -4711,9 +4827,11 @@ modem_status_single() {
         state: $state,
         power: $power,
         registered: $registered,
-        carrier: $carrier,
-        phone: $phone,
-        smsc: $smsc,
+        carrier: (if $carrier == "" then null else $carrier end),
+        carrier_name: (if $carrier_name == "" then null else $carrier_name end),
+        carrier_code: (if $carrier_code == "" then null else $carrier_code end),
+        phone: (if $phone == "" then null else $phone end),
+        smsc: (if $smsc == "" then null else $smsc end),
         signal: ($sig|tonumber?),
         manufacturer: (if $manufacturer == "" then null else $manufacturer end),
         model: (if $model == "" then null else $model end),
@@ -4721,6 +4839,15 @@ modem_status_single() {
         primary_port: (if $primary == "" then null else $primary end),
         at_port: (if $at_port == "" then null else $at_port end),
         ports: $ports,
+        firmware: (if $firmware == "" then null else $firmware end),
+        hardware_revision: (if $hardware_revision == "" then null else $hardware_revision end),
+        equipment_id: (if $equipment_id == "" then null else $equipment_id end),
+        device: (if $device == "" then null else $device end),
+        device_identifier: (if $device_identifier == "" then null else $device_identifier end),
+        carrier_configuration: (if $carrier_config == "" then null else $carrier_config end),
+        carrier_configuration_revision: (if $carrier_config_revision == "" then null else $carrier_config_revision end),
+        imei: (if $imei == "" then null else $imei end),
+        meid: (if $meid == "" then null else $meid end),
         country_code: (if $country_code == "" then null else ($country_code|tonumber?) end),
         country: (if $country_label == "" then null else $country_label end)
       }'
@@ -4786,11 +4913,11 @@ modem_status_single() {
   status_rows+=("$row")
   printf -v row '%s\t%s\t%s' "Signal" "$sig_color" "$signal"
   status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Carrier" "$carrier_color" "$carrier"
+  printf -v row '%s\t%s\t%s' "Carrier" "$carrier_color" "$carrier_value"
   status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Phone" "$phone_color" "$own"
+  printf -v row '%s\t%s\t%s' "Phone" "$phone_color" "$own_display"
   status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "SMSC" "$smsc_color" "$smsc"
+  printf -v row '%s\t%s\t%s' "SMSC" "$smsc_color" "$smsc_display"
   status_rows+=("$row")
 
   printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
@@ -4807,6 +4934,25 @@ modem_status_single() {
   printf -v row '%s\t%s\t%s' "AT Port" "$info_color" "$at_port_display_value"
   status_rows+=("$row")
   printf -v row '%s\t%s\t%s' "Ports" "$info_color" "$ports_display_pretty"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Firmware" "$info_color" "$firmware_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Hardware Rev" "$info_color" "$hardware_revision_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Equipment ID" "$info_color" "$equipment_id_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "IMEI" "$info_color" "$imei_display"
+  status_rows+=("$row")
+  if [[ -n "$meid" ]]
+  then
+    printf -v row '%s\t%s\t%s' "MEID" "$info_color" "$meid_display"
+    status_rows+=("$row")
+  fi
+  printf -v row '%s\t%s\t%s' "Device ID" "$info_color" "$device_identifier_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Device" "$info_color" "$device_path_display"
+  status_rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Carrier Config" "$info_color" "$carrier_config_display"
   status_rows+=("$row")
   printf -v row '%s\t%s\t%s' "Country" "$country_color" "$country_display"
   status_rows+=("$row")
