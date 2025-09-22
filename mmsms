@@ -77,6 +77,7 @@ COLOR_BOLD_MAGENTA='1;35'
 COLOR_BOLD_CYAN='1;36'
 COLOR_BOLD_WHITE='1;37'
 
+# Build an ANSI escape sequence for a color code while honoring NO_COLOR/CRON.
 ansi_escape() { # $1=colorcode -> ANSI escape sequence honoring NO_COLOR/CRON
   local code="$1"
 
@@ -100,6 +101,7 @@ COLOR_BOLD_MAGENTA='1;35'
 COLOR_BOLD_CYAN='1;36'
 COLOR_BOLD_WHITE='1;37'
 
+# Strip leading and trailing whitespace from a string.
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -107,6 +109,7 @@ trim() {
   printf '%s' "$s"
 }
 
+# Add a unique skip-modem-init pattern after normalizing input.
 add_skip_modem_init_pattern() {
   local pattern
   pattern="$(trim "$1")"
@@ -124,6 +127,7 @@ add_skip_modem_init_pattern() {
   SKIP_MODEM_INIT_PATTERNS+=("$pattern")
 }
 
+# Populate skip-modem-init patterns from config variables and formats.
 apply_skip_modem_init_from_config() {
   local decl
 
@@ -176,6 +180,7 @@ PARSE_SHIFT=0
 MODEM_EXPLICIT=""
 LOG_ABBREV_LEN="${LOG_ABBREV_LEN:-80}"
 
+# Source the configuration file and apply derived runtime settings.
 load_config() {
   echo_debug "loading config: $CONFIG_FILE"
 
@@ -211,18 +216,22 @@ WATCH_DBUS_PID=""
 WATCH_MODEM_MONITOR_PID=""
 MODEM_DETAILS_LOGGED=""
 
+# Return success when plain raw mmcli output without JSON was requested.
 raw_plain_requested() {
   [[ -n "$RAW_OUTPUT" && -z "$JSON_OUTPUT" ]]
 }
 
+# Return success when raw mmcli JSON output was requested.
 raw_json_requested() {
   [[ -n "$RAW_OUTPUT" && -n "$JSON_OUTPUT" ]]
 }
 
+# Return success when custom formatted JSON output was requested.
 custom_json_requested() {
   [[ -n "$JSON_OUTPUT" && -z "$RAW_OUTPUT" ]]
 }
 
+# Return success when any JSON-like output mode should be used.
 json_like_requested() {
   raw_json_requested || custom_json_requested
 }
@@ -248,6 +257,7 @@ mmcli_cmd() {
   command mmcli --modem "$MODEM" "$@"
 }
 
+# Print the top-level usage summary for the script.
 usage() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
@@ -299,6 +309,7 @@ USAGE
 }
 
 # Subcommand-specific usage helpers (concise, focused on per-command flags)
+# Print usage details for the at subcommand.
 usage_at() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] at [OPTIONS] [COMMAND]
@@ -313,6 +324,7 @@ USAGE
 }
 
 # Subcommand-specific usage helpers (concise, focused on per-command flags)
+# Print usage details for the send subcommand.
 usage_send() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
@@ -329,6 +341,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the list subcommand.
 usage_list() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [-a|--all] [-j|--json] [-r|--raw]
@@ -343,6 +356,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the logs subcommand.
 usage_logs() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] logs [LOGREAD_ARGS]
@@ -351,6 +365,7 @@ Prints $SCRIPT_NAME-related log entries from logread (if available). Extra args 
 USAGE
 }
 
+# Print usage details for the read subcommand.
 usage_read() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] read MESSAGE_ID [-j|--json] [-r|--raw]
@@ -360,6 +375,7 @@ Reads a single SMS. --json outputs compact structured JSON; --raw outputs mmcli 
 USAGE
 }
 
+# Print usage details for the prune subcommand.
 usage_prune() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] prune [-a|--all] [-S|--sent]
@@ -372,6 +388,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the enable subcommand.
 usage_enable() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [-a|--all] [-w|--wait[=SECONDS]]
@@ -389,6 +406,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the service subcommand.
 usage_service() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] service start|stop|restart|status"
@@ -397,6 +415,7 @@ Control the $SCRIPT_NAME service.
 USAGE
 }
 
+# Print usage details for the pull subcommand.
 usage_pull() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] pull [--hard] [--no-restart]
@@ -407,6 +426,7 @@ service after pulling.
 USAGE
 }
 
+# Print usage details for the status subcommand.
 usage_status() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-a|--all] [-j|--json] [-r|--raw]
@@ -421,6 +441,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the reset subcommand.
 usage_reset() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] reset [-a|--all] [-H|--hard] [--replug]
@@ -434,6 +455,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the watch subcommand.
 usage_watch() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT] [--delete-sent]
@@ -453,6 +475,7 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the number subcommand.
 usage_number() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] number|phone
@@ -461,6 +484,7 @@ Prints the modem's own number (MSISDN) if reported.
 USAGE
 }
 
+# Print usage details for the smsc subcommand.
 usage_smsc() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] smsc
@@ -469,6 +493,7 @@ Prints the modem\'s configured SMSC (service center) number when available.
 USAGE
 }
 
+# Dispatch to the usage helper for the requested subcommand.
 print_subcommand_usage() {
   case "$1" in
     at)      usage_at      ;;
@@ -489,6 +514,7 @@ print_subcommand_usage() {
   esac
 }
 
+# Check whether a token matches one of the supported commands.
 is_command_token() {
   local token="$1"
 
@@ -501,6 +527,7 @@ is_command_token() {
   return 1
 }
 
+# Parse command-line options common to all subcommands.
 parse_common_option() {
   PARSE_SHIFT=0
   local opt="$1"
@@ -587,6 +614,7 @@ parse_common_option() {
   return 1
 }
 
+# Parse arguments for the at command and record leftovers in PARSED_ARGS.
 parse_at_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -661,6 +689,7 @@ parse_at_args() {
   return 0
 }
 
+# Parse arguments for the send command and record leftovers in PARSED_ARGS.
 parse_send_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -772,6 +801,7 @@ parse_send_args() {
   return 0
 }
 
+# Parse arguments for the list command and record leftovers in PARSED_ARGS.
 parse_list_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -834,6 +864,7 @@ parse_list_args() {
   return 0
 }
 
+# Parse arguments for the logs command and record leftovers in PARSED_ARGS.
 parse_logs_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -876,6 +907,7 @@ parse_logs_args() {
   return 0
 }
 
+# Parse arguments for the read command and record leftovers in PARSED_ARGS.
 parse_read_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -932,6 +964,7 @@ parse_read_args() {
   return 0
 }
 
+# Parse arguments for the prune command and record leftovers in PARSED_ARGS.
 parse_prune_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -986,6 +1019,7 @@ parse_prune_args() {
   return 0
 }
 
+# Parse arguments for the enable command and record leftovers in PARSED_ARGS.
 parse_enable_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1068,6 +1102,7 @@ parse_enable_args() {
   return 0
 }
 
+# Parse arguments for the service command and record leftovers in PARSED_ARGS.
 parse_service_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1110,6 +1145,7 @@ parse_service_args() {
   return 0
 }
 
+# Parse arguments for the pull command and record leftovers in PARSED_ARGS.
 parse_pull_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1164,6 +1200,7 @@ parse_pull_args() {
   return 0
 }
 
+# Parse arguments for the status command and record leftovers in PARSED_ARGS.
 parse_status_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1226,6 +1263,7 @@ parse_status_args() {
   return 0
 }
 
+# Parse arguments for the reset command and record leftovers in PARSED_ARGS.
 parse_reset_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1286,6 +1324,7 @@ parse_reset_args() {
   return 0
 }
 
+# Parse arguments for the watch command and record leftovers in PARSED_ARGS.
 parse_watch_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1387,6 +1426,7 @@ parse_watch_args() {
   return 0
 }
 
+# Parse arguments for the number command and record leftovers in PARSED_ARGS.
 parse_number_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1429,6 +1469,7 @@ parse_number_args() {
   return 0
 }
 
+# Parse arguments for the smsc command and record leftovers in PARSED_ARGS.
 parse_smsc_args() {
   PARSED_ARGS=()
   local -a out=()
@@ -1471,6 +1512,7 @@ parse_smsc_args() {
   return 0
 }
 
+# Route to the parser for the active subcommand and store remaining args.
 parse_command_args() {
   local command="$1"
   shift || true
@@ -1720,6 +1762,7 @@ list_modem_ids_sorted() {
   jq -r '."modem-list"[]? | split("/")[-1]' <<<"$list_json" | sort -n
 }
 
+# Check whether modem info JSON matches a human-friendly selector.
 modem_info_matches_selector() {
   local selector_raw="$1"
   local info_json="$2"
@@ -1946,6 +1989,7 @@ get_modem_id() {
 }
 
 
+# Resolve a modem selector and return its mmcli JSON description.
 get_modem() {
   local selector="${1:-}"
 
@@ -1977,6 +2021,7 @@ get_modem() {
   mmcli -m "$mmcli_target" -J
 }
 
+# Convert modem JSON into a concise key=value summary string.
 modem_info_string_from_json() {
   local info_json="$1"
   local fallback_id="${2:-}"
@@ -2034,6 +2079,7 @@ modem_info_string_from_json() {
     "$id" "$manufacturer" "$model" "$plugin" "$primary" "$ports" "$phone" "$cc_label"
 }
 
+# Get modem JSON and emit a formatted info string with optional prefix.
 get_modem_info() {
   local selector="${1:-}"
   local prefix="${2:-}"
@@ -2076,6 +2122,7 @@ modem_info_brief() {
   printf "id='%s'" "$fallback"
 }
 
+# Log modem identification details with an optional prefix.
 log_modem_details() {
   local mid="$1" prefix="${2:-}"
   local info
@@ -2094,6 +2141,7 @@ log_modem_details() {
   fi
 }
 
+# Determine the modem's AT device path, optionally waiting for availability.
 get_modem_at_port() {
   local wait_enabled="$AT_WAIT_MODEM"
   local wait_timeout="$AT_WAIT_TIMEOUT"
@@ -2190,6 +2238,7 @@ get_modem_at_port() {
   done
 }
 
+# Send an AT command directly to the resolved modem port.
 at_command_direct() {
   local cmd="$1"
   local port
@@ -2259,6 +2308,7 @@ at_command_direct() {
   return 1
 }
 
+# Apply vendor-specific AT configuration for Huawei modems.
 configure_huawei_modem() {
   echo_info "huawei: configuring modem for SMS text mode"
 
@@ -2280,11 +2330,13 @@ configure_huawei_modem() {
   done
 }
 
+# Apply vendor-specific configuration for Quectel modems (currently no-op).
 configure_quectel_modem() {
   echo_debug "quectel: no vendor-specific configuration required"
   return 0
 }
 
+# Infer the modem vendor from mmcli-provided JSON information.
 modem_vendor_from_info_json() {
   local info_json="$1"
 
@@ -2309,6 +2361,7 @@ modem_vendor_from_info_json() {
   return 1
 }
 
+# Run vendor-specific configuration unless excluded by skip patterns.
 configure_modem_vendor() {
   local info_json="$1"
 
@@ -2356,6 +2409,7 @@ configure_modem_vendor() {
   esac
 }
 
+# Issue the Quectel power-down command as part of reset handling.
 reset_quectel_modem() {
   reset_log "quectel: sending AT+QPOWD=0"
 
@@ -2372,6 +2426,7 @@ reset_quectel_modem() {
   return 0
 }
 
+# Perform vendor-specific reset logic for the current modem.
 reset_modem_vendor() {
   local info_json="${1:-}"
   local vendor="${2:-}"
@@ -2397,6 +2452,7 @@ reset_modem_vendor() {
   return 0
 }
 
+# Find the sysfs path backing a modem port name.
 usb_sysfs_path_for_port() {
   local port="$1"
   local path=""
@@ -2418,6 +2474,7 @@ usb_sysfs_path_for_port() {
   return 1
 }
 
+# Ascend sysfs to locate the USB device directory for a port.
 usb_device_dir_for_path() {
   local path="$1"
   local dir="$path"
@@ -2435,6 +2492,7 @@ usb_device_dir_for_path() {
   return 1
 }
 
+# Temporarily deauthorize and reauthorize the modem's USB device.
 modem_usb_replug() {
   local info_json="$1"
 
@@ -2672,6 +2730,7 @@ resolve_default_recipient() {
   return 1
 }
 
+# Detect whether ModemManager is running via the debug wrapper.
 modemmanager_running_with_debug() {
   pgrep -a -f 'ModemManager-wrapper.*--debug' &>/dev/null
 }
@@ -2717,6 +2776,7 @@ at_command() {
   return 0
 }
 
+# Start an interactive AT command session over the modem port.
 at_command_interactive() {
   local port
   if ! port="$(get_modem_at_port)"
@@ -2729,15 +2789,18 @@ at_command_interactive() {
   socat - "${port},crnl"
 }
 
+# Invoke logread filtered for this script's messages.
 mmsms_logread() {
   echo_debug "logread args: $*"
   logread -e "$SCRIPT_NAME" "$@"
 }
 
+# Call the init script for the mmsms service with given arguments.
 mmsms_service_action() {
   "/etc/init.d/${SCRIPT_NAME}" "$@"
 }
 
+# Update the repository and optionally restart the service after pulling.
 mmsms_repo_pull() {
   if [[ -n "$PULL_HARD_RESET" ]]
   then
@@ -2772,6 +2835,7 @@ mmsms_repo_pull() {
   return 0
 }
 
+# Flatten multiline AT command responses into a log-friendly string.
 format_at_response() {
   local resp="$1"
 
@@ -2827,6 +2891,7 @@ at_first_quoted_decoded() {
   printf '%s' "$q"
 }
 
+# Choose an ANSI color for a given SMS state.
 sms_state_color() { # $1=state
   local state="${1,,}"
   case "$state" in
@@ -2845,6 +2910,7 @@ sms_state_color() { # $1=state
   esac
 }
 
+# Choose an ANSI color for a given SMS type.
 sms_type_color() { # $1=type
   local type="${1,,}"
   case "$type" in
@@ -2863,6 +2929,7 @@ sms_type_color() { # $1=type
   esac
 }
 
+# Summarize SMS direction and party labels for display.
 sms_read_party_info() { # $1=type, $2=remote, $3=own
   local type="${1,,}"
   local remote="$2"
@@ -2895,11 +2962,13 @@ sms_read_party_info() { # $1=type, $2=remote, $3=own
   printf '%s\t%s\t%s\t%s\t%s' "$direction" "$remote_label" "$local_label" "$remote_value" "$local_value"
 }
 
+# Fetch an SMS using mmcli and print the raw output.
 sms_read_raw() {
   local msg_id="$1"
   mmcli_cmd --sms "$msg_id"
 }
 
+# Collect rich JSON details for an SMS message using mmcli.
 sms_read_details_json() {
   local msg_id="$1"
   local js pdu msg_type own="" number smsc party_info direction remote_label local_label remote_value local_value payload
@@ -2995,6 +3064,7 @@ sms_read_details_json() {
   printf '%s\n' "$payload"
 }
 
+# Render SMS details in a colorized human-readable format.
 sms_read_pretty() {
   local msg_id="$1"
   local payload
@@ -3168,6 +3238,7 @@ sms_read_pretty() {
     ' <<<"$payload"
 }
 
+# Output the JSON payload produced by sms_read_details_json.
 sms_read_json() {
   local msg_id="$1"
   local payload
@@ -3181,6 +3252,7 @@ sms_read_json() {
 }
 
 
+# Send an SMS, handling defaults, validation, and optional chunking.
 sms_send() {
   local recipient=""
   local text=""
@@ -3336,6 +3408,7 @@ sms_send() {
   return 0
 }
 
+# Send a single SMS chunk with retries and logging.
 sms_send_chunk_text() {
   local recipient="$1"
   local text="$2"
@@ -3508,6 +3581,7 @@ recipient_allowed_for_modem() {
   return 1
 }
 
+# Retry sending an SMS on alternate modems when fallback is enabled.
 sms_send_with_fallback() {
   local orig_args=("$@")
   local args=("$@")
@@ -3654,6 +3728,7 @@ sms_send_with_fallback() {
   return 1
 }
 
+# Delete all SMS messages on the currently selected modem.
 sms_prune_all() {
   local ids
   mapfile -t ids < <(mmcli_cmd --messaging-list-sms -J | \
@@ -3678,6 +3753,7 @@ sms_prune_all() {
   done
 }
 
+# Delete sent outgoing SMS messages on the current modem.
 sms_prune_sent() {
   # Delete only messages that are outgoing and already sent
   local list ids id js state pdu sent_ids=()
@@ -3728,6 +3804,7 @@ sms_prune_sent() {
   done
 }
 
+# Delete sent SMS messages across all detected modems.
 sms_prune_sent_modems() {
   local mids mid
 
@@ -3751,6 +3828,7 @@ sms_prune_sent_modems() {
   done
 }
 
+# Delete all SMS messages across all detected modems.
 sms_prune_all_modems() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
@@ -3773,6 +3851,7 @@ sms_prune_all_modems() {
   done
 }
 
+# Print the header row for SMS listing output.
 sms_list_print_header() {
   local include_mid=""
   local header
@@ -3806,6 +3885,7 @@ sms_list_print_header() {
   fi
 }
 
+# Print a formatted table row for a single SMS entry.
 sms_list_print_entry() {
   local mid="$1"
   local id="$2"
@@ -3880,6 +3960,7 @@ sms_list_print_entry() {
   fi
 }
 
+# List SMS messages respecting the selected output mode and scope.
 sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
 
@@ -4153,6 +4234,7 @@ sms_list_pretty() {
   done
 }
 
+# Resolve and enable a modem, optionally waiting for it to appear.
 enable_modem() {
   local selector_input="${1:-}"
   local selector="$selector_input"
@@ -4351,6 +4433,7 @@ enable_modem() {
   return 1
 }
 
+# Enable each detected modem in sequence.
 enable_all_modems() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
@@ -4385,6 +4468,7 @@ enable_all_modems() {
   fi
 }
 
+# Reset the current modem with optional service restarts and USB replugging.
 modem_reset() {
   local service="/etc/init.d/modemmanager"
   local has_service=""
@@ -4465,6 +4549,7 @@ modem_reset() {
   return 0
 }
 
+# Reset every detected modem using modem_reset.
 modem_reset_all() {
   local mids mid
   if ! mapfile -t mids < <(list_modem_ids_sorted)
@@ -4485,6 +4570,7 @@ modem_reset_all() {
   done
 }
 
+# Log reset operations when not running in quiet mode.
 reset_log() {
   if [[ -z $QUIET ]]
   then
@@ -4492,6 +4578,7 @@ reset_log() {
   fi
 }
 
+# Clean up watcher resources and background processes.
 watch_cleanup() {
   watch_stop_workers
 
@@ -4523,6 +4610,7 @@ watch_cleanup() {
   fi
 }
 
+# Return the queue key used to group watcher workers per modem.
 watch_queue_key() {
   local modem_hint="$1"
 
@@ -4534,6 +4622,7 @@ watch_queue_key() {
   fi
 }
 
+# Create or reuse the async work directory for watcher jobs.
 watch_async_dir_prepare() {
   if [[ -n "$WATCH_ASYNC_DIR" && -d "$WATCH_ASYNC_DIR" ]]
   then
@@ -4561,6 +4650,7 @@ watch_async_dir_prepare() {
   return 0
 }
 
+# Check if a PID still corresponds to a running non-zombie process.
 watch_pid_alive() {
   local pid="$1"
 
@@ -4589,6 +4679,7 @@ watch_pid_alive() {
   return 0
 }
 
+# Remove the filesystem lock held by a watcher worker.
 watch_worker_release_lock() {
   local lock_path="$1"
 
@@ -4606,6 +4697,7 @@ watch_worker_release_lock() {
   fi
 }
 
+# Track a newly spawned watcher worker PID for a modem queue.
 watch_worker_register() {
   local modem_key="$1"
   local pid="$2"
@@ -4626,6 +4718,7 @@ watch_worker_register() {
   fi
 }
 
+# Prune exited watcher workers for a given modem queue.
 watch_worker_prune_for_modem() {
   local modem_key="$1"
 
@@ -4657,6 +4750,7 @@ watch_worker_prune_for_modem() {
   fi
 }
 
+# Prune exited watcher workers for all modem queues.
 watch_worker_prune_all() {
   local modem_key
 
@@ -4666,6 +4760,7 @@ watch_worker_prune_all() {
   done
 }
 
+# Count active watcher workers for a modem queue.
 watch_worker_pending_count() {
   local modem_key="$1"
 
@@ -4685,6 +4780,7 @@ watch_worker_pending_count() {
   printf '%s' "${#pid_list[@]}"
 }
 
+# Spawn an asynchronous worker to handle an incoming SMS.
 watch_spawn_worker() {
   local id="$1"
   local modem_hint="$2"
@@ -4718,6 +4814,7 @@ watch_spawn_worker() {
   return 0
 }
 
+# Queue an SMS for asynchronous handling, falling back to synchronous work when needed.
 watch_enqueue_sms() {
   local id="$1"
   local modem_hint="$2"
@@ -4745,6 +4842,7 @@ watch_enqueue_sms() {
   watch_handle_sms "$id" "$modem_hint"
 }
 
+# Terminate and reap all watcher worker processes.
 watch_stop_workers() {
   watch_worker_prune_all
 
@@ -4792,6 +4890,7 @@ watch_stop_workers() {
   fi
 }
 
+# Continuously auto-enable modems while watch mode is active.
 watch_enable_monitor_loop() {
   local target_modem="${1:-}"
   local enable_all="${2:-}"
@@ -4890,6 +4989,7 @@ watch_enable_monitor_loop() {
   done
 }
 
+# Start the background loop that auto-enables modems for watch mode.
 watch_start_enable_monitor() {
   if [[ -z "$WATCH_ENABLE" ]]
   then
@@ -4908,12 +5008,14 @@ watch_start_enable_monitor() {
   WATCH_MODEM_MONITOR_PID=$!
 }
 
+# Normalize a phone number to digits for whitelist comparisons.
 watch_canon_number() {
   local n="${1:-}"
   n="${n//[^0-9]/}"
   printf '%s' "$n"
 }
 
+# Check whether a sender number is present in the whitelist.
 watch_in_whitelist() {
   local original="${1:-}"
 
@@ -4940,6 +5042,7 @@ echo_info "watch: sender '${original}' matched whitelist entry '${allowed}' (whi
   return 1
 }
 
+# Send an SMS reply, optionally using fallback behavior.
 watch_send_reply() {
   local to="$1"
   local msg="$2"
@@ -4967,6 +5070,7 @@ watch_send_reply() {
   fi
 }
 
+# Execute a shell command for watch automation with timeout handling.
 watch_run_command() {
   local user_cmd="$1"
   local cmd="NO_COLOR=1 $1"
@@ -5006,6 +5110,7 @@ watch_run_command() {
     '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}'
 }
 
+# Load and cache the modem's own number via mmcli.
 load_own_number() {
   if [[ -n "$OWN_NUMBER" ]]
   then
@@ -5031,6 +5136,7 @@ load_own_number() {
   return 0
 }
 
+# Retrieve and cache the SMSC number using AT+CSCA?.
 get_smsc_number() {
   if [[ -n "$SMSC_NUMBER" ]]
   then
@@ -5059,6 +5165,7 @@ get_smsc_number() {
   return 1
 }
 
+# Build a structured JSON object summarizing modem status details.
 modem_status_details_json() {
   local js own smsc country_code="" country_label="" payload
   local fallback_modem="$MODEM"
@@ -5193,6 +5300,7 @@ modem_status_details_json() {
   printf '%s\n' "$payload"
 }
 
+# Output status for the current modem in the requested format.
 modem_status_single() {
   local payload raw
 
@@ -5414,6 +5522,7 @@ modem_status_single() {
     ' <<<"$payload"
 }
 
+# Display modem status for one or many modems respecting output flags.
 modem_status() {
   local target_mid="${1:-}"
 
@@ -5503,6 +5612,7 @@ modem_status() {
   modem_status_single
 }
 
+# Print the modem's own phone number if available.
 modem_number() {
   if ! load_own_number
   then
@@ -5526,6 +5636,7 @@ modem_number() {
   return 0
 }
 
+# Process an incoming SMS by validating, forwarding, or executing commands.
 watch_handle_sms() {
   local id="$1"
   local prefer_modem_id="${2:-}"
@@ -5696,6 +5807,7 @@ watch_handle_sms() {
   done
 }
 
+# Monitor D-Bus for new SMS events and dispatch handlers.
 watch_messages() {
   export PATH="/usr/local/bin:/srv/bin:$PATH"
   trap watch_cleanup EXIT INT TERM
@@ -5771,6 +5883,7 @@ watch_messages() {
   done <"$WATCH_FIFO"
 }
 
+# Decide whether a command needs MODEM resolved ahead of time.
 command_requires_modem_resolution() {
   local cmd="$1"
 
@@ -5783,6 +5896,7 @@ command_requires_modem_resolution() {
   return 0
 }
 
+# Resolve MODEM to a concrete modem id and log the selection context.
 resolve_modem_selection() {
   local cmd="$1"
   local defer_resolution=""
@@ -5903,6 +6017,7 @@ resolve_modem_selection() {
   return 0
 }
 
+# Parse CLI arguments, resolve configuration, and dispatch the requested command.
 main() {
   local command=""
   local -a PRE_ARGS=()
