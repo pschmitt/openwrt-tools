@@ -4642,8 +4642,9 @@ watch_send_reply() {
 }
 
 watch_run_command() {
+  local user_cmd="$1"
   local cmd="NO_COLOR=1 $1"
-  local output rc reason="exit" json
+  local output rc status="exit" json now
   rc=0
 
   if command -v timeout >/dev/null 2>&1
@@ -4652,10 +4653,10 @@ watch_run_command() {
     rc=$?
     if (( rc == 124 ))
     then
-      reason="timeout"
+      status="timeout"
     elif (( rc >= 128 ))
     then
-      reason="killed"
+      status="killed"
     fi
   else
     output="$(bash -c "$cmd" 2>&1)"
@@ -4668,11 +4669,14 @@ watch_run_command() {
     output="${output:0:CMD_OUTPUT_MAX_LEN}\n…(truncated)…"
   fi
 
+  now="$(date -Iseconds)"
   json="$(jq -cn \
+    --arg cmd "$user_cmd" \
     --argjson rc "$rc" \
-    --arg exit_reason "$reason" \
+    --arg status "$status" \
+    --arg date "$now" \
     --arg output "$output" \
-    '{rc:$rc, exit_reason:$exit_reason, output:$output}')"
+    '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}')"
 
   printf '%s' "$json"
 }
@@ -5297,15 +5301,21 @@ watch_handle_sms() {
           watch_send_reply "$sender" "ERR: empty command"
         else
           echo_info "executing command from $sender: $cmd"
-          local cmd_result rc exit_reason output
+          local cmd_result rc status output cmd_header
           cmd_result="$(watch_run_command "$cmd")"
           rc="$(jq -r '.rc' <<<"$cmd_result")"
-          exit_reason="$(jq -r '.exit_reason' <<<"$cmd_result")"
+          status="$(jq -r '.status' <<<"$cmd_result")"
           output="$(jq -r '.output' <<<"$cmd_result")"
-          echo_info "command from $sender finished rc=$rc exit_reason=$exit_reason"
+          cmd_header="$(jq -cr '{cmd, rc, status, date}' <<<"$cmd_result")"
+          echo_info "command from $sender finished rc=$rc status=$status"
           # Before sending our reply, prune already-sent messages on this modem
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
-          watch_send_reply "$sender" "rc=${rc} exit_reason=${exit_reason}\n${output}"
+          if [[ -n "$output" ]]
+          then
+            watch_send_reply "$sender" "${cmd_header}\n${output}"
+          else
+            watch_send_reply "$sender" "$cmd_header"
+          fi
         fi
 
         handled=1
