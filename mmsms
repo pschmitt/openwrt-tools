@@ -3267,7 +3267,10 @@ sms_send_chunk_text() {
   local rc=1
 
   # Create the SMS first (retrying creation only if creation itself fails)
-  if (( max_attempts < 1 )); then max_attempts=1; fi
+  if (( max_attempts < 1 ))
+  then
+    max_attempts=1
+  fi
 
   local create_json
   while (( create_attempt <= max_attempts ))
@@ -3417,8 +3420,8 @@ sms_send_with_fallback() {
   recipient="$resolved_recipient"
 
   # Gather other modems
-  local mids mid cur_id
-  cur_id="$MODEM"
+  local cur_id="$MODEM"
+
   if [[ "$cur_id" == "any" ]]
   then
     local _j
@@ -3428,11 +3431,13 @@ sms_send_with_fallback() {
     fi
   fi
 
+  local mids
   if ! mapfile -t mids < <(list_modem_ids_sorted)
   then
     return 1
   fi
 
+  local mid
   for mid in "${mids[@]}"
   do
     [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
