@@ -3211,17 +3211,17 @@ sms_send() {
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
       rc=0
-      echo_success "message sent with modem={$log_modem} recipient='$recipient'"
+      echo_success "message '${sms_id}' sent with modem={${log_modem}} recipient='$recipient'"
       break
     fi
 
     if (( send_attempt == max_attempts ))
     then
-      echo_error "failed to send SMS after $max_attempts attempts"
+      echo_error "failed to send SMS '${sms_id}' after $max_attempts attempts"
       break
     fi
 
-    echo_warning "failed to send SMS (attempt $send_attempt/$max_attempts), retrying"
+    echo_warning "failed to send SMS '${sms_id}' (attempt $send_attempt/$max_attempts), retrying"
     send_attempt=$((send_attempt + 1))
   done
 
