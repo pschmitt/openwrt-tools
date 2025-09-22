@@ -332,11 +332,11 @@ Usage: $SCRIPT_NAME [GLOBAL OPTIONS] send [RECIPIENT] TEXT|-
 Sends an SMS. If RECIPIENT is omitted, uses DEFAULT_RECIPIENT_XX/CC/DEFAULT.
 
 Relevant flags:
-  -A, --auto, --auto-recipient  When fallback, use modem defaults if original blocked
+  -A, --auto           During fallback, use modem default recipient if original blocked (cc restriction)
   -c, --config PATH    Load config for defaults (only needed outside 'watch')
   -F, --fallback       Try other modems on failure (sorted by id)
       --chunk[=SIZE]   Split message into SIZE-character chunks (default: 160 when omitted)
-  -f, --allow-foreign Allow sending outside the modem's home country code
+  -f, --allow-foreign  Allow sending outside the modem's home country code
   -R, --retry COUNT    Override SMS resend attempts
 USAGE
 }
