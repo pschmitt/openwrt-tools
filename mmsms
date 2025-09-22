@@ -5739,17 +5739,12 @@ watch_handle_sms() {
           cmd_result="$(watch_run_command "$cmd")"
           rc="$(jq -r '.rc' <<<"$cmd_result")"
           status="$(jq -r '.status' <<<"$cmd_result")"
-          output="$(jq -r '.output // "*no output*"' <<<"$cmd_result")"
+          output="$(jq -r '.output' <<<"$cmd_result")"
           cmd_header="$(jq -cr '{cmd, rc, status, date}' <<<"$cmd_result")"
           echo_info "command from $sender finished rc=$rc status=$status"
           # Before sending our reply, prune already-sent messages on this modem
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
-          if [[ -n "$output" ]]
-          then
-            watch_send_reply "$sender" "${cmd_header}\n${output}"
-          else
-            watch_send_reply "$sender" "$cmd_header"
-          fi
+          watch_send_reply "$sender" "${cmd_header}\n${output:-*output*}"
         fi
 
         handled=1
