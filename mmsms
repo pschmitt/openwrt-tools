@@ -29,6 +29,11 @@ AT_WAIT_SLEEP_INTERVAL="${AT_WAIT_SLEEP_INTERVAL:-2}"
 AT_WAIT_MODEM="${AT_WAIT_MODEM:-}"
 AT_WAIT_TIMEOUT="${AT_WAIT_TIMEOUT:-0}"
 
+ENABLE_WAIT_TIMEOUT_DEFAULT="${ENABLE_WAIT_TIMEOUT_DEFAULT:-600}"
+ENABLE_WAIT_SLEEP_INTERVAL="${ENABLE_WAIT_SLEEP_INTERVAL:-2}"
+ENABLE_WAIT_MODEM="${ENABLE_WAIT_MODEM:-}"
+ENABLE_WAIT_TIMEOUT="${ENABLE_WAIT_TIMEOUT:-0}"
+
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 
 WATCH_DELETE_AFTER="${WATCH_DELETE_AFTER:-${DELETE_AFTER:-0}}"
@@ -359,12 +364,15 @@ USAGE
 
 usage_enable() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [-a|--all]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] enable [-a|--all] [-w|--wait[=SECONDS]]
 
-Enables the selected modem and waits for readiness.
+Enables the selected modem. With --wait, waits for a matching modem to appear
+before enabling it (optionally limited by SECONDS).
 
 Relevant flags:
   -a, --all    Enable all detected modems
+  -w, --wait[=SECONDS]
+                Wait for modem detection before enabling (default timeout: 600s)
       --skip-modem-init PATTERN
                  Skip vendor-specific modem initialization when modem details
                  match PATTERN (repeatable)
@@ -983,6 +991,40 @@ parse_enable_args() {
       -a|--all)
         DEBUG_FLAGS+=("$1")
         ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -w|--wait)
+        DEBUG_FLAGS+=("$1")
+        ENABLE_WAIT_MODEM=1
+        if [[ ! "$ENABLE_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || (( ENABLE_WAIT_TIMEOUT <= 0 ))
+        then
+          ENABLE_WAIT_TIMEOUT="$ENABLE_WAIT_TIMEOUT_DEFAULT"
+        fi
+        shift
+        if [[ -n "${1:-}" && "${1:-}" =~ ^[0-9]+$ ]]
+        then
+          ENABLE_WAIT_TIMEOUT="$1"
+          shift
+        fi
+        continue
+        ;;
+      -w=*|--wait=*)
+        local wait_value
+        wait_value="${1#*=}"
+        if [[ -z "$wait_value" ]]
+        then
+          echo_error "missing value for --wait"
+          return 2
+        fi
+        if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
+        then
+          echo_error "invalid value for --wait: '$wait_value' (expected integer seconds)"
+          return 2
+        fi
+        DEBUG_FLAGS+=("$1")
+        ENABLE_WAIT_MODEM=1
+        ENABLE_WAIT_TIMEOUT="$wait_value"
         shift
         continue
         ;;
@@ -4057,15 +4099,28 @@ sms_list_pretty() {
 }
 
 enable_modem() {
-  local expect_id="${1:-}"
-  local max_wait=600
-  local sleep_period=2
+  local selector_input="${1:-}"
+  local selector="$selector_input"
+  local wait_enabled="${ENABLE_WAIT_MODEM:-}"
+  local wait_timeout="${ENABLE_WAIT_TIMEOUT:-0}"
+  local wait_timeout_default="$ENABLE_WAIT_TIMEOUT_DEFAULT"
+  local sleep_period="$ENABLE_WAIT_SLEEP_INTERVAL"
+  local service_wait_timeout=600
   local elapsed=0
+
+  if [[ -z "$selector" ]]
+  then
+    selector="$MODEM"
+  fi
+  if [[ -z "$selector" ]]
+  then
+    selector="any"
+  fi
 
   echo_info "waiting for D-Bus system socket"
   until [[ -S /var/run/dbus/system_bus_socket ]]
   do
-    if (( elapsed >= max_wait ))
+    if (( elapsed >= service_wait_timeout ))
     then
       echo_warning "timeout waiting for D-Bus socket"
       return 1
@@ -4077,9 +4132,9 @@ enable_modem() {
 
   echo_info "waiting for ModemManager"
   elapsed=0
-  until mmcli -L
+  until mmcli -L >/dev/null 2>&1
   do
-    if (( elapsed >= max_wait ))
+    if (( elapsed >= service_wait_timeout ))
     then
       echo_warning "timeout waiting for ModemManager"
       return 1
@@ -4089,97 +4144,129 @@ enable_modem() {
     elapsed=$((elapsed + sleep_period))
   done
 
-  echo_info "waiting for modem detection"
-  elapsed=0
-  local list_json
-  local modem_count
+  local detection_timeout=0
+  if [[ -n "$wait_enabled" ]]
+  then
+    if [[ ! "$wait_timeout" =~ ^[0-9]+$ ]] || (( wait_timeout <= 0 ))
+    then
+      wait_timeout="$wait_timeout_default"
+    fi
+    detection_timeout="$wait_timeout"
+  fi
+
+  if [[ -n "$wait_enabled" ]]
+  then
+    echo_info "waiting for modem detection"
+  else
+    echo_info "checking for modem detection"
+  fi
+
+  local detection_elapsed=0
+  local resolved_id
+  local resolve_output
+  local resolve_status=0
+  local last_error
+  local last_error_is_custom
+  local selector_is_any
+
+  if [[ "$selector" == "any" ]]
+  then
+    selector_is_any=1
+  fi
+
+  local -a any_ids=()
   while :
   do
-    list_json=""
-    modem_count=0
-    if list_json="$(mmcli -L -J)"
+    if [[ -n "$selector_is_any" ]]
     then
-      if [[ -n "$expect_id" && "$expect_id" =~ ^[0-9]+$ ]]
+      if mapfile -t any_ids < <(list_modem_ids_sorted)
       then
-        local present
-        present="$(jq -r --arg id "$expect_id" '
-          (."modem-list" // [])
-          | map(split("/")[-1])
-          | any(. == $id)
-        ' <<<"$list_json" || printf 'false')"
-        if [[ "$present" == "true" ]]
+        if (( ${#any_ids[@]} > 0 ))
         then
-          # Capture brief modem details for logging once detection succeeds
-          local _brief
-          _brief="$(modem_info_brief "$expect_id")"
+          resolved_id="any"
+          resolve_status=0
           break
         fi
+        last_error="no modems detected"
+        last_error_is_custom=1
+        resolve_status=1
       else
-        modem_count="$(jq -r '((."modem-list" // []) | length) // 0' <<<"$list_json" || printf '0')"
-        if [[ "$modem_count" =~ ^[0-9]+$ ]] && (( modem_count > 0 ))
-        then
-          break
-        fi
+        last_error="could not query modem list via mmcli"
+        last_error_is_custom=1
+        resolve_status=1
       fi
+    else
+      resolve_output="$(get_modem_id "$selector" 2>&1)"
+      resolve_status=$?
+      if (( resolve_status == 0 ))
+      then
+        resolved_id="$(trim "$resolve_output")"
+        break
+      fi
+      last_error="$resolve_output"
+      last_error_is_custom=""
     fi
 
-    if (( elapsed >= max_wait ))
+    if (( resolve_status == 2 )) || [[ -z "$wait_enabled" ]]
     then
-      echo_warning "timeout waiting for modem detection"
+      if [[ -n "$last_error_is_custom" ]]
+      then
+        echo_error "$last_error"
+      else
+        [[ -n "$last_error" ]] && printf '%s\n' "$last_error" >&2
+      fi
+      return "$resolve_status"
+    fi
+
+    if (( detection_timeout > 0 )) && (( detection_elapsed >= detection_timeout ))
+    then
+      if [[ -n "$last_error_is_custom" ]]
+      then
+        echo_error "$last_error"
+      else
+        [[ -n "$last_error" ]] && printf '%s\n' "$last_error" >&2
+      fi
+      echo_warning "timeout waiting for modem detection of '$selector'"
       return 1
     fi
 
     sleep "$sleep_period"
-    elapsed=$((elapsed + sleep_period))
+    detection_elapsed=$((detection_elapsed + sleep_period))
   done
 
-  if [[ -n "$expect_id" && "$expect_id" =~ ^[0-9]+$ ]]
+  if [[ -z "$resolved_id" ]]
   then
-    if [[ -n "$list_json" ]]
-    then
-      local _detected_info
-      _detected_info="$(jq -r --arg id "$expect_id" '
-        (."modem-list" // [])
-        | map(select(split("/")[-1] == $id))
-        | first
-        | select(. != null)
-        | {
-            id: (split("/")[-1]),
-            manufacturer: "--",
-            model: "--",
-            plugin: "--",
-            primary: "--",
-            ports: "--"
-          }
-        | ("detected expected modem: id=" + .id
-             + " manufacturer=" + .manufacturer
-             + " model=" + .model
-             + " plugin=" + .plugin
-             + " primary=" + .primary
-             + " ports=" + .ports)
-      ' <<<"$list_json")"
-      if [[ -z "$_detected_info" || "$_detected_info" == "null" ]]
-      then
-        _detected_info="detected expected modem id=$expect_id"
-      fi
-      echo_info "$_detected_info"
-    else
-      echo_info "detected expected modem id=$expect_id"
-    fi
-  else
-    echo_info "detected $modem_count modem(s)"
+    echo_warning "failed to resolve modem selector '$selector'"
+    return 1
   fi
 
-  # Use the expected modem id if provided; otherwise rely on MODEM
-  # shellcheck disable=SC2031
+  MODEM="$resolved_id"
+
+  if [[ "$MODEM" == "any" ]]
+  then
+    local _j _id
+    if _j="$(mmcli_cmd -J)"
+    then
+      _id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
+      if [[ -n "$_id" ]]
+      then
+        MODEM="$_id"
+      fi
+    fi
+  fi
+
   local enable_target="$MODEM"
 
-  if [[ -n "$expect_id" ]]
+  if [[ -z "$QUIET" ]]
   then
-    enable_target="$expect_id"
+    if [[ "$enable_target" =~ ^[0-9]+$ ]]
+    then
+      log_modem_details "$enable_target" "detected "
+    else
+      echo_info "resolved modem selector '$selector' to '$enable_target'"
+    fi
+    MODEM_DETAILS_LOGGED=1
   fi
-
-  local MODEM="$enable_target"
 
   if mmcli_cmd --enable
   then
@@ -4323,16 +4410,27 @@ modem_reset() {
   fi
 
   reset_log "enabling modem"
+  local prev_wait_mode="${ENABLE_WAIT_MODEM:-}"
+  local prev_wait_timeout="${ENABLE_WAIT_TIMEOUT:-}"
+  ENABLE_WAIT_MODEM=1
+  if [[ ! "$ENABLE_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || (( ENABLE_WAIT_TIMEOUT <= 0 ))
+  then
+    ENABLE_WAIT_TIMEOUT="$ENABLE_WAIT_TIMEOUT_DEFAULT"
+  fi
   if ! enable_modem "$MODEM"
   then
     echo_warning "failed to enable modem after reset, retrying in 5s"
     sleep 5
     if ! enable_modem "$MODEM"
     then
+      ENABLE_WAIT_MODEM="$prev_wait_mode"
+      ENABLE_WAIT_TIMEOUT="$prev_wait_timeout"
       echo_error "failed to enable modem after reset"
       return 1
     fi
   fi
+  ENABLE_WAIT_MODEM="$prev_wait_mode"
+  ENABLE_WAIT_TIMEOUT="$prev_wait_timeout"
 
   return 0
 }
@@ -5657,6 +5755,12 @@ command_requires_modem_resolution() {
 
 resolve_modem_selection() {
   local cmd="$1"
+  local defer_resolution=""
+
+  if [[ "$cmd" == "enable" && -n "$ENABLE_WAIT_MODEM" && -z "$ALL_MODEMS" ]]
+  then
+    defer_resolution=1
+  fi
 
   if [[ -n "$DEFAULT_MODEM" ]]
   then
@@ -5667,6 +5771,12 @@ resolve_modem_selection() {
   then
     MODEM="$DEFAULT_MODEM"
     echo_debug "using default modem $MODEM"
+  fi
+
+  if [[ -n "$defer_resolution" ]]
+  then
+    echo_debug "deferring modem resolution for enable command (--wait active)"
+    return 0
   fi
 
   local resolved

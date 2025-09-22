@@ -1,2 +1,4 @@
 *.tgz
 *.tar.gz
+*.orig
+*.rej
