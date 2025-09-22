@@ -5744,7 +5744,7 @@ watch_handle_sms() {
           echo_info "command from $sender finished rc=$rc status=$status"
           # Before sending our reply, prune already-sent messages on this modem
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
-          watch_send_reply "$sender" "${cmd_header}\n${output:-*output*}"
+          watch_send_reply "$sender" "${cmd_header}\n${output:-*no output*}"
         fi
 
         handled=1
