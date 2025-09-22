@@ -197,7 +197,6 @@ fi
 WATCH_FIFO=""
 WATCH_DBUS_PID=""
 WATCH_MODEM_MONITOR_PID=""
-WATCH_CMD_RC=0
 MODEM_DETAILS_LOGGED=""
 
 raw_plain_requested() {
@@ -4368,15 +4367,13 @@ watch_send_reply() {
 
 watch_run_command() {
   local cmd="NO_COLOR=1 $1"
-  local output rc reason="exit"
+  local output rc reason="exit" json
   rc=0
 
   if command -v timeout >/dev/null 2>&1
   then
-    if ! output="$(timeout -k "${WATCH_CMD_KILL_TIMEOUT}s" "${WATCH_CMD_TIMEOUT}s" bash -c "$cmd" 2>&1)"
-    then
-      rc=$?
-    fi
+    output="$(timeout -k "${WATCH_CMD_KILL_TIMEOUT}s" "${WATCH_CMD_TIMEOUT}s" bash -c "$cmd" 2>&1)"
+    rc=$?
     if (( rc == 124 ))
     then
       reason="timeout"
@@ -4385,13 +4382,9 @@ watch_run_command() {
       reason="killed"
     fi
   else
-    if ! output="$(bash -c "$cmd" 2>&1)"
-    then
-      rc=$?
-    fi
+    output="$(bash -c "$cmd" 2>&1)"
+    rc=$?
   fi
-
-  WATCH_CMD_RC=$rc
 
   output="${output%$'\n'}"
   if (( ${#output} > CMD_OUTPUT_MAX_LEN ))
@@ -4399,7 +4392,13 @@ watch_run_command() {
     output="${output:0:CMD_OUTPUT_MAX_LEN}\n…(truncated)…"
   fi
 
-  printf '%s' "$output"
+  json="$(jq -cn \
+    --argjson rc "$rc" \
+    --arg exit_reason "$reason" \
+    --arg output "$output" \
+    '{rc:$rc, exit_reason:$exit_reason, output:$output}')"
+
+  printf '%s' "$json"
 }
 
 load_own_number() {
@@ -5015,12 +5014,15 @@ watch_handle_sms() {
           watch_send_reply "$sender" "ERR: empty command"
         else
           echo_info "executing command from $sender: $cmd"
-          local output
-          output="$(watch_run_command "$cmd")"
-          echo_info "command from $sender finished rc=$WATCH_CMD_RC"
+          local cmd_result rc exit_reason output
+          cmd_result="$(watch_run_command "$cmd")"
+          rc="$(jq -r '.rc' <<<"$cmd_result")"
+          exit_reason="$(jq -r '.exit_reason' <<<"$cmd_result")"
+          output="$(jq -r '.output' <<<"$cmd_result")"
+          echo_info "command from $sender finished rc=$rc exit_reason=$exit_reason"
           # Before sending our reply, prune already-sent messages on this modem
           sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
-          watch_send_reply "$sender" "rc=${WATCH_CMD_RC}\n${output}"
+          watch_send_reply "$sender" "rc=${rc} exit_reason=${exit_reason}\n${output}"
         fi
 
         handled=1
