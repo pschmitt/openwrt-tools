@@ -54,19 +54,39 @@ PULL_NO_RESTART="${PULL_NO_RESTART:-}"
 PULL_HARD_RESET="${PULL_HARD_RESET:-}"
 SKIP_MODEM_INIT_PATTERNS=()
 
-# Token used to render section dividers in fancy modem status output
-MODEM_STATUS_SEPARATOR_TOKEN="__MODEM_STATUS_SEPARATOR__"
+# Shared ANSI color codes for consistent styling across outputs
+COLOR_RESET='0'
+COLOR_CYAN='36'
+COLOR_BOLD_RED='1;31'
+COLOR_BOLD_GREEN='1;32'
+COLOR_BOLD_YELLOW='1;33'
+COLOR_BOLD_BLUE='1;34'
+COLOR_BOLD_MAGENTA='1;35'
+COLOR_BOLD_CYAN='1;36'
+COLOR_BOLD_WHITE='1;37'
+
+ansi_escape() { # $1=colorcode -> ANSI escape sequence honoring NO_COLOR/CRON
+  local code="$1"
+
+  if [[ -z "$code" || -n "$NO_COLOR" || -n "$CRON" ]]
+  then
+    printf ''
+    return 0
+  fi
+
+  printf '\e[%sm' "$code"
+}
 
 # Shared ANSI color codes for consistent styling across outputs
-readonly COLOR_RESET='0'
-readonly COLOR_CYAN='36'
-readonly COLOR_BOLD_RED='1;31'
-readonly COLOR_BOLD_GREEN='1;32'
-readonly COLOR_BOLD_YELLOW='1;33'
-readonly COLOR_BOLD_BLUE='1;34'
-readonly COLOR_BOLD_MAGENTA='1;35'
-readonly COLOR_BOLD_CYAN='1;36'
-readonly COLOR_BOLD_WHITE='1;37'
+COLOR_RESET='0'
+COLOR_CYAN='36'
+COLOR_BOLD_RED='1;31'
+COLOR_BOLD_GREEN='1;32'
+COLOR_BOLD_YELLOW='1;33'
+COLOR_BOLD_BLUE='1;34'
+COLOR_BOLD_MAGENTA='1;35'
+COLOR_BOLD_CYAN='1;36'
+COLOR_BOLD_WHITE='1;37'
 
 trim() {
   local s="$1"
@@ -2732,211 +2752,10 @@ sms_read_raw() {
   mmcli_cmd --sms "$msg_id"
 }
 
-sms_read_pretty() {
+sms_read_details_json() {
   local msg_id="$1"
-  local js
+  local js pdu msg_type own="" number smsc party_info direction remote_label local_label remote_value local_value payload
 
-  if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
-  then
-    return 1
-  fi
-
-  local id
-  id="$(jq -r '.sms["dbus-path"] | split("/")[-1] // ""' <<<"$js")"
-  if [[ -z "$id" ]]
-  then
-    id="$msg_id"
-  fi
-
-  local modem_path modem_id
-  modem_path="$(jq -r '.sms.modem // ""' <<<"$js")"
-  if [[ -n "$modem_path" ]]
-  then
-    modem_id="${modem_path##*/}"
-  else
-    modem_id=""
-  fi
-
-  local pdu type state storage class smsc timestamp discharge delivery_state delivery_report encoding data number text
-  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
-  type="$(pdu_to_type "$pdu")"
-  state="$(jq -r '.sms.properties.state // ""' <<<"$js")"
-  storage="$(jq -r '.sms.properties.storage // ""' <<<"$js")"
-  class="$(jq -r '.sms.properties.class // ""' <<<"$js")"
-  smsc="$(jq -r '.sms.properties.smsc // ""' <<<"$js")"
-  smsc="$(ensure_plus "$smsc")"
-  timestamp="$(jq -r '.sms.properties.timestamp // ""' <<<"$js")"
-  discharge="$(jq -r '.sms.properties["discharge-timestamp"] // ""' <<<"$js")"
-  delivery_state="$(jq -r '.sms.properties["delivery-state"] // ""' <<<"$js")"
-  delivery_report="$(jq -r '.sms.properties["delivery-report"] // ""' <<<"$js")"
-  encoding="$(jq -r '.sms.content.encoding // ""' <<<"$js")"
-  data="$(jq -r '.sms.content.data // ""' <<<"$js")"
-  number="$(jq -r '.sms.content.number // ""' <<<"$js")"
-  number="$(ensure_plus "$number")"
-  text="$(jq -r '.sms.content.text // ""' <<<"$js")"
-  text=${text//$'\r'/}
-
-  local own=""
-  if load_own_number
-  then
-    own="$OWN_NUMBER"
-  fi
-  own="$(ensure_plus "$own")"
-
-  local party_info direction remote_label local_label remote_value local_value
-  party_info="$(sms_read_party_info "$type" "$number" "$own")"
-  IFS=$'\t' read -r direction remote_label local_label remote_value local_value <<<"$party_info"
-
-  local modem_display="$modem_id"
-  if [[ -z "$modem_display" && "$MODEM" =~ ^[0-9]+$ ]]
-  then
-    modem_display="$MODEM"
-  fi
-  [[ -n "$modem_display" ]] || modem_display="unknown"
-
-  local id_display="$id"
-  [[ -n "$id_display" ]] || id_display="$msg_id"
-
-  local type_display="$type"
-  [[ -n "$type_display" ]] || type_display="unknown"
-  type_display="${type_display^}"
-  if [[ -n "$direction" && "$direction" != "unknown" ]]
-  then
-    type_display+=" (${direction})"
-  fi
-
-  local state_display="$state"
-  [[ -n "$state_display" ]] || state_display="unknown"
-
-  local storage_display="$storage"
-  [[ -n "$storage_display" ]] || storage_display="unknown"
-
-  local timestamp_display="$timestamp"
-  [[ -n "$timestamp_display" ]] || timestamp_display="--"
-
-  local smsc_display="$smsc"
-  [[ -n "$smsc_display" ]] || smsc_display="--"
-
-  local delivery_display=""
-  if [[ -n "$delivery_state" ]]
-  then
-    delivery_display="$delivery_state"
-  fi
-  if [[ -n "$delivery_report" ]]
-  then
-    if [[ -n "$delivery_display" ]]
-    then
-      delivery_display+=" ($delivery_report)"
-    else
-      delivery_display="$delivery_report"
-    fi
-  fi
-
-  local data_summary=""
-  if [[ -n "$data" ]]
-  then
-    local trimmed="$data"
-    if (( ${#trimmed} > 64 ))
-    then
-      trimmed="${trimmed:0:61}…"
-    fi
-    if [[ "$data" =~ ^[0-9A-Fa-f]+$ ]]
-    then
-      local byte_len=$(( ${#data} / 2 ))
-      data_summary="$byte_len bytes ($trimmed)"
-    else
-      data_summary="$trimmed"
-    fi
-  fi
-
-  local message_display="$text"
-  if [[ -z "$message_display" ]]
-  then
-    message_display="*no text*"
-  fi
-
-  local -a rows=()
-  local row
-
-  printf -v row '%s\t%s\t%s' "SMS ID" "$COLOR_BOLD_WHITE" "$id_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Modem" "$COLOR_BOLD_CYAN" "$modem_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Type" "$(sms_type_color "$type")" "$type_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "State" "$(sms_state_color "$state")" "$state_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Storage" "$COLOR_CYAN" "$storage_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Timestamp" "$COLOR_CYAN" "$timestamp_display"
-  rows+=("$row")
-  if [[ -n "$discharge" ]]
-  then
-    printf -v row '%s\t%s\t%s' "Discharged" "$COLOR_CYAN" "$discharge"
-    rows+=("$row")
-  fi
-  if [[ -n "$delivery_display" ]]
-  then
-    printf -v row '%s\t%s\t%s' "Delivery" "$(sms_state_color "$delivery_state")" "$delivery_display"
-    rows+=("$row")
-  fi
-
-  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
-  rows+=("$row")
-
-  local remote_display="$remote_value"
-  local local_display="$local_value"
-  if [[ -n "$own" && "$own" != "--" ]]
-  then
-    if [[ "$remote_display" == "$own" ]]
-    then
-      remote_display+="*"
-    fi
-    if [[ "$local_display" == "$own" ]]
-    then
-      local_display+="*"
-    fi
-  fi
-
-  printf -v row '%s\t%s\t%s' "$remote_label" "$COLOR_BOLD_BLUE" "$remote_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "$local_label" "$COLOR_BOLD_BLUE" "$local_display"
-  rows+=("$row")
-  printf -v row '%s\t%s\t%s' "SMSC" "$COLOR_BOLD_BLUE" "$smsc_display"
-  rows+=("$row")
-  if [[ -n "$class" ]]
-  then
-    printf -v row '%s\t%s\t%s' "Class" "$COLOR_CYAN" "$class"
-    rows+=("$row")
-  fi
-  if [[ -n "$encoding" ]]
-  then
-    printf -v row '%s\t%s\t%s' "Encoding" "$COLOR_CYAN" "$encoding"
-    rows+=("$row")
-  fi
-  if [[ -n "$pdu" ]]
-  then
-    printf -v row '%s\t%s\t%s' "PDU" "$COLOR_CYAN" "$pdu"
-    rows+=("$row")
-  fi
-  if [[ -n "$data_summary" ]]
-  then
-    printf -v row '%s\t%s\t%s' "Data" "$COLOR_CYAN" "$data_summary"
-    rows+=("$row")
-  fi
-
-  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
-  rows+=("$row")
-
-  printf -v row '%s\t%s\t%s' "Message" "$COLOR_RESET" "$message_display"
-  rows+=("$row")
-
-  print_colored_rows --indent "" "${rows[@]}"
-}
-
-sms_read_json() {
-  local msg_id="$1"
-  local js pdu msg_type own="" number smsc party_info direction remote_label local_label remote_value local_value
 
   if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
   then
@@ -2961,41 +2780,258 @@ sms_read_json() {
   smsc="$(jq -r '.sms.properties.smsc // ""' <<<"$js")"
   smsc="$(ensure_plus "$smsc")"
 
-  jq --arg type "$msg_type" \
-     --arg direction "$direction" \
-     --arg remote "$remote_value" \
-     --arg local "$local_value" \
-     --arg smsc "$smsc" \
-     --arg pdu "$pdu" '
-    {
-      id: (.sms["dbus-path"] | split("/")[-1] | tonumber?),
-      modem_id: (.sms.modem // "" | split("/")[-1] | tonumber?),
-      type: (if $type == "" then null else $type end),
-      direction: (if $direction == "" then null else $direction end),
-      state: (.sms.properties.state // null),
-      storage: ((.sms.properties.storage // "") | if . == "" then null else . end),
-      class: ((.sms.properties.class // "") | if . == "" then null else (. | tonumber? // .) end),
-      pdu: (if $pdu == "" then null else $pdu end),
-      timestamp: (.sms.properties.timestamp // null),
-      discharge_timestamp: (.sms.properties["discharge-timestamp"] // null),
-      remote_number: (if $remote == "" then null else $remote end),
-      local_number: (if $local == "" then null else $local end),
-      smsc: (if $smsc == "" then null else $smsc end),
-      text: ((.sms.content.text // null) | if . == null then null else gsub("\r"; "") end),
-      encoding: ((.sms.content.encoding // "") | if . == "" then null else . end),
-      data: ((.sms.content.data // "") | if . == "" then null else . end),
-      delivery: (
-        {state: (.sms.properties["delivery-state"] // ""), report: (.sms.properties["delivery-report"] // "") } as $d
-        | if ($d.state == "" and $d.report == "") then null
-          else {
-            state: (if $d.state == "" then null else $d.state end),
-            report: (if $d.report == "" then null else $d.report end)
-          }
-          end
-      )
-    }
-  ' <<<"$js"
+  if ! payload="$(
+    jq --arg type "$msg_type" \
+       --arg direction "$direction" \
+       --arg remote_label "$remote_label" \
+       --arg local_label "$local_label" \
+       --arg remote "$remote_value" \
+       --arg local "$local_value" \
+       --arg own "$own" \
+       --arg smsc "$smsc" \
+       --arg pdu "$pdu" \
+       --arg fallback_modem "$MODEM" \
+       --arg msg_id "$msg_id" '
+      def blank_to_null:
+        if . == null or . == "" then null else . end;
+
+      (.sms.modem // "") as $modem_path
+      | (.sms["dbus-path"] // "") as $sms_path
+      | ($modem_path | split("/")[-1]) as $modem_id_str
+      | ($sms_path | split("/")[-1]) as $sms_id_str
+      | $fallback_modem as $fallback
+      | {
+          id: ($sms_id_str | tonumber?),
+          modem_id: ($modem_id_str | tonumber?),
+          modem_label: (
+            if ($modem_id_str // "") != "" then $modem_id_str
+            elif ($fallback | test("^[0-9]+$")) then $fallback
+            elif ($fallback | blank_to_null) then $fallback
+            else "unknown" end
+          ),
+          type: ($type | blank_to_null),
+          direction: ($direction | blank_to_null),
+          state: (.sms.properties.state // null),
+          storage: ((.sms.properties.storage // "") | blank_to_null),
+          class: ((.sms.properties.class // "") | if . == "" then null else (. | tonumber? // .) end),
+          pdu: ($pdu | blank_to_null),
+          timestamp: (.sms.properties.timestamp // null),
+          discharge_timestamp: (.sms.properties["discharge-timestamp"] // null),
+          remote_number: ($remote | blank_to_null),
+          remote_label: ($remote_label | blank_to_null),
+          local_number: ($local | blank_to_null),
+          local_label: ($local_label | blank_to_null),
+          own_number: ($own | blank_to_null),
+          smsc: ($smsc | blank_to_null),
+          text: ((.sms.content.text // null) | if . == null then null else gsub("\r"; "") end),
+          encoding: ((.sms.content.encoding // "") | blank_to_null),
+          data: ((.sms.content.data // "") | blank_to_null),
+          delivery: (
+            {state: (.sms.properties["delivery-state"] // ""), report: (.sms.properties["delivery-report"] // "")} as $d
+            | if ($d.state == "" and $d.report == "") then null
+              else {
+                state: ($d.state | blank_to_null),
+                report: ($d.report | blank_to_null)
+              }
+              end
+          )
+        }
+      | .raw_id = (if ($sms_id_str // "") != "" then $sms_id_str else $msg_id end)
+      | .raw_modem_id = (if ($modem_id_str // "") != "" then $modem_id_str else $fallback end)
+    ' <<<"$js"
+  )"
+  then
+    return 1
+  fi
+
+  printf '%s\n' "$payload"
 }
+
+sms_read_pretty() {
+  local msg_id="$1"
+  local payload
+
+  if ! payload="$(sms_read_details_json "$msg_id")"
+  then
+    return 1
+  fi
+
+  local color_reset color_white color_cyan color_blue color_green color_yellow color_red color_magenta
+  local color_type_green color_type_blue color_type_magenta
+  color_reset="$(ansi_escape "$COLOR_RESET")"
+  color_white="$(ansi_escape "$COLOR_BOLD_WHITE")"
+  color_cyan="$(ansi_escape "$COLOR_CYAN")"
+  color_blue="$(ansi_escape "$COLOR_BOLD_BLUE")"
+  color_green="$(ansi_escape "$COLOR_BOLD_GREEN")"
+  color_yellow="$(ansi_escape "$COLOR_BOLD_YELLOW")"
+  color_red="$(ansi_escape "$COLOR_BOLD_RED")"
+  color_magenta="$(ansi_escape "$COLOR_BOLD_MAGENTA")"
+  color_type_green="$color_green"
+  color_type_blue="$color_blue"
+  color_type_magenta="$color_magenta"
+
+  jq -r \
+    --arg reset "$color_reset" \
+    --arg white "$color_white" \
+    --arg cyan "$color_cyan" \
+    --arg blue "$color_blue" \
+    --arg green "$color_green" \
+    --arg yellow "$color_yellow" \
+    --arg red "$color_red" \
+    --arg magenta "$color_magenta" \
+    --arg type_green "$color_type_green" \
+    --arg type_blue "$color_type_blue" \
+    --arg type_magenta "$color_type_magenta" \
+    --arg msg_id "$msg_id" \
+    'def color($code; $text):
+       if $code == "" then $text else $code + $text + $reset end;
+
+     def ucfirst:
+       if . == null or . == "" then ""
+       else (.[:1] | ascii_upcase) + (.[1:] // "") end;
+
+     def choose_type_color($type):
+       if $type == null then $cyan
+       else
+         ($type | ascii_downcase) as $t
+         | if $t == "received" then $type_green
+           elif $t == "sent" then $type_blue
+           elif ($t == "report" or $t == "status-report") then $type_magenta
+           else $cyan end
+       end;
+
+     def choose_state_color($state):
+       if $state == null then $cyan
+       else
+         ($state | ascii_downcase) as $s
+         | if ["received","read","sent","delivered","delivery-success","complete","completed","stored","stored-received","stored-sent"] | index($s) then $green
+           elif ["queued","pending","sending","temporary","unknown","new","waiting","draft"] | index($s) then $yellow
+           elif ["failed","error","rejected","aborted","cancelled","timeout","unsent","not-sent","undelivered"] | index($s) then $red
+           else $cyan end
+       end;
+
+     def format_value($v):
+       if $v == null or $v == "" then "--" else $v end;
+
+     def highlight_own($number; $own):
+       if $number == null then "--"
+       elif $own != null and $number == $own then $number + "*"
+       else $number end;
+
+     def summarize_data($data):
+       if $data == null then null
+       else
+         ($data | tostring) as $d
+         | (if ($d | length) > 64 then $d[0:61] + "…" else $d end) as $trim
+         | if ($d | test("^[0-9A-Fa-f]+$")) then
+             ( ($d | length) / 2 | floor | tostring) + " bytes (" + $trim + ")"
+           else $trim end
+       end;
+
+      def split_lines($value):
+        ($value // "--") | tostring | split("\n");
+
+      def spaces($n):
+        if $n <= 0 then ""
+        else [range(0; $n) | " "] | add
+        end;
+
+      def format_label($label; $width):
+        ($label // "") as $l
+        | ($width - ($l | length)) as $pad
+        | if $pad <= 0 then $l else $l + spaces($pad) end;
+
+      def format_lines($label; $color; $lines; $width):
+        if ($lines | length) == 0 then [""]
+        else
+          [format_label($label; $width) + "  " + color($color; $lines[0])]
+          + ($lines[1:] | map(format_label(""; $width) + "  " + color($color; .)))
+        end;
+
+      def add_row($rows; $label; $color; $value):
+        $rows + [{label:$label, color:$color, value:$value}];
+
+      def add_optional_row($rows; $label; $color; $value):
+        if $value == null or $value == "" then $rows else add_row($rows; $label; $color; $value) end;
+
+     . as $sms
+     | ($sms.id // ($sms.raw_id // $msg_id)) as $id_label
+     | ($sms.modem_label // ($sms.raw_modem_id // "unknown")) as $modem_label
+     | ($sms.type // "unknown") as $type_label
+     | ($type_label | tostring | ascii_downcase | ucfirst) as $type_title
+     | ($sms.direction // "") as $direction
+     | ($sms.state // "unknown") as $state_label
+     | ($sms.storage // null) as $storage_raw
+     | (if $storage_raw == null or $storage_raw == "" then "unknown" else $storage_raw end) as $storage_label
+     | ($sms.timestamp // "--") as $timestamp_label
+     | ($sms.discharge_timestamp // null) as $discharge
+     | ($sms.delivery // null) as $delivery
+     | ($delivery | if . == null then null else (.state // null) end) as $delivery_state
+     | ($delivery | if . == null then null else (.report // null) end) as $delivery_report
+     | (if $delivery == null then null
+        else
+          if $delivery_state != null and $delivery_report != null then $delivery_state + " (" + $delivery_report + ")"
+          elif $delivery_state != null then $delivery_state
+          elif $delivery_report != null then $delivery_report
+          else null end
+        end) as $delivery_label
+     | ($sms.own_number // null) as $own
+     | ($sms.remote_number // null) as $remote
+     | ($sms.local_number // null) as $local
+     | ($sms.remote_label // "Number") as $remote_label
+     | ($sms.local_label // "Own") as $local_label
+     | summarize_data($sms.data) as $data_summary
+     | ($sms.text // "*no text*") as $message
+     | (if $direction == null or $direction == "" or $direction == "unknown" then $type_title else $type_title + " (" + $direction + ")" end) as $type_display
+     | ( []
+         | add_row(.; "SMS ID"; $white; ($id_label | tostring))
+         | add_row(.; "Modem"; $blue; ($modem_label | tostring))
+         | add_row(.; "Type"; choose_type_color($sms.type); $type_display)
+         | add_row(.; "State"; choose_state_color($sms.state); $state_label)
+         | add_row(.; "Storage"; $cyan; $storage_label)
+         | add_row(.; "Timestamp"; $cyan; $timestamp_label)
+         | add_optional_row(.; "Discharged"; $cyan; $discharge)
+         | add_optional_row(.; "Delivery"; choose_state_color($delivery_state); $delivery_label)
+         | . + [null]
+         | add_row(.; $remote_label; $blue; highlight_own($remote; $own))
+         | add_row(.; $local_label; $blue; highlight_own($local; $own))
+         | add_row(.; "SMSC"; $blue; format_value($sms.smsc))
+         | add_optional_row(.; "Class"; $cyan; ($sms.class | tostring))
+         | add_optional_row(.; "Encoding"; $cyan; $sms.encoding)
+         | add_optional_row(.; "PDU"; $cyan; $sms.pdu)
+         | add_optional_row(.; "Data"; $cyan; $data_summary)
+         | . + [null]
+         | add_row(.; "Message"; ""; $message)
+         | . + [null]
+       ) as $rows
+     | ($rows | map(select(. != null) | .label | length) | max // 0) as $width
+     | $rows
+     | map(
+           if . == null then [""]
+           else
+             (.label // "") as $label
+             | (.color // "") as $color
+             | split_lines(.value) as $lines
+             | format_lines($label; $color; $lines; $width)
+           end
+         )
+     | (add // [])
+       | .[]
+    ' <<<"$payload"
+}
+
+sms_read_json() {
+  local msg_id="$1"
+  local payload
+
+  if ! payload="$(sms_read_details_json "$msg_id")"
+  then
+    return 1
+  fi
+
+  printf '%s\n' "$payload"
+}
+
 
 sms_send() {
   local recipient=""
@@ -4422,114 +4458,11 @@ get_smsc_number() {
   printf '%s' "$SMSC_NUMBER"
 }
 
-colorize_text() { # $1=colorcode, $2=text
-  local color="$1"
-  local text="$2"
+modem_status_details_json() {
+  local js own smsc country_code="" country_label="" payload
+  local fallback_modem="$MODEM"
 
-  if [[ -z "$color" || -n "$NO_COLOR" || -n "$CRON" ]]
-  then
-    printf '%s' "$text"
-    return 0
-  fi
-
-  printf '\e[%sm%s\e[0m' "$color" "$text"
-}
-
-print_colored_rows() { # [--indent PREFIX] rows as label\tcolor\tvalue
-  local indent="  "
-  if [[ "${1:-}" == "--indent" ]]
-  then
-    if (( $# >= 2 ))
-    then
-      indent="$2"
-      shift 2
-    else
-      indent=""
-      shift
-    fi
-  fi
-
-  local -a rows=("$@")
-  (( ${#rows[@]} == 0 )) && return 0
-
-  local label_width=0
-  local row label color value rest
-
-  for row in "${rows[@]}"
-  do
-    label="${row%%$'\t'*}"
-    rest="${row#*$'\t'}"
-    color="${rest%%$'\t'*}"
-    value="${rest#*$'\t'}"
-    if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
-    then
-      continue
-    fi
-    if (( ${#label} > label_width ))
-    then
-      label_width=${#label}
-    fi
-  done
-
-  (( label_width < 6 )) && label_width=6
-
-  for row in "${rows[@]}"
-  do
-    label="${row%%$'\t'*}"
-    rest="${row#*$'\t'}"
-    color="${rest%%$'\t'*}"
-    value="${rest#*$'\t'}"
-    if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
-    then
-      printf '\n'
-      continue
-    fi
-
-    local display="$value"
-    if [[ -z "$display" ]]
-    then
-      display="--"
-    fi
-
-    local first_line=1
-    while IFS= read -r line || [[ -n "$line" ]]
-    do
-      if (( first_line ))
-      then
-        printf '%s%-*s  %s\n' "$indent" "$label_width" "$label" "$(colorize_text "$color" "$line")"
-        first_line=0
-      else
-        printf '%s%-*s  %s\n' "$indent" "$label_width" "" "$(colorize_text "$color" "$line")"
-      fi
-    done <<<"$display"
-  done
-
-  printf '\n'
-}
-
-render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tcolor\tvalue
-  local _title="$1"
-  local _header_color="$2"
-  shift 2
-  local -a rows=("$@")
-
-  print_colored_rows --indent "" "${rows[@]}"
-}
-
-modem_status_single() {
-  local json state power reg signal signal_num carrier_name carrier_code carrier_display own smsc mid_label
-  local firmware hardware_revision equipment_id device_path device_identifier carrier_config carrier_config_revision imei meid cdma_sid cdma_nid
-  local manufacturer model plugin primary_port ports_display ports_json="[]" at_port
-  local country_code country_label country_display="--"
-  local info_tsv details_tsv
-
-  if raw_plain_requested
-  then
-    mmcli_cmd
-    return $?
-  fi
-
-  if ! json="$(mmcli_cmd -J)"
+  if ! js="$(mmcli_cmd -J)"
   then
     if [[ -z $QUIET ]]
     then
@@ -4538,208 +4471,23 @@ modem_status_single() {
     return 1
   fi
 
-  mid_label="$(jq -r '.modem["dbus-path"] | split("/")[-1] // ""' <<<"$json")"
-
-  if raw_json_requested
-  then
-    if [[ -n "$ALL_MODEMS" ]]
-    then
-      local mids mid raw_items=()
-      if mapfile -t mids < <(list_modem_ids_sorted)
-      then
-        for mid in "${mids[@]}"
-        do
-          [[ -z "$mid" ]] && continue
-          local raw
-          if raw="$(MODEM="$mid" mmcli_cmd -J)"
-          then
-            raw_items+=("$raw")
-          fi
-        done
-      fi
-      if (( ${#raw_items[@]} == 0 ))
-      then
-        printf '[\n]'
-      else
-        printf '%s
-' "${raw_items[@]}" | jq -s '.'
-      fi
-    else
-      printf '%s
-' "$json" | jq
-    fi
-    return 0
-  fi
-
-  state="$(jq -r '(.modem.generic.state // empty)' <<<"$json")"
-  power="$(jq -r '(.modem.generic["power-state"] // empty)' <<<"$json")"
-  reg="$(jq -r '(.modem["3gpp"]["registration-state"] // empty)' <<<"$json")"
-  signal_num="$(jq -r '(.modem.generic["signal-quality"].value // empty)' <<<"$json")"
-  own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
-
-  # Join fields with the ASCII Unit Separator so empty values are preserved when splitting
-  details_blob="$(jq -r '
-    def clean:
-      if . == null or . == "" or . == "--" then "" else . end;
-    [
-      (.modem["3gpp"]["operator-name"] | clean),
-      (.modem["3gpp"]["operator-code"] | clean),
-      (.modem.cdma.sid | clean),
-      (.modem.cdma.nid | clean),
-      (.modem.generic.revision | clean),
-      (.modem.generic["hardware-revision"] | clean),
-      (.modem.generic["equipment-identifier"] | clean),
-      (.modem.generic.device | clean),
-      (.modem.generic["device-identifier"] | clean),
-      (.modem.generic["carrier-configuration"] | clean),
-      (.modem.generic["carrier-configuration-revision"] | clean),
-      (.modem["3gpp"].imei | clean),
-      (.modem.cdma.meid | clean)
-    ]
-    | join("\u001f")
-  ' <<<"$json")"
-
-  if [[ -n "$details_blob" ]]
-  then
-    IFS=$'\x1f' read -r carrier_name carrier_code cdma_sid cdma_nid firmware hardware_revision equipment_id device_path device_identifier carrier_config carrier_config_revision imei meid <<<"$details_blob"
-  fi
-
-  if [[ -z "$carrier_name" && -n "$cdma_sid" ]]
-  then
-    carrier_name="$cdma_sid"
-  fi
-  if [[ -z "$carrier_code" && -n "$cdma_nid" ]]
-  then
-    carrier_code="$cdma_nid"
-  fi
-  if [[ -z "$carrier_code" && -n "$cdma_sid" ]]
-  then
-    carrier_code="$cdma_sid"
-  fi
-
-  if [[ -n "$carrier_name" && -n "$carrier_code" ]]
-  then
-    if [[ "$carrier_name" == "$carrier_code" ]]
-    then
-      carrier_display="$carrier_name"
-    else
-      carrier_display="$carrier_name ($carrier_code)"
-    fi
-  elif [[ -n "$carrier_name" ]]
-  then
-    carrier_display="$carrier_name"
-  elif [[ -n "$carrier_code" ]]
-  then
-    carrier_display="$carrier_code"
-  else
-    carrier_display=""
-  fi
-
-  local carrier_pretty="$carrier_display"
-  if [[ -z "$carrier_pretty" ]]
-  then
-    carrier_pretty="--"
-  fi
-  local carrier_value="$carrier_pretty"
-
-  info_tsv="$(jq -r '
-    def normalize_port:
-      if . == null or . == "" then ""
-      elif startswith("/") then .
-      else "/dev/" + .
-      end;
-
-    (.modem.generic.ports // []) as $ports
-    | [
-        (.modem.generic.manufacturer // ""),
-        (.modem.generic.model // ""),
-        (.modem.generic.plugin // ""),
-        ((.modem.generic["primary-port"] // "") | normalize_port),
-        ($ports
-          | map(split(" ")[0] | normalize_port)
-          | map(select(. != ""))
-          | join(" ")),
-        ($ports
-          | map(split(" ")[0] | normalize_port)
-          | map(select(. != ""))
-          | @json),
-        ($ports
-          | map(select(test("\\(at\\)"; "i")) | split(" ")[0] | normalize_port)
-          | map(select(. != ""))
-          | .[0] // "")
-      ]
-    | @tsv
-  ' <<<"$json")"
-
-  if [[ -n "$info_tsv" ]]
-  then
-    IFS=$'\t' read -r manufacturer model plugin primary_port ports_display ports_json at_port <<<"$info_tsv"
-  fi
-
-  if [[ -z "$ports_json" ]]
-  then
-    ports_json="[]"
-  fi
-
-  if [[ -z "$state" ]]
-  then
-    state=unknown
-  fi
-  if [[ -z "$power" ]]
-  then
-    power=unknown
-  fi
-  if [[ -z "$reg" ]]
-  then
-    reg=unknown
-  fi
-  if [[ -n "$signal_num" ]]
-  then
-    signal="${signal_num}%"
-  else
-    signal="--"
-  fi
-  local firmware_display="$firmware"
-  [[ -n "$firmware_display" ]] || firmware_display="--"
-  local hardware_revision_display="$hardware_revision"
-  [[ -n "$hardware_revision_display" ]] || hardware_revision_display="--"
-  local equipment_id_display="$equipment_id"
-  [[ -n "$equipment_id_display" ]] || equipment_id_display="--"
-  local device_path_display="$device_path"
-  [[ -n "$device_path_display" ]] || device_path_display="--"
-  local device_identifier_display="$device_identifier"
-  [[ -n "$device_identifier_display" ]] || device_identifier_display="--"
-  local imei_display="$imei"
-  [[ -n "$imei_display" ]] || imei_display="--"
-  local meid_display="$meid"
-  [[ -n "$meid_display" ]] || meid_display="--"
-  local carrier_config_display=""
-  if [[ -n "$carrier_config" && -n "$carrier_config_revision" ]]
-  then
-    carrier_config_display="$carrier_config ($carrier_config_revision)"
-  elif [[ -n "$carrier_config" ]]
-  then
-    carrier_config_display="$carrier_config"
-  elif [[ -n "$carrier_config_revision" ]]
-  then
-    carrier_config_display="$carrier_config_revision"
-  else
-    carrier_config_display=""
-  fi
-  [[ -n "$carrier_config_display" ]] || carrier_config_display="--"
+  own="$(jq -r '.modem.generic["own-numbers"][0] // ""' <<<"$js")"
   own="$(ensure_plus "$own")"
-  local own_for_country="$own"
-  local own_display="$own"
-  if [[ -z "$own_display" ]]
+  if [[ -n "$own" ]]
+
   then
-    own_display="--"
-  else
     OWN_NUMBER="$own"
   fi
 
-  if [[ "$own_for_country" == +* ]]
+  if ! smsc="$(get_smsc_number)"
   then
-    country_code="$(phone_cc "$own_for_country")"
+    smsc=""
+  fi
+  smsc="$(ensure_plus "$smsc")"
+
+  if [[ "$own" == +* ]]
+  then
+    country_code="$(phone_cc "$own")"
     if [[ "$country_code" == "--" || -z "$country_code" ]]
     then
       country_code=""
@@ -4752,214 +4500,319 @@ modem_status_single() {
     fi
   fi
 
-  if [[ -n "$country_code" ]]
+  if ! payload="$(
+    jq --arg own "$own" \
+       --arg smsc "$smsc" \
+       --arg fallback "$fallback_modem" \
+       --arg cc "$country_code" \
+       --arg country "$country_label" '
+      def blank_to_null:
+        if . == null or . == "" then null else . end;
+
+      def normalize_port:
+        if . == null or . == "" then null
+        elif startswith("/") then .
+        else "/dev/" + .
+        end;
+
+      def fallback_name($name; $sid):
+        if $name != "" then $name
+        elif $sid != "" then $sid
+        else "" end;
+
+      def fallback_code($code; $sid; $nid):
+        if $code != "" then $code
+        elif $nid != "" then $nid
+        elif $sid != "" then $sid
+        else "" end;
+
+      (.modem.generic.ports // []) as $ports_raw
+      | ($ports_raw
+          | map(split(" ") | .[0])
+          | map(normalize_port)
+          | map(select(. != null))) as $ports
+      | ($ports_raw
+          | map(select(test("\\(at\\)"; "i")) | split(" ")[0] | normalize_port)
+          | map(select(. != null))) as $at_candidates
+      | (.modem["dbus-path"] // "") as $modem_path
+      | ($modem_path | split("/")[-1]) as $mid_str
+      | (.modem["3gpp"]["operator-name"] // "") as $carrier_name_raw
+      | (.modem["3gpp"]["operator-code"] // "") as $carrier_code_raw
+      | (.modem.cdma.sid // "") as $cdma_sid_raw
+      | (.modem.cdma.nid // "") as $cdma_nid_raw
+      | fallback_name($carrier_name_raw; $cdma_sid_raw) as $carrier_name
+      | fallback_code($carrier_code_raw; $cdma_sid_raw; $cdma_nid_raw) as $carrier_code
+      | {
+          modem_id: ($mid_str | tonumber?),
+          modem_label: (
+            if ($mid_str // "") != "" then $mid_str
+            elif ($fallback | test("^[0-9]+$")) then $fallback
+            elif ($fallback | blank_to_null) then $fallback
+            else "unknown" end
+          ),
+          state: (.modem.generic.state // null),
+          power: (.modem.generic["power-state"] // null),
+          registered: (.modem["3gpp"]["registration-state"] // null),
+          signal: (.modem.generic["signal-quality"].value // null | tonumber?),
+          carrier: (
+            if $carrier_name != "" and $carrier_code != "" then
+              if $carrier_name == $carrier_code then $carrier_name else $carrier_name + " (" + $carrier_code + ")" end
+            elif $carrier_name != "" then $carrier_name
+            elif $carrier_code != "" then $carrier_code
+            else null end
+          ),
+          carrier_name: (if $carrier_name == "" then null else $carrier_name end),
+          carrier_code: (if $carrier_code == "" then null else $carrier_code end),
+          phone: ($own | blank_to_null),
+          smsc: ($smsc | blank_to_null),
+          manufacturer: ((.modem.generic.manufacturer // "") | blank_to_null),
+          model: ((.modem.generic.model // "") | blank_to_null),
+          plugin: ((.modem.generic.plugin // "") | blank_to_null),
+          primary_port: ((.modem.generic["primary-port"] // "") | normalize_port),
+          at_port: ($at_candidates[0] // null),
+          ports: $ports,
+          firmware: ((.modem.generic.revision // "") | blank_to_null),
+          hardware_revision: ((.modem.generic["hardware-revision"] // "") | blank_to_null),
+          equipment_id: ((.modem.generic["equipment-identifier"] // "") | blank_to_null),
+          device: ((.modem.generic.device // "") | blank_to_null),
+          device_identifier: ((.modem.generic["device-identifier"] // "") | blank_to_null),
+          carrier_configuration: ((.modem.generic["carrier-configuration"] // "") | blank_to_null),
+          carrier_configuration_revision: ((.modem.generic["carrier-configuration-revision"] // "") | blank_to_null),
+          imei: ((.modem["3gpp"].imei // "") | blank_to_null),
+          meid: ((.modem.cdma.meid // "") | blank_to_null),
+          country_code: (if $cc == "" then null else ($cc | tonumber? // $cc) end),
+          country: (if $country == "" then null else $country end)
+        }
+    ' <<<"$js"
+  )"
   then
-    if [[ -n "$country_label" && "$country_label" != "$country_code" ]]
+    return 1
+  fi
+
+  printf '%s
+' "$payload"
+}
+
+modem_status_single() {
+  local payload raw
+
+
+  if raw_plain_requested
+  then
+    mmcli_cmd
+    return $?
+  fi
+
+  if raw_json_requested
+  then
+    if [[ -n "$ALL_MODEMS" ]]
     then
-      country_display="$country_label (+$country_code)"
+      local mids mid raw_items=()
+      if mapfile -t mids < <(list_modem_ids_sorted)
+      then
+        for mid in "${mids[@]}"
+        do
+          [[ -z "$mid" ]] && continue
+          if raw="$(MODEM="$mid" mmcli_cmd -J)"
+          then
+            raw_items+=("$raw")
+          fi
+        done
+      fi
+      if (( ${#raw_items[@]} == 0 ))
+      then
+        printf '[]
+'
+      else
+        printf '%s
+' "${raw_items[@]}" | jq -s '.'
+      fi
     else
-      country_display="+$country_code"
+      mmcli_cmd -J | jq
     fi
-  else
-    country_display="--"
-  fi
-
-  local manufacturer_display="$manufacturer"
-  [[ -n "$manufacturer_display" ]] || manufacturer_display="--"
-  local model_display="$model"
-  [[ -n "$model_display" ]] || model_display="--"
-  local plugin_display="$plugin"
-  [[ -n "$plugin_display" ]] || plugin_display="--"
-  local primary_port_display="$primary_port"
-  [[ -n "$primary_port_display" ]] || primary_port_display="--"
-  local at_port_display_value="$at_port"
-  [[ -n "$at_port_display_value" ]] || at_port_display_value="--"
-  local ports_display_pretty="$ports_display"
-  [[ -n "$ports_display_pretty" ]] || ports_display_pretty="--"
-
-  # Derive SMSC (may use OWN_NUMBER or config); do not fail hard if empty
-  smsc="$(get_smsc_number)"
-  local smsc_display="$smsc"
-  if [[ -z "$smsc_display" ]]
-  then
-    smsc_display="--"
-  fi
-
-  # JSON output if requested
-  if custom_json_requested
-  then
-    local sig_num_json="$signal_num"
-    local ports_json_arg="$ports_json"
-    if [[ -z "$ports_json_arg" ]]
-    then
-      ports_json_arg="[]"
-    fi
-    jq -n \
-      --arg mid "$mid_label" \
-      --arg state "$state" \
-      --arg power "$power" \
-      --arg registered "$reg" \
-      --arg carrier "$carrier_display" \
-      --arg carrier_name "$carrier_name" \
-      --arg carrier_code "$carrier_code" \
-      --arg phone "$own" \
-      --arg smsc "$smsc" \
-      --arg sig "$sig_num_json" \
-      --arg manufacturer "$manufacturer" \
-      --arg model "$model" \
-      --arg plugin "$plugin" \
-      --arg primary "$primary_port" \
-      --arg at_port "$at_port" \
-      --arg firmware "$firmware" \
-      --arg hardware_revision "$hardware_revision" \
-      --arg equipment_id "$equipment_id" \
-      --arg device "$device_path" \
-      --arg device_identifier "$device_identifier" \
-      --arg carrier_config "$carrier_config" \
-      --arg carrier_config_revision "$carrier_config_revision" \
-      --arg imei "$imei" \
-      --arg meid "$meid" \
-      --arg country_code "$country_code" \
-      --arg country_label "$country_label" \
-      --argjson ports "$ports_json_arg" \
-      '{
-        modem_id: ($mid|tonumber?),
-        state: $state,
-        power: $power,
-        registered: $registered,
-        carrier: (if $carrier == "" then null else $carrier end),
-        carrier_name: (if $carrier_name == "" then null else $carrier_name end),
-        carrier_code: (if $carrier_code == "" then null else $carrier_code end),
-        phone: (if $phone == "" then null else $phone end),
-        smsc: (if $smsc == "" then null else $smsc end),
-        signal: ($sig|tonumber?),
-        manufacturer: (if $manufacturer == "" then null else $manufacturer end),
-        model: (if $model == "" then null else $model end),
-        plugin: (if $plugin == "" then null else $plugin end),
-        primary_port: (if $primary == "" then null else $primary end),
-        at_port: (if $at_port == "" then null else $at_port end),
-        ports: $ports,
-        firmware: (if $firmware == "" then null else $firmware end),
-        hardware_revision: (if $hardware_revision == "" then null else $hardware_revision end),
-        equipment_id: (if $equipment_id == "" then null else $equipment_id end),
-        device: (if $device == "" then null else $device end),
-        device_identifier: (if $device_identifier == "" then null else $device_identifier end),
-        carrier_configuration: (if $carrier_config == "" then null else $carrier_config end),
-        carrier_configuration_revision: (if $carrier_config_revision == "" then null else $carrier_config_revision end),
-        imei: (if $imei == "" then null else $imei end),
-        meid: (if $meid == "" then null else $meid end),
-        country_code: (if $country_code == "" then null else ($country_code|tonumber?) end),
-        country: (if $country_label == "" then null else $country_label end)
-      }'
     return 0
   fi
 
-  # Choose colors for the status panel
-  local state_color power_color reg_color sig_color carrier_color phone_color smsc_color info_color country_color
-  case "${state,,}" in
-    connected|registered|enabled|online|on) state_color="$COLOR_BOLD_GREEN";;   # bold green
-    searching|initializing|connecting|locked|unknown) state_color="$COLOR_BOLD_YELLOW";; # bold yellow
-    failed|disabled|off) state_color="$COLOR_BOLD_RED";;                      # bold red
-    *) state_color="$COLOR_CYAN";;                                          # cyan
-  esac
-
-  case "${power,,}" in
-    on|full) power_color="$COLOR_BOLD_GREEN";;
-    low) power_color="$COLOR_BOLD_YELLOW";;
-    off|unknown) power_color="$COLOR_BOLD_RED";;
-    *) power_color="$COLOR_CYAN";;
-  esac
-
-  case "${reg,,}" in
-    home|registered|attached) reg_color="$COLOR_BOLD_GREEN";; # green
-    roaming) reg_color="$COLOR_BOLD_MAGENTA";; # magenta
-    searching|idle|unknown) reg_color="$COLOR_BOLD_YELLOW";; # yellow
-    denied|unregistered) reg_color="$COLOR_BOLD_RED";; # red
-    *) reg_color="$COLOR_CYAN";; # cyan
-  esac
-
-  if [[ "$signal_num" =~ ^[0-9]+$ ]]
+  if ! payload="$(modem_status_details_json)"
   then
-    if (( signal_num >= 70 ))
-    then
-      sig_color="$COLOR_BOLD_GREEN"
-    elif (( signal_num >= 40 ))
-    then
-      sig_color="$COLOR_BOLD_YELLOW"
-    else
-      sig_color="$COLOR_BOLD_RED"
-    fi
-  else
-    sig_color="$COLOR_CYAN"
+    return 1
+
   fi
 
-  carrier_color="$COLOR_BOLD_BLUE" # bold blue
-  phone_color="$COLOR_BOLD_BLUE"
-  smsc_color="$COLOR_BOLD_BLUE"
-  info_color="$COLOR_BOLD_BLUE"
-  country_color="$phone_color"
-  local id_color="$COLOR_BOLD_WHITE" # bold white
-
-  local -a status_rows=()
-  local row
-
-  printf -v row '%s\t%s\t%s' "Modem ID" "$id_color" "$mid_label"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "State" "$state_color" "$state"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Power" "$power_color" "$power"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Registration" "$reg_color" "$reg"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Signal" "$sig_color" "$signal"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Carrier" "$carrier_color" "$carrier_value"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Phone" "$phone_color" "$own_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "SMSC" "$smsc_color" "$smsc_display"
-  status_rows+=("$row")
-
-  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
-  status_rows+=("$row")
-
-  printf -v row '%s\t%s\t%s' "Manufacturer" "$info_color" "$manufacturer_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Model" "$info_color" "$model_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Plugin" "$info_color" "$plugin_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Primary Port" "$info_color" "$primary_port_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "AT Port" "$info_color" "$at_port_display_value"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Ports" "$info_color" "$ports_display_pretty"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Firmware" "$info_color" "$firmware_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Hardware Rev" "$info_color" "$hardware_revision_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Equipment ID" "$info_color" "$equipment_id_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "IMEI" "$info_color" "$imei_display"
-  status_rows+=("$row")
-  if [[ -n "$meid" ]]
+  if custom_json_requested
   then
-    printf -v row '%s\t%s\t%s' "MEID" "$info_color" "$meid_display"
-    status_rows+=("$row")
+    printf '%s
+' "$payload"
+    return 0
   fi
-  printf -v row '%s\t%s\t%s' "Device ID" "$info_color" "$device_identifier_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Device" "$info_color" "$device_path_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Carrier Config" "$info_color" "$carrier_config_display"
-  status_rows+=("$row")
-  printf -v row '%s\t%s\t%s' "Country" "$country_color" "$country_display"
-  status_rows+=("$row")
 
-  render_modem_status_panel "$mid_label" "$state_color" "${status_rows[@]}"
+  local color_reset color_white color_cyan color_blue color_green color_yellow color_red color_magenta
+  color_reset="$(ansi_escape "$COLOR_RESET")"
+  color_white="$(ansi_escape "$COLOR_BOLD_WHITE")"
+  color_cyan="$(ansi_escape "$COLOR_CYAN")"
+  color_blue="$(ansi_escape "$COLOR_BOLD_BLUE")"
+  color_green="$(ansi_escape "$COLOR_BOLD_GREEN")"
+  color_yellow="$(ansi_escape "$COLOR_BOLD_YELLOW")"
+  color_red="$(ansi_escape "$COLOR_BOLD_RED")"
+  color_magenta="$(ansi_escape "$COLOR_BOLD_MAGENTA")"
 
-  return 0
+  jq -r     --arg reset "$color_reset"     --arg white "$color_white"     --arg cyan "$color_cyan"     --arg blue "$color_blue"     --arg green "$color_green"     --arg yellow "$color_yellow"     --arg red "$color_red"     --arg magenta "$color_magenta" '
+      def color($code; $text):
+        if $code == "" then $text else $code + $text + $reset end;
+
+      def value_or_dash($v):
+        if $v == null or $v == "" then "--" else $v end;
+
+      def split_lines($value):
+        ($value // "--") | tostring | split("\n");
+
+      def spaces($n):
+        if $n <= 0 then ""
+        else [range(0; $n) | " "] | add
+        end;
+
+      def format_label($label; $width):
+        ($label // "") as $l
+        | ($width - ($l | length)) as $pad
+        | if $pad <= 0 then $l else $l + spaces($pad) end;
+
+      def format_lines($label; $color; $lines; $width):
+        if ($lines | length) == 0 then [""]
+        else
+          [format_label($label; $width) + "  " + color($color; $lines[0])]
+          + ($lines[1:] | map(format_label(""; $width) + "  " + color($color; .)))
+        end;
+
+
+      def choose_state_color($state):
+        if $state == null then $cyan
+        else
+          ($state | ascii_downcase) as $s
+          | if ["connected","registered","enabled","online","on"] | index($s) then $green
+            elif ["searching","initializing","connecting","locked","unknown"] | index($s) then $yellow
+            elif ["failed","disabled","off"] | index($s) then $red
+            else $cyan end
+        end;
+
+      def choose_power_color($power):
+        if $power == null then $cyan
+        else
+          ($power | ascii_downcase) as $p
+          | if ["on","full"] | index($p) then $green
+            elif ["low"] | index($p) then $yellow
+            elif ["off","unknown"] | index($p) then $red
+            else $cyan end
+        end;
+
+      def choose_registration_color($reg):
+        if $reg == null then $cyan
+        else
+          ($reg | ascii_downcase) as $r
+          | if ["home","registered","attached"] | index($r) then $green
+            elif ["roaming"] | index($r) then $magenta
+            elif ["searching","idle","unknown"] | index($r) then $yellow
+            elif ["denied","unregistered"] | index($r) then $red
+            else $cyan end
+        end;
+
+      def choose_signal_color($value):
+        if $value == null then $cyan
+        elif $value >= 70 then $green
+        elif $value >= 40 then $yellow
+        else $red end;
+
+      def join_ports($ports):
+        if $ports == null or ($ports | length) == 0 then "--"
+        else $ports | join(" ") end;
+
+      def format_country($code; $label):
+        if $code == null or $code == "" or $code == "null" then
+          if $label == null or $label == "" then "--" else $label end
+        else
+          ($code | tostring) as $c
+          | if $label == null or $label == "" then "+" + $c
+            elif $label == $c then "+" + $c
+            else $label + " (+" + $c + ")" end
+        end;
+
+      def add_row($rows; $label; $color; $value):
+        $rows + [{label:$label, color:$color, value:$value}];
+
+      def add_optional_row($rows; $label; $color; $value):
+        if $value == null or $value == "" then $rows else add_row($rows; $label; $color; value_or_dash($value)) end;
+
+      . as $m
+      | ($m.modem_label // "unknown") as $modem_label
+      | ($m.state // "unknown") as $state_label
+      | ($m.power // "unknown") as $power_label
+      | ($m.registered // "unknown") as $reg_label
+      | ($m.signal // null) as $signal_value
+      | (if $signal_value == null then "--" else ($signal_value | tostring) + "%" end) as $signal_display
+      | ($m.carrier // null) as $carrier_display
+      | ($m.phone // null) as $phone_display
+      | ($m.smsc // null) as $smsc_display
+      | ($m.firmware // null) as $firmware
+      | ($m.hardware_revision // null) as $hardware
+      | ($m.equipment_id // null) as $equipment
+      | ($m.imei // null) as $imei
+      | ($m.meid // null) as $meid
+      | ($m.device_identifier // null) as $device_id
+      | ($m.device // null) as $device
+      | ($m.manufacturer // null) as $manufacturer
+      | ($m.model // null) as $model
+      | ($m.plugin // null) as $plugin
+      | ($m.primary_port // null) as $primary_port
+      | ($m.at_port // null) as $at_port
+      | join_ports($m.ports) as $ports_display
+      | ($m.carrier_configuration // null) as $carrier_config
+      | ($m.carrier_configuration_revision // null) as $carrier_config_rev
+      | (if $carrier_config != null and $carrier_config_rev != null then $carrier_config + " (" + $carrier_config_rev + ")"
+         elif $carrier_config != null then $carrier_config
+         elif $carrier_config_rev != null then $carrier_config_rev
+         else null end) as $carrier_config_display
+      | format_country($m.country_code; $m.country) as $country_display
+      | (
+          []
+          | add_row(.; "Modem ID"; $white; value_or_dash($modem_label))
+          | add_row(.; "State"; choose_state_color($m.state); value_or_dash($state_label))
+          | add_row(.; "Power"; choose_power_color($m.power); value_or_dash($power_label))
+          | add_row(.; "Registration"; choose_registration_color($m.registered); value_or_dash($reg_label))
+          | add_row(.; "Signal"; choose_signal_color($signal_value); value_or_dash($signal_display))
+          | add_row(.; "Carrier"; $blue; value_or_dash($carrier_display))
+          | add_row(.; "Phone"; $blue; value_or_dash($phone_display))
+          | add_row(.; "SMSC"; $blue; value_or_dash($smsc_display))
+          | . + [null]
+          | add_row(.; "Manufacturer"; $blue; value_or_dash($manufacturer))
+          | add_row(.; "Model"; $blue; value_or_dash($model))
+          | add_row(.; "Plugin"; $blue; value_or_dash($plugin))
+          | add_row(.; "Primary Port"; $blue; value_or_dash($primary_port))
+          | add_row(.; "AT Port"; $blue; value_or_dash($at_port))
+          | add_row(.; "Ports"; $blue; value_or_dash($ports_display))
+          | add_row(.; "Firmware"; $blue; value_or_dash($firmware))
+          | add_row(.; "Hardware Rev"; $blue; value_or_dash($hardware))
+          | add_row(.; "Equipment ID"; $blue; value_or_dash($equipment))
+          | add_row(.; "IMEI"; $blue; value_or_dash($imei))
+          | add_optional_row(.; "MEID"; $blue; $meid)
+          | add_row(.; "Device ID"; $blue; value_or_dash($device_id))
+          | add_row(.; "Device"; $blue; value_or_dash($device))
+          | add_row(.; "Carrier Config"; $blue; value_or_dash($carrier_config_display))
+          | add_row(.; "Country"; $blue; value_or_dash($country_display))
+          | . + [null]
+        ) as $rows
+      | ($rows | map(select(. != null) | .label | length) | max // 0) as $width
+      | $rows
+      | map(
+          if . == null then [""]
+          else
+            (.label // "") as $label
+            | (.color // "") as $color
+            | split_lines(.value) as $lines
+            | format_lines($label; $color; $lines; $width)
+          end
+        )
+      | (add // [])
+      | .[]
+    ' <<<"$payload"
 }
 
 modem_status() {
@@ -5031,7 +4884,7 @@ modem_status() {
       then
         printf '[]\n'
       else
-        printf '%s\n' "${json_items[@]}" | jq -s '.'
+        printf '%s\n' "${json_items[@]}" | jq -es '.'
       fi
       return 0
     fi
