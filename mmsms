@@ -31,7 +31,8 @@ AT_WAIT_TIMEOUT="${AT_WAIT_TIMEOUT:-0}"
 
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 
-WATCH_DELETE_AFTER="${DELETE_AFTER:-1}"
+WATCH_DELETE_AFTER="${WATCH_DELETE_AFTER:-${DELETE_AFTER:-0}}"
+WATCH_DELETE_AFTER_CLI_OVERRIDE=""
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
@@ -417,7 +418,7 @@ USAGE
 
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT] [--delete-sent]
 
 Watches incoming SMS and executes reply/webhook logic.
 
@@ -430,6 +431,7 @@ Relevant flags:
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
   -P, --prune         Delete existing SMS on startup before watching
   -R, --retry COUNT   Override SMS resend attempts
+      --delete-sent   Delete SMS from the modem after handling (default: keep)
 USAGE
 }
 
@@ -1294,6 +1296,13 @@ parse_watch_args() {
         DEBUG_FLAGS+=("$1=$2")
         SMS_RETRY_COUNT="$2"
         shift 2
+        continue
+        ;;
+      --delete-sent)
+        DEBUG_FLAGS+=("$1")
+        WATCH_DELETE_AFTER=1
+        WATCH_DELETE_AFTER_CLI_OVERRIDE=1
+        shift
         continue
         ;;
       --)
@@ -3169,12 +3178,46 @@ sms_send() {
   if [[ -n "$chunk_size" ]]
   then
     send_chunks=()
-    local text_len=${#text}
-    local offset=0
-    while (( offset < text_len ))
+    local text_remaining="$text"
+    while [[ -n "$text_remaining" ]]
     do
-      send_chunks+=( "${text:offset:chunk_size}" )
-      offset=$((offset + chunk_size))
+      local remaining_len=${#text_remaining}
+      if (( remaining_len <= chunk_size ))
+      then
+        send_chunks+=("$text_remaining")
+        break
+      fi
+
+      local chunk="${text_remaining:0:chunk_size}"
+      local cut_length="$chunk_size"
+      local break_pos=-1
+      local i
+
+      for (( i=cut_length-1; i>=0; i-- ))
+      do
+        local char="${chunk:i:1}"
+        if [[ "$char" =~ [[:space:]] ]]
+        then
+          break_pos=$i
+          break
+        fi
+      done
+
+      if (( break_pos >= 0 ))
+      then
+        cut_length=$((break_pos + 1))
+      elif [[ "${text_remaining:chunk_size:1}" =~ [[:space:]] ]]
+      then
+        cut_length=$((chunk_size + 1))
+      fi
+
+      while (( cut_length < remaining_len )) && [[ "${text_remaining:cut_length:1}" =~ [[:space:]] ]]
+      do
+        cut_length=$((cut_length + 1))
+      done
+
+      send_chunks+=( "${text_remaining:0:cut_length}" )
+      text_remaining="${text_remaining:cut_length}"
     done
   fi
 
@@ -3634,8 +3677,22 @@ sms_prune_all_modems() {
 }
 
 sms_list_print_header() {
-  local include_mid="$1"
+  local include_mid=""
   local header
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      --include-modem-id)
+        include_mid=1
+        shift
+        ;;
+      *)
+        echo_error "sms_list_print_header: unknown option '$1'"
+        return 2
+        ;;
+    esac
+  done
 
   if [[ -n "$include_mid" ]]
   then
@@ -3656,9 +3713,55 @@ sms_list_print_entry() {
   local mid="$1"
   local id="$2"
   local js="$3"
-  local include_mid="$4"
-  local maxlen="${5:-80}"
+  shift 3
+
+  local include_mid=""
+  local maxlen=80
   local sender text msg_type pdu
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      --include-modem-id)
+        include_mid=1
+        shift
+        ;;
+      --max-length)
+        if (( $# < 2 ))
+        then
+          echo_error "sms_list_print_entry: missing value for --max-length"
+          return 2
+        fi
+        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        then
+          echo_error "sms_list_print_entry: --max-length requires a non-negative integer"
+          return 2
+        fi
+        maxlen="$2"
+        shift 2
+        ;;
+      --max-length=*)
+        local value
+        value="${1#*=}"
+        if [[ -z "$value" ]]
+        then
+          echo_error "sms_list_print_entry: missing value for --max-length"
+          return 2
+        fi
+        if [[ ! "$value" =~ ^[0-9]+$ ]]
+        then
+          echo_error "sms_list_print_entry: --max-length requires a non-negative integer"
+          return 2
+        fi
+        maxlen="$value"
+        shift
+        ;;
+      *)
+        echo_error "sms_list_print_entry: unknown option '$1'"
+        return 2
+        ;;
+    esac
+  done
 
   sender="$(jq -r '.sms.content.number // "--"' <<<"$js")"
   sender="$(ensure_plus "$sender")"
@@ -3842,7 +3945,7 @@ sms_list_pretty() {
     fi
 
     # Pretty output across all modems: add a MID column
-    sms_list_print_header --with-modem-id
+    sms_list_print_header --include-modem-id
 
     for mid in "${mids[@]}"
     do
@@ -3861,7 +3964,7 @@ sms_list_pretty() {
         then
           continue
         fi
-        sms_list_print_entry "$mid" "$id" "$js" --with-modem-id "$maxlen"
+        sms_list_print_entry "$mid" "$id" "$js" --include-modem-id --max-length "$maxlen"
         had_any=1
       done
     done
@@ -3949,7 +4052,7 @@ sms_list_pretty() {
     then
       continue
     fi
-    sms_list_print_entry "" "$id" "$js" "" "$maxlen"
+    sms_list_print_entry "" "$id" "$js" --max-length "$maxlen"
   done
 }
 
@@ -5865,6 +5968,11 @@ main() {
   if ! load_config post-args
   then
     return $?
+  fi
+
+  if [[ "$command" == "watch" && -n "$WATCH_DELETE_AFTER_CLI_OVERRIDE" ]]
+  then
+    WATCH_DELETE_AFTER=1
   fi
 
   if [[ -n "$RAW_OUTPUT_FORCED" ]]
