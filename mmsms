@@ -41,6 +41,8 @@ WATCH_PRUNE="${WATCH_PRUNE:-}"
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
+JSON_OUTPUT_FORCED="${JSON_OUTPUT_FORCED:-}"
+RAW_OUTPUT_FORCED="${RAW_OUTPUT_FORCED:-}"
 HARD_RESET="${HARD_RESET:-}"
 USB_REPLUG="${USB_REPLUG:-}"
 SENT_ONLY="${SENT_ONLY:-}"
@@ -54,6 +56,17 @@ SKIP_MODEM_INIT_PATTERNS=()
 
 # Token used to render section dividers in fancy modem status output
 MODEM_STATUS_SEPARATOR_TOKEN="__MODEM_STATUS_SEPARATOR__"
+
+# Shared ANSI color codes for consistent styling across outputs
+readonly COLOR_RESET='0'
+readonly COLOR_CYAN='36'
+readonly COLOR_BOLD_RED='1;31'
+readonly COLOR_BOLD_GREEN='1;32'
+readonly COLOR_BOLD_YELLOW='1;33'
+readonly COLOR_BOLD_BLUE='1;34'
+readonly COLOR_BOLD_MAGENTA='1;35'
+readonly COLOR_BOLD_CYAN='1;36'
+readonly COLOR_BOLD_WHITE='1;37'
 
 trim() {
   local s="$1"
@@ -698,12 +711,14 @@ parse_list_args() {
       -j|--json)
         DEBUG_FLAGS+=("$1")
         JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
         shift
         continue
         ;;
       -r|--raw)
         DEBUG_FLAGS+=("$1")
         RAW_OUTPUT=1
+        RAW_OUTPUT_FORCED=1
         shift
         continue
         ;;
@@ -794,12 +809,14 @@ parse_read_args() {
       -j|--json)
         DEBUG_FLAGS+=("$1")
         JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
         shift
         continue
         ;;
       -r|--raw)
         DEBUG_FLAGS+=("$1")
         RAW_OUTPUT=1
+        RAW_OUTPUT_FORCED=1
         shift
         continue
         ;;
@@ -1052,12 +1069,14 @@ parse_status_args() {
       -j|--json)
         DEBUG_FLAGS+=("$1")
         JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
         shift
         continue
         ;;
       -r|--raw)
         DEBUG_FLAGS+=("$1")
         RAW_OUTPUT=1
+        RAW_OUTPUT_FORCED=1
         shift
         continue
         ;;
@@ -2640,14 +2659,270 @@ mmcli_cmd() {
   command mmcli --modem "$MODEM" "$@"
 }
 
-sms_read() {
+sms_state_color() { # $1=state
+  local state="${1,,}"
+  case "$state" in
+    received|read|sent|delivered|delivery-success|complete|completed|stored|stored-received|stored-sent)
+      printf '%s' "$COLOR_BOLD_GREEN"
+      ;;
+    queued|pending|sending|temporary|unknown|new|waiting|draft)
+      printf '%s' "$COLOR_BOLD_YELLOW"
+      ;;
+    failed|error|rejected|aborted|cancelled|timeout|unsent|not-sent|undelivered)
+      printf '%s' "$COLOR_BOLD_RED"
+      ;;
+    *)
+      printf '%s' "$COLOR_CYAN"
+      ;;
+  esac
+}
+
+sms_type_color() { # $1=type
+  local type="${1,,}"
+  case "$type" in
+    received)
+      printf '%s' "$COLOR_BOLD_GREEN"
+      ;;
+    sent)
+      printf '%s' "$COLOR_BOLD_BLUE"
+      ;;
+    report|status-report)
+      printf '%s' "$COLOR_BOLD_MAGENTA"
+      ;;
+    *)
+      printf '%s' "$COLOR_CYAN"
+      ;;
+  esac
+}
+
+sms_read_party_info() { # $1=type, $2=remote, $3=own
+  local type="${1,,}"
+  local remote="$2"
+  local own="$3"
+
+  local direction="unknown"
+  local remote_label="Number"
+  local local_label="Own"
+  local remote_value="$remote"
+  local local_value="$own"
+
+  case "$type" in
+    received)
+      direction="incoming"
+      remote_label="From"
+      local_label="To"
+      ;;
+    sent)
+      direction="outgoing"
+      remote_label="To"
+      local_label="From"
+      ;;
+    report|status-report)
+      direction="network"
+      remote_label="Report For"
+      local_label="From"
+      ;;
+  esac
+
+  printf '%s\t%s\t%s\t%s\t%s' "$direction" "$remote_label" "$local_label" "$remote_value" "$local_value"
+}
+
+sms_read_raw() {
   local msg_id="$1"
   mmcli_cmd --sms "$msg_id"
 }
 
+sms_read_pretty() {
+  local msg_id="$1"
+  local js
+
+  if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
+  then
+    return 1
+  fi
+
+  local id
+  id="$(jq -r '.sms["dbus-path"] | split("/")[-1] // ""' <<<"$js")"
+  if [[ -z "$id" ]]
+  then
+    id="$msg_id"
+  fi
+
+  local modem_path modem_id
+  modem_path="$(jq -r '.sms.modem // ""' <<<"$js")"
+  if [[ -n "$modem_path" ]]
+  then
+    modem_id="${modem_path##*/}"
+  else
+    modem_id=""
+  fi
+
+  local pdu type state storage class smsc timestamp discharge delivery_state delivery_report encoding data number text
+  pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
+  type="$(pdu_to_type "$pdu")"
+  state="$(jq -r '.sms.properties.state // ""' <<<"$js")"
+  storage="$(jq -r '.sms.properties.storage // ""' <<<"$js")"
+  class="$(jq -r '.sms.properties.class // ""' <<<"$js")"
+  smsc="$(jq -r '.sms.properties.smsc // ""' <<<"$js")"
+  smsc="$(ensure_plus "$smsc")"
+  timestamp="$(jq -r '.sms.properties.timestamp // ""' <<<"$js")"
+  discharge="$(jq -r '.sms.properties["discharge-timestamp"] // ""' <<<"$js")"
+  delivery_state="$(jq -r '.sms.properties["delivery-state"] // ""' <<<"$js")"
+  delivery_report="$(jq -r '.sms.properties["delivery-report"] // ""' <<<"$js")"
+  encoding="$(jq -r '.sms.content.encoding // ""' <<<"$js")"
+  data="$(jq -r '.sms.content.data // ""' <<<"$js")"
+  number="$(jq -r '.sms.content.number // ""' <<<"$js")"
+  number="$(ensure_plus "$number")"
+  text="$(jq -r '.sms.content.text // ""' <<<"$js")"
+  text=${text//$'\r'/}
+
+  local own=""
+  if load_own_number
+  then
+    own="$OWN_NUMBER"
+  fi
+  own="$(ensure_plus "$own")"
+
+  local party_info direction remote_label local_label remote_value local_value
+  party_info="$(sms_read_party_info "$type" "$number" "$own")"
+  IFS=$'\t' read -r direction remote_label local_label remote_value local_value <<<"$party_info"
+
+  local modem_display="$modem_id"
+  if [[ -z "$modem_display" && "$MODEM" =~ ^[0-9]+$ ]]
+  then
+    modem_display="$MODEM"
+  fi
+  [[ -n "$modem_display" ]] || modem_display="unknown"
+
+  local id_display="$id"
+  [[ -n "$id_display" ]] || id_display="$msg_id"
+
+  local type_display="$type"
+  [[ -n "$type_display" ]] || type_display="unknown"
+  type_display="${type_display^}"
+  if [[ -n "$direction" && "$direction" != "unknown" ]]
+  then
+    type_display+=" (${direction})"
+  fi
+
+  local state_display="$state"
+  [[ -n "$state_display" ]] || state_display="unknown"
+
+  local storage_display="$storage"
+  [[ -n "$storage_display" ]] || storage_display="unknown"
+
+  local timestamp_display="$timestamp"
+  [[ -n "$timestamp_display" ]] || timestamp_display="--"
+
+  local smsc_display="$smsc"
+  [[ -n "$smsc_display" ]] || smsc_display="--"
+
+  local delivery_display=""
+  if [[ -n "$delivery_state" ]]
+  then
+    delivery_display="$delivery_state"
+  fi
+  if [[ -n "$delivery_report" ]]
+  then
+    if [[ -n "$delivery_display" ]]
+    then
+      delivery_display+=" ($delivery_report)"
+    else
+      delivery_display="$delivery_report"
+    fi
+  fi
+
+  local data_summary=""
+  if [[ -n "$data" ]]
+  then
+    local trimmed="$data"
+    if (( ${#trimmed} > 64 ))
+    then
+      trimmed="${trimmed:0:61}…"
+    fi
+    if [[ "$data" =~ ^[0-9A-Fa-f]+$ ]]
+    then
+      local byte_len=$(( ${#data} / 2 ))
+      data_summary="$byte_len bytes ($trimmed)"
+    else
+      data_summary="$trimmed"
+    fi
+  fi
+
+  local message_display="$text"
+  if [[ -z "$message_display" ]]
+  then
+    message_display="*no text*"
+  fi
+
+  local -a rows=()
+  local row
+
+  printf -v row '%s\t%s\t%s' "SMS ID" "$COLOR_BOLD_WHITE" "$id_display"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Modem" "$COLOR_BOLD_CYAN" "$modem_display"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Type" "$(sms_type_color "$type")" "$type_display"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "State" "$(sms_state_color "$state")" "$state_display"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Storage" "$COLOR_CYAN" "$storage_display"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "Timestamp" "$COLOR_CYAN" "$timestamp_display"
+  rows+=("$row")
+  if [[ -n "$discharge" ]]
+  then
+    printf -v row '%s\t%s\t%s' "Discharged" "$COLOR_CYAN" "$discharge"
+    rows+=("$row")
+  fi
+  if [[ -n "$delivery_display" ]]
+  then
+    printf -v row '%s\t%s\t%s' "Delivery" "$(sms_state_color "$delivery_state")" "$delivery_display"
+    rows+=("$row")
+  fi
+
+  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
+  rows+=("$row")
+
+  printf -v row '%s\t%s\t%s' "$remote_label" "$COLOR_BOLD_BLUE" "$remote_value"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "$local_label" "$COLOR_BOLD_BLUE" "$local_value"
+  rows+=("$row")
+  printf -v row '%s\t%s\t%s' "SMSC" "$COLOR_BOLD_BLUE" "$smsc_display"
+  rows+=("$row")
+  if [[ -n "$class" ]]
+  then
+    printf -v row '%s\t%s\t%s' "Class" "$COLOR_CYAN" "$class"
+    rows+=("$row")
+  fi
+  if [[ -n "$encoding" ]]
+  then
+    printf -v row '%s\t%s\t%s' "Encoding" "$COLOR_CYAN" "$encoding"
+    rows+=("$row")
+  fi
+  if [[ -n "$pdu" ]]
+  then
+    printf -v row '%s\t%s\t%s' "PDU" "$COLOR_CYAN" "$pdu"
+    rows+=("$row")
+  fi
+  if [[ -n "$data_summary" ]]
+  then
+    printf -v row '%s\t%s\t%s' "Data" "$COLOR_CYAN" "$data_summary"
+    rows+=("$row")
+  fi
+
+  printf -v row '%s\t%s\t%s' "$MODEM_STATUS_SEPARATOR_TOKEN" "" ""
+  rows+=("$row")
+
+  printf -v row '%s\t%s\t%s' "Message" "$COLOR_RESET" "$message_display"
+  rows+=("$row")
+
+  print_colored_rows --indent "" "${rows[@]}"
+}
+
 sms_read_json() {
   local msg_id="$1"
-  local js pdu msg_type own=""
+  local js pdu msg_type own="" number smsc party_info direction remote_label local_label remote_value local_value
 
   if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
   then
@@ -2657,29 +2932,54 @@ sms_read_json() {
   pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
   msg_type="$(pdu_to_type "$pdu")"
 
+  number="$(jq -r '.sms.content.number // ""' <<<"$js")"
+  number="$(ensure_plus "$number")"
+
   if load_own_number
   then
     own="$OWN_NUMBER"
   fi
+  own="$(ensure_plus "$own")"
 
-  jq --arg type "$msg_type" --arg own "$own" '
-    .sms as $s
-    | {
-        id: ($s["dbus-path"] | split("/")[-1] | tonumber?),
-        sender: ($s.content.number // ""),
-        text: ($s.content.text // ""),
-        class: ($s.properties.class // ""),
-        state: ($s.properties.state // ""),
-        pdu: ($s.properties["pdu-type"] // ""),
-        storage: ($s.properties.storage // ""),
-        smsc: ($s.properties.smsc // ""),
-        timestamp: ($s.properties.timestamp // ""),
-        discharge_timestamp: ($s.properties["discharge-timestamp"] // ""),
-        delivery_state: ($s.properties["delivery-state"] // ""),
-        delivery_report: ($s.properties["delivery-report"] // ""),
-        type: $type,
-        recipient: (if $type == "received" then $own else ($s.content.number // "") end)
-      }
+  party_info="$(sms_read_party_info "$msg_type" "$number" "$own")"
+  IFS=$'\t' read -r direction remote_label local_label remote_value local_value <<<"$party_info"
+
+  smsc="$(jq -r '.sms.properties.smsc // ""' <<<"$js")"
+  smsc="$(ensure_plus "$smsc")"
+
+  jq --arg type "$msg_type" \
+     --arg direction "$direction" \
+     --arg remote "$remote_value" \
+     --arg local "$local_value" \
+     --arg smsc "$smsc" \
+     --arg pdu "$pdu" '
+    {
+      id: (.sms["dbus-path"] | split("/")[-1] | tonumber?),
+      modem_id: (.sms.modem // "" | split("/")[-1] | tonumber?),
+      type: (if $type == "" then null else $type end),
+      direction: (if $direction == "" then null else $direction end),
+      state: (.sms.properties.state // null),
+      storage: ((.sms.properties.storage // "") | if . == "" then null else . end),
+      class: ((.sms.properties.class // "") | if . == "" then null else (. | tonumber? // .) end),
+      pdu: (if $pdu == "" then null else $pdu end),
+      timestamp: (.sms.properties.timestamp // null),
+      discharge_timestamp: (.sms.properties["discharge-timestamp"] // null),
+      remote_number: (if $remote == "" then null else $remote end),
+      local_number: (if $local == "" then null else $local end),
+      smsc: (if $smsc == "" then null else $smsc end),
+      text: ((.sms.content.text // null) | if . == null then null else gsub("\r"; "") end),
+      encoding: ((.sms.content.encoding // "") | if . == "" then null else . end),
+      data: ((.sms.content.data // "") | if . == "" then null else . end),
+      delivery: (
+        {state: (.sms.properties["delivery-state"] // ""), report: (.sms.properties["delivery-report"] // "") } as $d
+        | if ($d.state == "" and $d.report == "") then null
+          else {
+            state: (if $d.state == "" then null else $d.state end),
+            report: (if $d.report == "" then null else $d.report end)
+          }
+          end
+      )
+    }
   ' <<<"$js"
 }
 
@@ -4108,21 +4408,6 @@ get_smsc_number() {
   printf '%s' "$SMSC_NUMBER"
 }
 
-repeat_char() { # $1=char, $2=count
-  local char="$1"
-  local count="${2:-0}"
-
-  if (( count <= 0 ))
-  then
-    printf '%s' ""
-    return 0
-  fi
-
-  local _spaces
-  printf -v _spaces '%*s' "$count" ''
-  printf '%s' "${_spaces// /$char}"
-}
-
 colorize_text() { # $1=colorcode, $2=text
   local color="$1"
   local text="$2"
@@ -4136,26 +4421,32 @@ colorize_text() { # $1=colorcode, $2=text
   printf '\e[%sm%s\e[0m' "$color" "$text"
 }
 
-render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tcolor\tvalue
-  local title="$1"
-  local header_color="$2"
-  shift 2
+print_colored_rows() { # [--indent PREFIX] rows as label\tcolor\tvalue
+  local indent="  "
+  if [[ "${1:-}" == "--indent" ]]
+  then
+    if (( $# >= 2 ))
+    then
+      indent="$2"
+      shift 2
+    else
+      indent=""
+      shift
+    fi
+  fi
+
   local -a rows=("$@")
+  (( ${#rows[@]} == 0 )) && return 0
 
   local label_width=0
-  local value_width=0
-  local header_text
-  if [[ -n "$title" ]]
-  then
-    header_text="Modem ${title} Status"
-  else
-    header_text="Modem Status"
-  fi
-  local row label color value
+  local row label color value rest
 
   for row in "${rows[@]}"
   do
-    IFS=$'\t' read -r label color value <<<"$row"
+    label="${row%%$'\t'*}"
+    rest="${row#*$'\t'}"
+    color="${rest%%$'\t'*}"
+    value="${rest#*$'\t'}"
     if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
     then
       continue
@@ -4164,56 +4455,51 @@ render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tc
     then
       label_width=${#label}
     fi
-    if (( ${#value} > value_width ))
-    then
-      value_width=${#value}
-    fi
   done
 
-  (( label_width < 8 )) && label_width=8
-  (( value_width < 8 )) && value_width=8
+  (( label_width < 6 )) && label_width=6
 
-  local inner_width=$(( label_width + value_width + 5 ))
-  local header_required=$(( ${#header_text} + 1 ))
-  if (( header_required > inner_width ))
-  then
-    value_width=$(( header_required - label_width - 5 ))
-    if (( value_width < 8 ))
-    then
-      value_width=8
-    fi
-    inner_width=$(( label_width + value_width + 5 ))
-  fi
-
-  local border
-  border="$(repeat_char '━' "$inner_width")"
-  printf '┏%s┓\n' "$border"
-
-  local header_width=$(( inner_width - 1 ))
-  local header_padded
-  printf -v header_padded '%-*s' "$header_width" "$header_text"
-  printf '┃ %s┃\n' "$(colorize_text "$header_color" "$header_padded")"
-
-  printf '┣%s┫\n' "$(repeat_char '━' "$inner_width")"
-
-  local separator_line
-  separator_line="$(repeat_char '─' "$inner_width")"
-
-  local value_padded
   for row in "${rows[@]}"
   do
-    IFS=$'\t' read -r label color value <<<"$row"
+    label="${row%%$'\t'*}"
+    rest="${row#*$'\t'}"
+    color="${rest%%$'\t'*}"
+    value="${rest#*$'\t'}"
     if [[ "$label" == "$MODEM_STATUS_SEPARATOR_TOKEN" ]]
     then
-      printf '┣%s┫\n' "$separator_line"
+      printf '\n'
       continue
     fi
 
-    printf -v value_padded '%-*s' "$value_width" "$value"
-    printf '┃ %-*s │ %s ┃\n' "$label_width" "$label" "$(colorize_text "$color" "$value_padded")"
+    local display="$value"
+    if [[ -z "$display" ]]
+    then
+      display="--"
+    fi
+
+    local first_line=1
+    while IFS= read -r line || [[ -n "$line" ]]
+    do
+      if (( first_line ))
+      then
+        printf '%s%-*s  %s\n' "$indent" "$label_width" "$label" "$(colorize_text "$color" "$line")"
+        first_line=0
+      else
+        printf '%s%-*s  %s\n' "$indent" "$label_width" "" "$(colorize_text "$color" "$line")"
+      fi
+    done <<<"$display"
   done
 
-  printf '┗%s┛\n' "$border"
+  printf '\n'
+}
+
+render_modem_status_panel() { # $1=title, $2=header_color, rest rows as label\tcolor\tvalue
+  local _title="$1"
+  local _header_color="$2"
+  shift 2
+  local -a rows=("$@")
+
+  print_colored_rows --indent "" "${rows[@]}"
 }
 
 modem_status_single() {
@@ -4444,48 +4730,48 @@ modem_status_single() {
   # Choose colors for the status panel
   local state_color power_color reg_color sig_color carrier_color phone_color smsc_color info_color country_color
   case "${state,,}" in
-    connected|registered|enabled|online|on) state_color='1;32';;   # bold green
-    searching|initializing|connecting|locked|unknown) state_color='1;33';; # bold yellow
-    failed|disabled|off) state_color='1;31';;                      # bold red
-    *) state_color='36';;                                          # cyan
+    connected|registered|enabled|online|on) state_color="$COLOR_BOLD_GREEN";;   # bold green
+    searching|initializing|connecting|locked|unknown) state_color="$COLOR_BOLD_YELLOW";; # bold yellow
+    failed|disabled|off) state_color="$COLOR_BOLD_RED";;                      # bold red
+    *) state_color="$COLOR_CYAN";;                                          # cyan
   esac
 
   case "${power,,}" in
-    on|full) power_color='1;32';;
-    low) power_color='1;33';;
-    off|unknown) power_color='1;31';;
-    *) power_color='36';;
+    on|full) power_color="$COLOR_BOLD_GREEN";;
+    low) power_color="$COLOR_BOLD_YELLOW";;
+    off|unknown) power_color="$COLOR_BOLD_RED";;
+    *) power_color="$COLOR_CYAN";;
   esac
 
   case "${reg,,}" in
-    home|registered|attached) reg_color='1;32';; # green
-    roaming) reg_color='1;35';; # magenta
-    searching|idle|unknown) reg_color='1;33';; # yellow
-    denied|unregistered) reg_color='1;31';; # red
-    *) reg_color='36';; # cyan
+    home|registered|attached) reg_color="$COLOR_BOLD_GREEN";; # green
+    roaming) reg_color="$COLOR_BOLD_MAGENTA";; # magenta
+    searching|idle|unknown) reg_color="$COLOR_BOLD_YELLOW";; # yellow
+    denied|unregistered) reg_color="$COLOR_BOLD_RED";; # red
+    *) reg_color="$COLOR_CYAN";; # cyan
   esac
 
   if [[ "$signal_num" =~ ^[0-9]+$ ]]
   then
     if (( signal_num >= 70 ))
     then
-      sig_color='1;32'
+      sig_color="$COLOR_BOLD_GREEN"
     elif (( signal_num >= 40 ))
     then
-      sig_color='1;33'
+      sig_color="$COLOR_BOLD_YELLOW"
     else
-      sig_color='1;31'
+      sig_color="$COLOR_BOLD_RED"
     fi
   else
-    sig_color='36'
+    sig_color="$COLOR_CYAN"
   fi
 
-  carrier_color='1;34' # bold blue
-  phone_color='1;34'
-  smsc_color='1;34'
-  info_color='1;34'
+  carrier_color="$COLOR_BOLD_BLUE" # bold blue
+  phone_color="$COLOR_BOLD_BLUE"
+  smsc_color="$COLOR_BOLD_BLUE"
+  info_color="$COLOR_BOLD_BLUE"
   country_color="$phone_color"
-  local id_color='1;37' # bold white
+  local id_color="$COLOR_BOLD_WHITE" # bold white
 
   local -a status_rows=()
   local row
@@ -5196,6 +5482,15 @@ main() {
     return $?
   fi
 
+  if [[ -n "$RAW_OUTPUT_FORCED" ]]
+  then
+    RAW_OUTPUT=1
+  fi
+  if [[ -n "$JSON_OUTPUT_FORCED" ]]
+  then
+    JSON_OUTPUT=1
+  fi
+
   if command_requires_modem_resolution "$command"
   then
     local resolve_rc
@@ -5265,12 +5560,12 @@ main() {
           mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq -e
         elif raw_plain_requested
         then
-          sms_read "${CMD_ARGS[@]}"
+          sms_read_raw "${CMD_ARGS[@]}"
         elif custom_json_requested
         then
           sms_read_json "${CMD_ARGS[0]}"
         else
-          sms_read "${CMD_ARGS[@]}"
+          sms_read_pretty "${CMD_ARGS[0]}"
         fi
       ;;
     service)
