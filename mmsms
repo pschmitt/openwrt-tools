@@ -38,6 +38,11 @@ WATCH_ENABLE="${WATCH_ENABLE:-}"
 WATCH_ENABLE_POLL_INTERVAL="${WATCH_ENABLE_POLL_INTERVAL:-5}"
 WATCH_PRUNE="${WATCH_PRUNE:-}"
 
+WATCH_MAX_PENDING_PER_MODEM="${WATCH_MAX_PENDING_PER_MODEM:-10}"
+WATCH_WORKER_LOCK_SLEEP="${WATCH_WORKER_LOCK_SLEEP:-1}"
+declare -A WATCH_WORKER_PIDS=()
+WATCH_ASYNC_DIR=""
+
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
 RAW_OUTPUT="${RAW_OUTPUT:-}"
@@ -4162,6 +4167,8 @@ reset_log() {
 }
 
 watch_cleanup() {
+  watch_stop_workers
+
   if [[ -n "$WATCH_DBUS_PID" ]]
   then
     if ! kill "$WATCH_DBUS_PID"
@@ -4187,6 +4194,275 @@ watch_cleanup() {
       echo_warning "could not remove fifo $WATCH_FIFO"
     fi
     WATCH_FIFO=""
+  fi
+}
+
+watch_queue_key() {
+  local modem_hint="$1"
+
+  if [[ -n "$modem_hint" ]]
+  then
+    printf '%s' "$modem_hint"
+  else
+    printf '%s' "any"
+  fi
+}
+
+watch_async_dir_prepare() {
+  if [[ -n "$WATCH_ASYNC_DIR" && -d "$WATCH_ASYNC_DIR" ]]
+  then
+    printf '%s\n' "$WATCH_ASYNC_DIR"
+    return 0
+  fi
+
+  local base="${TMPDIR:-/tmp}"
+  local dir
+
+  if dir="$(mktemp -d "$base/mmsms-watch.XXXXXX")"
+  then
+    :
+  else
+    dir="$base/mmsms-watch.$$"
+    if ! mkdir -p "$dir"
+    then
+      echo_warning "watch: failed to create async directory in $base"
+      return 1
+    fi
+  fi
+
+  WATCH_ASYNC_DIR="$dir"
+  printf '%s\n' "$WATCH_ASYNC_DIR"
+  return 0
+}
+
+watch_pid_alive() {
+  local pid="$1"
+
+  if [[ -z "$pid" ]]
+  then
+    return 1
+  fi
+
+  local status_file="/proc/$pid/status"
+  if [[ ! -r "$status_file" ]]
+  then
+    return 1
+  fi
+
+  local line
+  while IFS= read -r line
+  do
+    case "$line" in
+      State:*)
+        [[ "$line" == *"(zombie)"* ]] && return 1
+        return 0
+        ;;
+    esac
+  done <"$status_file"
+
+  return 0
+}
+
+watch_worker_release_lock() {
+  local lock_path="$1"
+
+  if [[ -z "$lock_path" ]]
+  then
+    return
+  fi
+
+  if [[ -d "$lock_path" ]]
+  then
+    if ! rmdir "$lock_path"
+    then
+      echo_warning "watch: failed to remove lock directory $lock_path"
+    fi
+  fi
+}
+
+watch_worker_register() {
+  local modem_key="$1"
+  local pid="$2"
+
+  if [[ -z "$modem_key" || -z "$pid" ]]
+  then
+    return
+  fi
+
+  local existing
+  existing="${WATCH_WORKER_PIDS[$modem_key]:-}"
+
+  if [[ -n "$existing" ]]
+  then
+    WATCH_WORKER_PIDS["$modem_key"]="$existing $pid"
+  else
+    WATCH_WORKER_PIDS["$modem_key"]="$pid"
+  fi
+}
+
+watch_worker_prune_for_modem() {
+  local modem_key="$1"
+
+  local pids
+  pids="${WATCH_WORKER_PIDS[$modem_key]:-}"
+
+  if [[ -z "$pids" ]]
+  then
+    return
+  fi
+
+  local -a alive=()
+  local pid
+  for pid in $pids
+  do
+    if watch_pid_alive "$pid"
+    then
+      alive+=("$pid")
+    else
+      wait "$pid"
+    fi
+  done
+
+  if (( ${#alive[@]} > 0 ))
+  then
+    WATCH_WORKER_PIDS["$modem_key"]="${alive[*]}"
+  else
+    unset 'WATCH_WORKER_PIDS[$modem_key]'
+  fi
+}
+
+watch_worker_prune_all() {
+  local modem_key
+
+  for modem_key in "${!WATCH_WORKER_PIDS[@]}"
+  do
+    watch_worker_prune_for_modem "$modem_key"
+  done
+}
+
+watch_worker_pending_count() {
+  local modem_key="$1"
+
+  local pids
+  pids="${WATCH_WORKER_PIDS[$modem_key]:-}"
+
+  if [[ -z "$pids" ]]
+  then
+    printf '%s' '0'
+    return
+  fi
+
+  local -a pid_list=()
+  local IFS=' '
+  read -ra pid_list <<< "$pids"
+
+  printf '%s' "${#pid_list[@]}"
+}
+
+watch_spawn_worker() {
+  local id="$1"
+  local modem_hint="$2"
+  local modem_key="$3"
+
+  local dir
+  if ! dir="$(watch_async_dir_prepare)"
+  then
+    return 1
+  fi
+
+  local lock_path="$dir/modem-${modem_key}.lock"
+
+  (
+    while ! mkdir "$lock_path"
+    do
+      sleep "$WATCH_WORKER_LOCK_SLEEP"
+    done
+
+    trap "watch_worker_release_lock '$lock_path'" EXIT INT TERM
+
+    echo_debug "watch: worker $$ handling SMS $id for modem $modem_key"
+    watch_handle_sms "$id" "$modem_hint"
+    echo_debug "watch: worker $$ finished SMS $id for modem $modem_key"
+  ) &
+  local pid=$!
+
+  watch_worker_register "$modem_key" "$pid"
+  echo_debug "watch: started async SMS worker pid=$pid for modem $modem_key (id=$id)"
+
+  return 0
+}
+
+watch_enqueue_sms() {
+  local id="$1"
+  local modem_hint="$2"
+  local modem_key
+  modem_key="$(watch_queue_key "$modem_hint")"
+
+  watch_worker_prune_for_modem "$modem_key"
+
+  local pending
+  pending="$(watch_worker_pending_count "$modem_key")"
+
+  if (( pending >= WATCH_MAX_PENDING_PER_MODEM ))
+  then
+    echo_warning "watch: modem $modem_key pending workers at limit ($pending); processing SMS $id synchronously"
+    watch_handle_sms "$id" "$modem_hint"
+    return
+  fi
+
+  if watch_spawn_worker "$id" "$modem_hint" "$modem_key"
+  then
+    return
+  fi
+
+  echo_warning "watch: failed to start async worker for modem $modem_key; processing SMS $id synchronously"
+  watch_handle_sms "$id" "$modem_hint"
+}
+
+watch_stop_workers() {
+  watch_worker_prune_all
+
+  local modem_key
+  for modem_key in "${!WATCH_WORKER_PIDS[@]}"
+  do
+    local pids="${WATCH_WORKER_PIDS[$modem_key]}"
+    local pid
+    for pid in $pids
+    do
+      if watch_pid_alive "$pid"
+      then
+        if ! kill "$pid"
+        then
+          echo_warning "watch: failed to terminate worker pid=$pid for modem $modem_key"
+        fi
+      fi
+    done
+  done
+
+  for modem_key in "${!WATCH_WORKER_PIDS[@]}"
+  do
+    local pids="${WATCH_WORKER_PIDS[$modem_key]}"
+    local pid
+    for pid in $pids
+    do
+      if ! wait "$pid"
+      then
+        echo_warning "watch: worker pid=$pid for modem $modem_key exited with error"
+      fi
+    done
+    unset 'WATCH_WORKER_PIDS[$modem_key]'
+  done
+
+  if [[ -n "$WATCH_ASYNC_DIR" ]]
+  then
+    if [[ -d "$WATCH_ASYNC_DIR" ]]
+    then
+      if ! rm -rf "$WATCH_ASYNC_DIR"
+      then
+        echo_warning "watch: failed to remove async directory $WATCH_ASYNC_DIR"
+      fi
+    fi
+    WATCH_ASYNC_DIR=""
   fi
 }
 
@@ -4932,13 +5208,19 @@ watch_handle_sms() {
   # by shadowing MODEM locally for mmcli_cmd invocations.
   # shellcheck disable=SC2031
   local MODEM="$MODEM"
+  local modem_hint_label
+  local modem_effective
   if [[ -n "$prefer_modem_id" ]]
   then
     MODEM="$prefer_modem_id"
+    modem_hint_label="$prefer_modem_id"
   else
     echo_warning "no modem hint for SMS $id; defaulting to any"
     MODEM="any"
+    modem_hint_label="--"
   fi
+  modem_effective="$MODEM"
+  echo_debug "watch: processing SMS $id (hint=$modem_hint_label effective=$modem_effective)"
   local tries=0
   local js state pdu sender text payload
 
@@ -4946,6 +5228,7 @@ watch_handle_sms() {
   do
     if ! js="$(mmcli_cmd --sms "$id" -J)"
     then
+      echo_warning "watch: failed to read SMS $id details via mmcli"
       return
     fi
 
@@ -5085,6 +5368,7 @@ watch_handle_sms() {
 watch_messages() {
   export PATH="/usr/local/bin:/srv/bin:$PATH"
   trap watch_cleanup EXIT INT TERM
+  trap watch_worker_prune_all CHLD
 
   WATCH_FIFO="${TMPDIR:-/tmp}/smsbus.$$"
   mkfifo "$WATCH_FIFO"
@@ -5150,7 +5434,7 @@ watch_messages() {
           echo_warning "ignoring SMS $id from modem $current_modem_id (listening on $MODEM)"
           continue
         fi
-        watch_handle_sms "$id" "$current_modem_id"
+        watch_enqueue_sms "$id" "$current_modem_id"
       fi
     fi
   done <"$WATCH_FIFO"
