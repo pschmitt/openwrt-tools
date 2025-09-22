@@ -3314,39 +3314,74 @@ sms_list_pretty() {
 
     if custom_json_requested
     then
-      if [[ -n "$ALL_MODEMS" && -z "$target_mid" ]]
-      then
-        local mids mid json_items=()
+      local -a json_items=()
+      local mid own info_json
 
-        if mapfile -t mids < <(list_modem_ids_sorted)
+      for mid in "${mids[@]}"
+      do
+        [[ -z "$mid" ]] && continue
+
+        if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
         then
-          for mid in "${mids[@]}"
-          do
-            [[ -z "$mid" ]] && continue
-            local item
-            item="$(MODEM="$mid" ALL_MODEMS="" JSON_OUTPUT=1 RAW_OUTPUT="" modem_status_single)"
-            [[ -n "$item" ]] && json_items+=("$item")
-          done
+          continue
         fi
 
-        if (( ${#json_items[@]} == 0 ))
+        mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
+        (( ${#ids[@]} == 0 )) && continue
+
+        own=""
+        if info_json="$(mmcli --modem "$mid" -J)"
         then
-          printf '[]\n'
-        else
-          printf '%s\n' "${json_items[@]}" | jq -s '.'
+          own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$info_json")"
+          if [[ -n "$own" && "$own" != +* ]]
+          then
+            own="+$own"
+          fi
         fi
 
-        return 0
+        for id in "${ids[@]}"
+        do
+          [[ -z "$id" ]] && continue
+          if ! js="$(mmcli --modem "$mid" --sms "$id" -J)"
+          then
+            continue
+          fi
+          pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
+          msg_type="$(pdu_to_type "$pdu")"
+          local json_item=""
+          json_item="$(jq -c \
+            --arg mid "$mid" \
+            --arg id "$id" \
+            --arg type "$msg_type" \
+            --arg own "$own" '
+              {
+                modem_id: ($mid|tonumber),
+                id: ($id|tonumber),
+                sender: (.sms.content.number // ""),
+                text: (.sms.content.text // ""),
+                class: (.sms.content.class // ""),
+                state: (.sms.properties.state // ""),
+                pdu: (.sms.properties["pdu-type"] // ""),
+                storage: (.sms.properties.storage // ""),
+                type: $type,
+                recipient: (if $type == "received" then $own else (.sms.content.number // "") end)
+              }
+            ' <<<"$js")"
+          if [[ -n "$json_item" && "$json_item" != "null" ]]
+          then
+            json_items+=("$json_item")
+          fi
+        done
+      done
+
+      if (( ${#json_items[@]} == 0 ))
+      then
+        printf '[]\n'
+      else
+        printf '%s\n' "${json_items[@]}" | jq -s '.'
       fi
 
-      local json_output
-      json_output="$(JSON_OUTPUT=1 RAW_OUTPUT="" modem_status_single)"
-      if [[ -n "$json_output" ]]
-      then
-        printf '%s
-  ' "$json_output"
-        return 0
-      fi
+      return 0
     fi
 
     # Pretty output across all modems: add a MID column
