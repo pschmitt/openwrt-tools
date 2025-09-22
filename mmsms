@@ -167,6 +167,22 @@ WATCH_MODEM_MONITOR_PID=""
 WATCH_CMD_RC=0
 MODEM_DETAILS_LOGGED=""
 
+raw_plain_requested() {
+  [[ -n "$RAW_OUTPUT" && -z "$JSON_OUTPUT" ]]
+}
+
+raw_json_requested() {
+  [[ -n "$RAW_OUTPUT" && -n "$JSON_OUTPUT" ]]
+}
+
+custom_json_requested() {
+  [[ -n "$JSON_OUTPUT" && -z "$RAW_OUTPUT" ]]
+}
+
+json_like_requested() {
+  raw_json_requested || custom_json_requested
+}
+
 # DIRTYFIX OpenWrt's jq is not compiled with ONIGURUMA
 jq() {
   if [[ -x /srv/bin/jq ]]
@@ -198,7 +214,7 @@ Options:
                         or country (fr/de/us) or country name (france/germany/us)
   -q, --quiet           Suppress info output (warnings/errors only) and status output (exit code only)
       --silent          Same as --quiet
-  -r, --raw             List: output array of raw mmcli SMS objects; Read: raw mmcli JSON; Status: raw mmcli JSON
+  -r, --raw             Use mmcli output format; combine with --json for raw mmcli JSON
   -R, --retry COUNT     Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
   -s, --syslog          Mirror logs to syslog (in addition to stderr)
   -S, --sent            Prune: delete only sent outgoing messages
@@ -261,12 +277,13 @@ usage_list() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] list [-a|--all] [-j|--json] [-r|--raw]
 
-Lists SMS messages. Pretty by default; --json prints structured JSON; --raw prints raw mmcli JSON.
+Lists SMS messages. Pretty by default; --json prints structured JSON; --raw prints mmcli output
+(combine with --json for mmcli JSON).
 
 Relevant flags:
   -a, --all    Include messages from all modems
   -j, --json   Output custom JSON array
-  -r, --raw    Output raw mmcli objects array
+  -r, --raw    Output mmcli-format details (combine with --json for mmcli JSON)
 USAGE
 }
 
@@ -282,7 +299,8 @@ usage_read() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] read MESSAGE_ID [-j|--json] [-r|--raw]
 
-Reads a single SMS. --json outputs compact structured JSON; --raw outputs mmcli JSON.
+Reads a single SMS. --json outputs compact structured JSON; --raw outputs mmcli output
+(combine with --json for mmcli JSON).
 USAGE
 }
 
@@ -334,12 +352,13 @@ usage_status() {
   cat <<USAGE
 Usage: $SCRIPT_NAME [GLOBAL OPTIONS] status [-a|--all] [-j|--json] [-r|--raw]
 
-Shows modem status. --json outputs structured JSON. (Default command)
+Shows modem status. --json outputs structured JSON; --raw dumps mmcli output
+(combine with --json for mmcli JSON). (Default command)
 
 Relevant flags:
   -a, --all    Include all detected modems
   -j, --json   Output structured JSON
-  -r, --raw    Output raw mmcli JSON
+  -r, --raw    Output mmcli status (combine with --json for mmcli JSON)
 USAGE
 }
 
@@ -1033,14 +1052,12 @@ parse_status_args() {
       -j|--json)
         DEBUG_FLAGS+=("$1")
         JSON_OUTPUT=1
-        RAW_OUTPUT=""
         shift
         continue
         ;;
       -r|--raw)
         DEBUG_FLAGS+=("$1")
         RAW_OUTPUT=1
-        JSON_OUTPUT=""
         shift
         continue
         ;;
@@ -3218,7 +3235,7 @@ sms_list_pretty() {
 
     if (( ${#mids[@]} == 0 ))
     then
-      if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+      if json_like_requested
       then
         printf '[]\n'
       else
@@ -3239,43 +3256,63 @@ sms_list_pretty() {
       MODEM_DETAILS_LOGGED=1
     fi
 
-    if [[ -n "$RAW_OUTPUT" ]]
+    if raw_json_requested
     then
-      local raw_items
-      raw_items="$(
+        local raw_items
+        raw_items="$(
+          for mid in "${mids[@]}"
+          do
+            [[ -z "$mid" ]] && continue
+
+            if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
+            then
+              continue
+            fi
+
+            mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
+
+            for id in "${ids[@]}"
+            do
+              [[ -z "$id" ]] && continue
+              js="$(mmcli --modem "$mid" --sms "$id" -J)"
+
+              if [[ -n "$js" ]]
+              then
+                jq -e -c --arg mid "$mid" '{modem_id: ($mid|tonumber), sms: .}' <<<"$js"
+              fi
+            done
+          done
+        )"
+        if [[ -z "$raw_items" ]]
+        then
+          printf '[]\n'
+        else
+          printf '%s\n' "$raw_items" | jq -s '.'
+        fi
+        return 0
+    elif raw_plain_requested
+    then
+        local first=1 out
         for mid in "${mids[@]}"
         do
           [[ -z "$mid" ]] && continue
-
-          if ! list_json="$(mmcli --modem "$mid" --messaging-list-sms -J)"
+          out="$(mmcli --modem "$mid" --messaging-list-sms 2>&1)"
+          if [[ -z "$out" ]]
           then
             continue
           fi
-
-          mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
-
-          for id in "${ids[@]}"
-          do
-            [[ -z "$id" ]] && continue
-            js="$(mmcli --modem "$mid" --sms "$id" -J)"
-
-            if [[ -n "$js" ]]
-            then
-              jq -e -c --arg mid "$mid" '{modem_id: ($mid|tonumber), sms: .}' <<<"$js"
-            fi
-          done
+          if (( ! first ))
+          then
+            printf '\n'
+          fi
+          first=0
+          printf '%s' "$out"
+          [[ "$out" == *$'\n' ]] || printf '\n'
         done
-      )"
-      if [[ -z "$raw_items" ]]
-      then
-        printf '[]\n'
-      else
-        printf '%s\n' "$raw_items" | jq -s '.'
-      fi
-      return 0
+        return 0
     fi
 
-    if [[ -n "$JSON_OUTPUT" ]]
+    if custom_json_requested
     then
       if [[ -n "$ALL_MODEMS" && -z "$target_mid" ]]
       then
@@ -3343,6 +3380,12 @@ sms_list_pretty() {
     return 0
   fi
 
+  if raw_plain_requested
+  then
+    mmcli_cmd --messaging-list-sms
+    return $?
+  fi
+
   if ! list_json="$(mmcli_cmd --messaging-list-sms -J)"
   then
     echo_error "failed to list SMS messages"
@@ -3352,7 +3395,7 @@ sms_list_pretty() {
   mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1]' <<<"$list_json")
   if (( ${#ids[@]} == 0 ))
   then
-    if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+    if json_like_requested
     then
       printf '[]\n'
     else
@@ -3361,44 +3404,16 @@ sms_list_pretty() {
     return 0
   fi
 
-  if [[ -n "$RAW_OUTPUT" ]]
+  if raw_json_requested
   then
-    if [[ -n "$ALL_MODEMS" && -z "$target_mid" ]]
+    if ! jq <<<"$list_json"
     then
-      local mids mid raw_items=()
-      if mapfile -t mids < <(list_modem_ids_sorted)
-      then
-        for mid in "${mids[@]}"
-        do
-          [[ -z "$mid" ]] && continue
-          local raw
-          raw="$(MODEM="$mid" ALL_MODEMS="" JSON_OUTPUT="" RAW_OUTPUT=1 modem_status_single)"
-          [[ -n "$raw" ]] && raw_items+=("$raw")
-        done
-      fi
-
-      if (( ${#raw_items[@]} == 0 ))
-      then
-        printf '[]
-'
-      else
-        printf '%s
-' "${raw_items[@]}" | jq -s '.'
-      fi
-      return 0
+      return 1
     fi
-
-    local raw_output
-    raw_output="$(JSON_OUTPUT="" RAW_OUTPUT=1 modem_status_single)"
-    if [[ -n "$raw_output" ]]
-    then
-      printf '%s
-' "$raw_output"
-      return 0
-    fi
+    return 0
   fi
 
-  if [[ -n "$JSON_OUTPUT" ]]
+  if custom_json_requested
   then
     # Emit one compact JSON object per SMS, then wrap into an array
     # Determine our own number for recipient mapping of received messages
@@ -4172,6 +4187,12 @@ modem_status_single() {
   local country_code country_label country_display="unknown"
   local info_tsv
 
+  if raw_plain_requested
+  then
+    mmcli_cmd
+    return $?
+  fi
+
   if ! json="$(mmcli_cmd -J)"
   then
     if [[ -z $QUIET ]]
@@ -4183,7 +4204,7 @@ modem_status_single() {
 
   mid_label="$(jq -r '.modem["dbus-path"] | split("/")[-1] // ""' <<<"$json")"
 
-  if [[ -n "$RAW_OUTPUT" ]]
+  if raw_json_requested
   then
     if [[ -n "$ALL_MODEMS" ]]
     then
@@ -4339,7 +4360,7 @@ modem_status_single() {
   fi
 
   # JSON output if requested
-  if [[ -n "$JSON_OUTPUT" ]]
+  if custom_json_requested
   then
     local sig_num_json="$signal_num"
     local ports_json_arg="$ports_json"
@@ -4477,6 +4498,40 @@ modem_status_single() {
 modem_status() {
   local target_mid="${1:-}"
 
+  if raw_plain_requested
+  then
+    if [[ -z "$target_mid" && -n "$ALL_MODEMS" ]]
+    then
+      local mids mid
+      if ! mapfile -t mids < <(list_modem_ids_sorted)
+      then
+        echo_error "failed to list modems"
+        return 1
+      fi
+      if (( ${#mids[@]} == 0 ))
+      then
+        echo_info "no modems detected"
+        return 0
+      fi
+
+      local first=1
+      for mid in "${mids[@]}"
+      do
+        [[ -z "$mid" ]] && continue
+        if (( ! first ))
+        then
+          printf '\n'
+        fi
+        first=0
+        MODEM="$mid" ALL_MODEMS="" modem_status_single
+      done
+      return 0
+    fi
+
+    modem_status_single
+    return $?
+  fi
+
   if [[ -z "$target_mid" && -n "$ALL_MODEMS" ]]
   then
     local mids mid
@@ -4487,7 +4542,7 @@ modem_status() {
     fi
     if (( ${#mids[@]} == 0 ))
     then
-      if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+      if json_like_requested
       then
         printf '[]\n'
       else
@@ -4496,7 +4551,7 @@ modem_status() {
       return 0
     fi
 
-    if [[ -n "$JSON_OUTPUT$RAW_OUTPUT" ]]
+    if json_like_requested
     then
       local json_items=() item
       for mid in "${mids[@]}"
@@ -5170,15 +5225,18 @@ main() {
         sms_list_pretty || echo_error "failed to list SMS messages"
         return 1
       fi
-      if [[ -n "$RAW_OUTPUT" ]]
-      then
-        mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq -e
-      elif [[ -n "$JSON_OUTPUT" ]]
-      then
-        sms_read_json "${CMD_ARGS[0]}"
-      else
-        sms_read "${CMD_ARGS[@]}"
-      fi
+        if raw_json_requested
+        then
+          mmcli_cmd --sms "${CMD_ARGS[0]}" -J | jq -e
+        elif raw_plain_requested
+        then
+          sms_read "${CMD_ARGS[@]}"
+        elif custom_json_requested
+        then
+          sms_read_json "${CMD_ARGS[0]}"
+        else
+          sms_read "${CMD_ARGS[@]}"
+        fi
       ;;
     service)
       mmsms_service_action "${CMD_ARGS[@]}"
