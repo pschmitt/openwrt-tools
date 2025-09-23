@@ -4951,7 +4951,7 @@ sms_daily_usage_record_failure() {
   fi
 
   local updated_failed=0
-  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 "$attempts" 0 "" "$updated_failed" ""
+  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 "$attempts" 0 "" updated_failed ""
   then
     echo_warning "daily usage: failed to record failure for ${label}"
     return 1
@@ -4988,7 +4988,7 @@ sms_daily_usage_record_incoming() {
   fi
 
   local updated_incoming=0
-  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 0 1 "" "" "$updated_incoming"
+  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 0 1 "" "" updated_incoming
   then
     echo_warning "daily usage: failed to record incoming message for ${label}"
     return 1
@@ -7918,9 +7918,10 @@ watch_handle_sms() {
       sender_whitelisted=1
     fi
 
-    local handled=0
+    local is_command=0
     if [[ "$text" == "!"* ]]
     then
+      is_command=1
       if [[ -n $sender_whitelisted ]]
       then
         local cmd="${text#!}"
@@ -7944,47 +7945,52 @@ watch_handle_sms() {
           watch_send_reply "$sender" "${cmd_header}\n${output:-*no output*}"
         fi
 
-        handled=1
       else
         echo_info "command from $sender ignored (not whitelisted)"
       fi
     fi
 
-    if (( handled == 0 ))
+    local ignore_json
+    if (( is_command == 1 ))
     then
-      payload="$(jq -n \
-        --arg recipient "$recipient" \
-        --arg sender "$sender" \
-        --arg text "$text" \
-        --arg date "$(date -Iseconds)" \
-        '{recipient:$recipient, sender:$sender, text:$text, date: $date}')"
-      echo_info "forwarding id=$id from $sender to webhook"
-      local resp rc code body log_body
-      resp="$(curl -sS -m 10 -H 'Content-Type: application/json' -w $'\n%{http_code}' \
-        -X POST -d "$payload" "$WEBHOOK_URL" 2>&1)"
-      rc=$?
-      if (( rc != 0 ))
+      ignore_json=true
+    else
+      ignore_json=false
+    fi
+
+    payload="$(jq -n \
+      --arg recipient "$recipient" \
+      --arg sender "$sender" \
+      --arg text "$text" \
+      --arg date "$(date -Iseconds)" \
+      --argjson ignore "$ignore_json" \
+      '{recipient:$recipient, sender:$sender, text:$text, date: $date, ignore: $ignore}')"
+    echo_info "forwarding id=$id from $sender to webhook"
+    local resp rc code body log_body
+    resp="$(curl -sS -m 10 -H 'Content-Type: application/json' -w $'\n%{http_code}' \
+      -X POST -d "$payload" "$WEBHOOK_URL" 2>&1)"
+    rc=$?
+    if (( rc != 0 ))
+    then
+      log_body="$(abbrev_text_for_log "$resp")"
+      echo_warning "webhook delivery error rc='$rc' output='$log_body'"
+    else
+      code="${resp##*$'\n'}"
+      body="${resp%$'\n'*}"
+
+      if [[ "$code" =~ ^[0-9]{3}$ ]]
       then
-        log_body="$(abbrev_text_for_log "$resp")"
-        echo_warning "webhook delivery error rc='$rc' output='$log_body'"
+        log_body="$(abbrev_text_for_log "$body")"
       else
-        code="${resp##*$'\n'}"
-        body="${resp%$'\n'*}"
+        code="n/a"
+        log_body="$(abbrev_text_for_log "$resp")"
+      fi
 
-        if [[ "$code" =~ ^[0-9]{3}$ ]]
-        then
-          log_body="$(abbrev_text_for_log "$body")"
-        else
-          code="n/a"
-          log_body="$(abbrev_text_for_log "$resp")"
-        fi
-
-        if [[ "$code" =~ ^2 ]]
-        then
-          echo_info "webhook response code='$code' body='$log_body'"
-        else
-          echo_warning "webhook response code='$code' body='$log_body'"
-        fi
+      if [[ "$code" =~ ^2 ]]
+      then
+        echo_info "webhook response code='$code' body='$log_body'"
+      else
+        echo_warning "webhook response code='$code' body='$log_body'"
       fi
     fi
 
