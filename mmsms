@@ -271,6 +271,136 @@ mmcli_cmd() {
   command mmcli --modem "$MODEM" "$@"
 }
 
+# Check whether mmcli arguments already specify a modem selection.
+mmcli_args_include_modem() {
+  local arg
+  local expecting_value
+
+  for arg in "$@"
+  do
+    if [[ -n "$expecting_value" ]]
+    then
+      return 0
+    fi
+
+    case "$arg" in
+      --)
+        break
+        ;;
+      -m|--modem)
+        expecting_value=1
+        ;;
+      -m*)
+        return 0
+        ;;
+      --modem=*)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+# Check whether adding an implicit --modem would conflict with the provided args.
+mmcli_args_allow_modem_injection() {
+  local arg
+
+  for arg in "$@"
+  do
+    case "$arg" in
+      -L|--list-modems)
+        return 1
+        ;;
+      --)
+        break
+        ;;
+    esac
+  done
+
+  return 0
+}
+
+# Run a single mmcli invocation targeting the provided modem when possible.
+mmcli_passthrough_invoke() {
+  local target_modem="$1"
+  shift
+  local -a mmcli_args=("$@")
+  local add_modem
+  local rc
+
+  if [[ -n "$target_modem" && "$target_modem" != "any" ]]
+  then
+    if mmcli_args_allow_modem_injection "${mmcli_args[@]}"
+    then
+      if ! mmcli_args_include_modem "${mmcli_args[@]}"
+      then
+        add_modem=1
+      fi
+    fi
+  fi
+
+  if [[ -n "$add_modem" ]]
+  then
+    mmcli_args=(--modem "$target_modem" "${mmcli_args[@]}")
+  fi
+
+  mmcli "${mmcli_args[@]}"
+  rc=$?
+  return "$rc"
+}
+
+# Run mmcli with passthrough arguments, injecting --modem when appropriate.
+mmcli_passthrough() {
+  local -a mmcli_args=("$@")
+  local rc
+
+  if [[ -n "$ALL_MODEMS" ]]
+  then
+    if mmcli_args_allow_modem_injection "${mmcli_args[@]}"
+    then
+      local -a mids
+      if ! mapfile -t mids < <(list_modem_ids_sorted)
+      then
+        echo_error "failed to list modems for mmcli passthrough"
+        return 1
+      fi
+
+      if (( ${#mids[@]} == 0 ))
+      then
+        return 0
+      fi
+
+      local mid
+      local sub_rc
+      rc=0
+
+      for mid in "${mids[@]}"
+      do
+        if [[ -z "$mid" ]]
+        then
+          continue
+        fi
+
+        if ! mmcli_passthrough_invoke "$mid" "${mmcli_args[@]}"
+        then
+          sub_rc=$?
+          if (( rc == 0 ))
+          then
+            rc=$sub_rc
+          fi
+        fi
+      done
+
+      return "$rc"
+    fi
+  fi
+
+  mmcli_passthrough_invoke "$MODEM" "${mmcli_args[@]}"
+  rc=$?
+  return "$rc"
+}
+
 # Print the top-level usage summary for the script.
 usage() {
   cat <<USAGE
@@ -308,6 +438,8 @@ Commands:
   enable                     Wait for ModemManager and enable the modem
   list                       List SMS messages on the modem
   logs [LOGREAD_ARGS]        Show log entries from logread
+  mmcli|raw [--] [MMCLI_ARGS]
+                             Run mmcli with optional modem resolution and pass-through args
   number|phone               Print modem's own phone number
   prune                      Delete all SMS messages from the modem
   read MESSAGE_ID            Show details for a specific SMS
@@ -515,6 +647,19 @@ Prints the modem\'s configured SMSC (service center) number when available.
 USAGE
 }
 
+# Print usage details for the mmcli/raw subcommand.
+usage_mmcli() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] mmcli|raw [--] [MMCLI_ARGS...]
+
+Runs mmcli with optional modem selection handled by mmsms.
+Examples:
+  $SCRIPT_NAME raw -L
+  $SCRIPT_NAME -m de mmcli
+  $SCRIPT_NAME -m fr raw -- -e
+USAGE
+}
+
 # Dispatch to the usage helper for the requested subcommand.
 print_subcommand_usage() {
   case "$1" in
@@ -532,6 +677,7 @@ print_subcommand_usage() {
     watch)   usage_watch   ;;
     number)  usage_number  ;;
     smsc)    usage_smsc    ;;
+    mmcli)   usage_mmcli   ;;
     *)       usage         ;;
   esac
 }
@@ -541,7 +687,7 @@ is_command_token() {
   local token="$1"
 
   case "$token" in
-    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|pull|service|svc|watch|w|smsc|help)
+    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|pull|service|svc|watch|w|smsc|raw|mmcli|help)
       return 0
       ;;
   esac
@@ -1534,6 +1680,109 @@ parse_smsc_args() {
   return 0
 }
 
+# Parse arguments for the mmcli/raw command and record leftovers in PARSED_ARGS.
+parse_mmcli_args() {
+  PARSED_ARGS=()
+  local -a out=()
+  local seen_separator
+  local arg
+  local value
+
+  while (( $# > 0 ))
+  do
+    arg="$1"
+    shift
+
+    if [[ -z "$seen_separator" && "$arg" == "--" ]]
+    then
+      seen_separator=1
+      continue
+    fi
+
+    if [[ -z "$seen_separator" ]]
+    then
+      case "$arg" in
+        -m)
+          if (( $# == 0 ))
+          then
+            echo_error "mmcli: missing value for -m"
+            return 2
+          fi
+
+          value="$1"
+          if [[ -z "$value" || "$value" == "--" ]]
+          then
+            echo_error "mmcli: missing value for -m"
+            return 2
+          fi
+
+          MODEM="$value"
+          MODEM_EXPLICIT=1
+          DEBUG_FLAGS+=("-m=$value")
+          shift
+          continue
+          ;;
+        --modem)
+          if (( $# == 0 ))
+          then
+            echo_error "mmcli: missing value for --modem"
+            return 2
+          fi
+
+          value="$1"
+          if [[ -z "$value" || "$value" == "--" ]]
+          then
+            echo_error "mmcli: missing value for --modem"
+            return 2
+          fi
+
+          MODEM="$value"
+          MODEM_EXPLICIT=1
+          DEBUG_FLAGS+=("--modem=$value")
+          shift
+          continue
+          ;;
+        -m?*)
+          value="${arg#-m}"
+          if [[ -z "$value" ]]
+          then
+            out+=("$arg")
+            continue
+          fi
+
+          MODEM="$value"
+          MODEM_EXPLICIT=1
+          DEBUG_FLAGS+=("-m=$value")
+          continue
+          ;;
+        --modem=*)
+          value="${arg#--modem=}"
+          if [[ -z "$value" ]]
+          then
+            echo_error "mmcli: missing value for --modem"
+            return 2
+          fi
+
+          MODEM="$value"
+          MODEM_EXPLICIT=1
+          DEBUG_FLAGS+=("--modem=$value")
+          continue
+          ;;
+        -a|--all)
+          DEBUG_FLAGS+=("$arg")
+          ALL_MODEMS=1
+          continue
+          ;;
+      esac
+    fi
+
+    out+=("$arg")
+  done
+
+  PARSED_ARGS=("${out[@]}")
+  return 0
+}
+
 # Route to the parser for the active subcommand and store remaining args.
 parse_command_args() {
   local command="$1"
@@ -1594,6 +1843,10 @@ parse_command_args() {
       ;;
     smsc)
       parse_smsc_args "$@"
+      return $?
+      ;;
+    mmcli)
+      parse_mmcli_args "$@"
       return $?
       ;;
     *)
@@ -6954,6 +7207,9 @@ main() {
     log*)
       command="logs"
       ;;
+    raw|mmcli)
+      command="mmcli"
+      ;;
     read|get|r)
       command="read"
       ;;
@@ -6992,6 +7248,7 @@ main() {
           en|enable|start) topic="enable" ;;
           log*) topic="logs" ;;
           l|ls|list) topic="list" ;;
+          mmcli|raw) topic="mmcli" ;;
           number|phone) topic="number" ;;
           rst|reset|restart) topic="reset" ;;
           r|get|read) topic="read" ;;
@@ -7101,6 +7358,12 @@ main() {
       ;;
     logs)
       mmsms_logread "${CMD_ARGS[@]}"
+      ;;
+    mmcli)
+      if ! mmcli_passthrough "${CMD_ARGS[@]}"
+      then
+        return $?
+      fi
       ;;
     read)
       if (( ${#CMD_ARGS[@]} < 1 ))
