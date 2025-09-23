@@ -113,7 +113,6 @@ COLOR_BOLD_GREEN='1;32'
 COLOR_BOLD_YELLOW='1;33'
 COLOR_BOLD_BLUE='1;34'
 COLOR_BOLD_MAGENTA='1;35'
-COLOR_BOLD_CYAN='1;36'
 COLOR_BOLD_WHITE='1;37'
 
 # Strip leading and trailing whitespace from a string.
