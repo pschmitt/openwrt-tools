@@ -2643,15 +2643,15 @@ log_modem_details() {
 
   if info="$(get_modem_info "$mid" "$prefix")"
   then
-    echo_info "$info"
+    echo_debug "$info"
     return 0
   fi
 
   if [[ -n "$mid" ]]
   then
-    echo_info "${prefix}modem={id='$mid'}"
+    echo_debug "${prefix}modem={id='$mid'}"
   else
-    echo_info "${prefix}modem={}"
+    echo_debug "${prefix}modem={}"
   fi
 }
 
@@ -7021,7 +7021,7 @@ sms_list_pretty() {
 
     if [[ -z "$MODEM_DETAILS_LOGGED" ]]
     then
-      echo_info "modems in scope:"
+      echo_debug "modems in scope:"
       for mid in "${mids[@]}"
       do
         [[ -z "$mid" ]] && continue
@@ -8656,7 +8656,7 @@ modem_status() {
       [[ -z "$mid" ]] && continue
       (( first )) || printf '\n'
       first=0
-      echo_info "modem $mid:"
+      echo_debug "modem $mid:"
       MODEM="$mid" ALL_MODEMS="" modem_status_single
     done
     return 0
@@ -9747,7 +9747,7 @@ resolve_modem_selection() {
     then
       if (( ${#_ids[@]} > 0 ))
       then
-        echo_info "operating on all modems: ${#_ids[@]} detected"
+        echo_debug "operating on all modems: ${#_ids[@]} detected"
 
         local _id
         for _id in "${_ids[@]}"
