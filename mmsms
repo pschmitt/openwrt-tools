@@ -32,6 +32,7 @@ declare -a SMS_DAILY_LIMIT_ACTIVE_KEYS=()
 declare -A SMS_DAILY_LIMIT_ACTIVE_FILES=()
 declare -A SMS_DAILY_LIMIT_ACTIVE_LABELS=()
 declare -A SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+declare -A SMS_DAILY_LIMIT_ACTIVE_COUNTS=()
 SMS_DAILY_LIMIT_RESERVED=0
 SMS_DAILY_LIMIT_SENT=0
 
@@ -408,7 +409,7 @@ Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
   -A, --auto            Fallback: if foreign blocked, use modem's default recipient
-  -a, --all             List/Prune/Enable/Status/Reset/Number/SMSC: operate on all modems
+  -a, --all             List/Prune/Enable/Status/Reset/Number/SMSC/Stats: operate on all modems
   -c, --config PATH     Use alternate config file for watch
   -d, --debug           Enable debug output
   -F, --fallback        Send/Watch: on failure, try other modem(s)
@@ -416,7 +417,7 @@ Options:
   -f, --allow-foreign   Send: allow sending to foreign country codes
   -H, --hard            Reset: also stop/start modemmanager (hard reset)
       --replug         Reset: temporarily deauthorize the modem's USB device via sysfs
-  -j, --json            Output JSON (for list/status/read/number/smsc)
+  -j, --json            Output JSON (for list/status/read/number/smsc/stats)
   -m, --modem MODEM     Modem selector or id (default: $MODEM)
                         Accepts id (e.g. 2), dbus path, 'any', or
                         a string matching manufacturer/plugin/ttyUSB/phone-number
@@ -451,6 +452,8 @@ Commands:
   service [ACTION]           Control the ${SCRIPT_NAME} service (start|stop|restart|status)
   smsc [-a|--all] [-j|--json]
                              Print modem's configured SMSC number
+  stats [-a|--all] [-j|--json]
+                             Show daily SMS usage totals for outgoing, failed, and incoming messages
   status                     Show modem status summary
   watch                      Monitor incoming SMS and forward/execute actions
 USAGE
@@ -657,6 +660,19 @@ Relevant flags:
 USAGE
 }
 
+# Print usage details for the stats subcommand.
+usage_stats() {
+  cat <<USAGE
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] stats [-a|--all] [-j|--json]
+
+Displays daily SMS usage totals for outgoing, failed, and incoming messages.
+
+Relevant flags:
+  -a, --all    Show statistics for all tracked lines
+  -j, --json   Output structured JSON
+USAGE
+}
+
 # Print usage details for the mmcli/raw subcommand.
 usage_mmcli() {
   cat <<USAGE
@@ -687,6 +703,7 @@ print_subcommand_usage() {
     watch)   usage_watch   ;;
     number)  usage_number  ;;
     smsc)    usage_smsc    ;;
+    stats)   usage_stats   ;;
     mmcli)   usage_mmcli   ;;
     *)       usage         ;;
   esac
@@ -697,7 +714,7 @@ is_command_token() {
   local token="$1"
 
   case "$token" in
-    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|number|phone|reset|rst|restart|pull|service|svc|watch|w|smsc|raw|mmcli|help)
+    at|ati|send|s|list|ls|l|-l|logs|log*|read|get|r|prune|clear|delete|-e|*enable*|en|start|status|stat|st|stats|number|phone|reset|rst|restart|pull|service|svc|watch|w|smsc|raw|mmcli|help)
       return 0
       ;;
   esac
@@ -1716,6 +1733,68 @@ parse_smsc_args() {
   return 0
 }
 
+# Parse arguments for the stats command and record leftovers in PARSED_ARGS.
+parse_stats_args() {
+  PARSED_ARGS=()
+  local -a out=()
+
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      -h|--help)
+        print_subcommand_usage stats
+        PARSED_ARGS=()
+        return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while (( $# > 0 ))
+        do
+          out+=("$1")
+          shift
+        done
+        break
+        ;;
+      *)
+        parse_common_option "$1" "${2:-}"
+        local status=$?
+        if (( status == 0 ))
+        then
+          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          continue
+        elif (( status == 2 ))
+        then
+          return 2
+        fi
+        out+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if (( ${#out[@]} > 0 ))
+  then
+    echo_error "stats does not accept positional arguments"
+    return 2
+  fi
+
+  PARSED_ARGS=()
+  return 0
+}
+
 # Parse arguments for the mmcli/raw command and record leftovers in PARSED_ARGS.
 parse_mmcli_args() {
   PARSED_ARGS=()
@@ -1879,6 +1958,10 @@ parse_command_args() {
       ;;
     smsc)
       parse_smsc_args "$@"
+      return $?
+      ;;
+    stats)
+      parse_stats_args "$@"
       return $?
       ;;
     mmcli)
@@ -3812,70 +3895,122 @@ sms_daily_limit_state_dir() {
 
 # Identify the SIM/modem used for tracking daily limits.
 sms_daily_limit_identity() {
-  local label=""
-  local modem_hint=""
-  local info_json=""
+  local preferred_label="${1:-}"
+  local preferred_msisdn="${2:-}"
+  local label
+  local modem_hint
+  local info_json
+
   SMS_DAILY_LIMIT_MSISDN=""
+  SMS_DAILY_LIMIT_KEY=""
+  SMS_DAILY_LIMIT_LABEL=""
 
-  if load_own_number
+  if [[ -n "$preferred_msisdn" ]]
   then
-    label="$OWN_NUMBER"
-  fi
-
-  if [[ -z "$label" || -z "$modem_hint" ]]
-  then
-    if info_json="$(mmcli_cmd -J 2>/dev/null)"
+    local normalized_from_arg
+    if normalized_from_arg="$(sms_daily_limit_normalize_msisdn "$preferred_msisdn")"
     then
-      if [[ -z "$modem_hint" ]]
-      then
-        modem_hint="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$info_json")"
-      fi
-      if [[ -z "$label" ]]
-      then
-        label="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
-      fi
+      SMS_DAILY_LIMIT_MSISDN="$normalized_from_arg"
     fi
   fi
 
-  if [[ -n "$label" ]]
+  if [[ -n "$preferred_label" ]]
   then
-    label="$(ensure_plus "$label")"
+    label="$preferred_label"
+  fi
+
+  if [[ -z "$label" && -n "$SMS_DAILY_LIMIT_MSISDN" ]]
+  then
+    label="$SMS_DAILY_LIMIT_MSISDN"
   fi
 
   if [[ -z "$label" ]]
   then
-    if [[ -n "$modem_hint" ]]
+    if load_own_number
+    then
+      if [[ -n "$OWN_NUMBER" ]]
+      then
+        label="$OWN_NUMBER"
+      fi
+    fi
+  fi
+
+  if [[ -z "$SMS_DAILY_LIMIT_MSISDN" && -n "$label" ]]
+  then
+    local normalized_from_label
+    if normalized_from_label="$(sms_daily_limit_normalize_msisdn "$label")"
+    then
+      SMS_DAILY_LIMIT_MSISDN="$normalized_from_label"
+    fi
+  fi
+
+  if [[ -z "$label" || -z "$SMS_DAILY_LIMIT_MSISDN" ]]
+  then
+    if info_json="$(mmcli_cmd -J 2>/dev/null)"
+    then
+      if [[ -z "$label" ]]
+      then
+        label="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
+      fi
+      if [[ -z "$SMS_DAILY_LIMIT_MSISDN" ]]
+      then
+        local normalized_from_mmcli
+        local raw_number
+        raw_number="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
+        if normalized_from_mmcli="$(sms_daily_limit_normalize_msisdn "$raw_number")"
+        then
+          SMS_DAILY_LIMIT_MSISDN="$normalized_from_mmcli"
+        fi
+      fi
+      if [[ -z "$modem_hint" ]]
+      then
+        modem_hint="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$info_json")"
+      fi
+    fi
+  fi
+
+  if [[ -z "$label" ]]
+  then
+    if [[ -n "$SMS_DAILY_LIMIT_MSISDN" ]]
+    then
+      label="$SMS_DAILY_LIMIT_MSISDN"
+    elif [[ -n "$modem_hint" ]]
     then
       label="modem $modem_hint"
     elif [[ -n "$MODEM" ]]
     then
       label="modem $MODEM"
-      modem_hint="$MODEM"
     else
       label="modem"
     fi
   fi
 
-  local normalized=""
-  if normalized="$(sms_daily_limit_normalize_msisdn "$label")"
+  if [[ -z "$SMS_DAILY_LIMIT_MSISDN" ]]
   then
-    SMS_DAILY_LIMIT_MSISDN="$normalized"
+    local normalized_from_fallback
+    if normalized_from_fallback="$(sms_daily_limit_normalize_msisdn "$label")"
+    then
+      SMS_DAILY_LIMIT_MSISDN="$normalized_from_fallback"
+    fi
   fi
 
-  local key_source="$label"
-  if [[ -n "$modem_hint" && "$modem_hint" != "$label" ]]
+  if [[ -n "$SMS_DAILY_LIMIT_MSISDN" ]]
   then
-    key_source="${key_source}_${modem_hint}"
+    SMS_DAILY_LIMIT_LABEL="$SMS_DAILY_LIMIT_MSISDN"
+    SMS_DAILY_LIMIT_KEY="${SMS_DAILY_LIMIT_MSISDN#+}"
+    return 0
   fi
 
-  local sanitized="${key_source//[^A-Za-z0-9]/_}"
+  local sanitized
+  sanitized="${label//[^A-Za-z0-9]/_}"
   sanitized="${sanitized##_}"
+  sanitized="${sanitized%%_}"
   if [[ -z "$sanitized" ]]
   then
-    sanitized="modem"
+    sanitized="line"
   fi
 
-  SMS_DAILY_LIMIT_LABEL="$label"
+  SMS_DAILY_LIMIT_LABEL="$(ensure_plus "$label")"
   SMS_DAILY_LIMIT_KEY="$sanitized"
   return 0
 }
@@ -3900,6 +4035,313 @@ sms_daily_limit_state_file() {
   fi
 
   printf '%s/sms-count-%s.state' "$dir" "$token"
+  return 0
+}
+
+# Read the stored counters from a state file without enforcing the current date.
+sms_daily_state_read() {
+  local file="$1"
+  local __date_var="$2"
+  local __sent_var="$3"
+  local __failed_var="$4"
+  local __incoming_var="$5"
+  local __label_var="$6"
+  local __msisdn_var="$7"
+
+  local state_date=""
+  local state_label=""
+  local state_msisdn=""
+  local state_sent=0
+  local state_failed=0
+  local state_incoming=0
+
+  if [[ -r "$file" ]]
+  then
+    local content
+    if ! content="$(cat "$file" 2>/dev/null)"
+    then
+      content=""
+    fi
+
+    if [[ -n "$content" ]]
+    then
+      local parsed
+      if parsed="$(jq -r '[.date // "", .label // "", .msisdn // "", (.outgoing.sent // 0), (.outgoing.failed // 0), (.incoming.received // 0)] | @tsv' <<<"$content" 2>/dev/null)"
+      then
+        IFS=$'\t' read -r state_date state_label state_msisdn state_sent state_failed state_incoming <<<"$parsed"
+      else
+        local legacy_date
+        local legacy_count
+        if read -r legacy_date legacy_count <<<"$content"
+        then
+          if [[ "$legacy_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          then
+            state_date="$legacy_date"
+          fi
+          if [[ "$legacy_count" =~ ^[0-9]+$ ]]
+          then
+            state_sent="$legacy_count"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -n "$__date_var" ]]
+  then
+    printf -v "$__date_var" '%s' "$state_date"
+  fi
+  if [[ -n "$__sent_var" ]]
+  then
+    printf -v "$__sent_var" '%s' "$state_sent"
+  fi
+  if [[ -n "$__failed_var" ]]
+  then
+    printf -v "$__failed_var" '%s' "$state_failed"
+  fi
+  if [[ -n "$__incoming_var" ]]
+  then
+    printf -v "$__incoming_var" '%s' "$state_incoming"
+  fi
+  if [[ -n "$__label_var" ]]
+  then
+    printf -v "$__label_var" '%s' "$state_label"
+  fi
+  if [[ -n "$__msisdn_var" ]]
+  then
+    printf -v "$__msisdn_var" '%s' "$state_msisdn"
+  fi
+}
+
+# Read counters for the current day, resetting stale totals to zero.
+sms_daily_state_read_today() {
+  local file="$1"
+  local today="$2"
+  local __sent_var="$3"
+  local __failed_var="$4"
+  local __incoming_var="$5"
+  local __label_var="$6"
+  local __msisdn_var="$7"
+
+  local day_date=""
+  local day_sent=0
+  local day_failed=0
+  local day_incoming=0
+  local day_label=""
+  local day_msisdn=""
+
+  sms_daily_state_read "$file" day_date day_sent day_failed day_incoming day_label day_msisdn
+
+  if [[ "$day_date" != "$today" ]]
+  then
+    day_sent=0
+    day_failed=0
+    day_incoming=0
+  fi
+
+  if [[ -n "$__sent_var" ]]
+  then
+    printf -v "$__sent_var" '%s' "$day_sent"
+  fi
+  if [[ -n "$__failed_var" ]]
+  then
+    printf -v "$__failed_var" '%s' "$day_failed"
+  fi
+  if [[ -n "$__incoming_var" ]]
+  then
+    printf -v "$__incoming_var" '%s' "$day_incoming"
+  fi
+  if [[ -n "$__label_var" ]]
+  then
+    printf -v "$__label_var" '%s' "$day_label"
+  fi
+  if [[ -n "$__msisdn_var" ]]
+  then
+    printf -v "$__msisdn_var" '%s' "$day_msisdn"
+  fi
+}
+
+# Persist counters to disk while the caller holds the lock for the file.
+sms_daily_state_write_locked() {
+  local file="$1"
+  local date="$2"
+  local label="$3"
+  local msisdn="$4"
+  local sent="$5"
+  local failed="$6"
+  local incoming="$7"
+
+  local dir
+  dir="$(dirname "$file")"
+
+  local tmp
+  if ! tmp="$(mktemp "$dir/.sms-count.XXXXXX")"
+  then
+    echo_error "daily limit: failed to create temporary file in '$dir'"
+    return 1
+  fi
+
+  local base
+  base="{}"
+  if [[ -r "$file" ]]
+  then
+    if base="$(cat "$file" 2>/dev/null)"
+    then
+      :
+    else
+      base="{}"
+    fi
+  fi
+
+  local new_json
+  if ! new_json="$(jq \
+    --arg date "$date" \
+    --arg label "$label" \
+    --arg msisdn "$msisdn" \
+    --argjson sent "$sent" \
+    --argjson failed "$failed" \
+    --argjson incoming "$incoming" \
+    '(.date = $date)
+      | (if $label != "" then .label = $label else del(.label) end)
+      | (if $msisdn != "" then .msisdn = $msisdn else del(.msisdn) end)
+      | (.outgoing.sent = $sent)
+      | (.outgoing.failed = $failed)
+      | (.incoming.received = $incoming)' <<<"$base" 2>/dev/null)"
+  then
+    new_json="$(jq -n \
+      --arg date "$date" \
+      --arg label "$label" \
+      --arg msisdn "$msisdn" \
+      --argjson sent "$sent" \
+      --argjson failed "$failed" \
+      --argjson incoming "$incoming" \
+      '((if $label == "" then {date:$date} else {date:$date, label:$label} end)
+        * (if $msisdn == "" then {} else {msisdn:$msisdn} end)
+        * {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}})')"
+  fi
+
+  if ! printf '%s\n' "$new_json" >"$tmp"
+  then
+    rm -f "$tmp"
+    echo_error "daily limit: failed to write temporary counter file"
+    return 1
+  fi
+
+  if ! mv "$tmp" "$file"
+  then
+    rm -f "$tmp"
+    echo_error "daily limit: failed to update counter file '$file'"
+    return 1
+  fi
+
+  return 0
+}
+
+# Atomically adjust counters for a state file, updating the current day.
+sms_daily_state_increment() {
+  local file="$1"
+  local label="$2"
+  local msisdn="$3"
+  local sent_delta="$4"
+  local failed_delta="$5"
+  local incoming_delta="$6"
+  local __sent_out_var="$7"
+  local __failed_out_var="$8"
+  local __incoming_out_var="$9"
+
+  if [[ -z "$file" ]]
+  then
+    return 1
+  fi
+
+  if [[ -z "$sent_delta" || ! "$sent_delta" =~ ^-?[0-9]+$ ]]
+  then
+    sent_delta=0
+  fi
+  if [[ -z "$failed_delta" || ! "$failed_delta" =~ ^-?[0-9]+$ ]]
+  then
+    failed_delta=0
+  fi
+  if [[ -z "$incoming_delta" || ! "$incoming_delta" =~ ^-?[0-9]+$ ]]
+  then
+    incoming_delta=0
+  fi
+
+  local today
+  today="$(date +%Y-%m-%d)"
+
+  local lock_handle
+  if ! sms_daily_limit_lock_acquire "$file" lock_handle
+  then
+    return 1
+  fi
+
+  local stored_date
+  local stored_sent
+  local stored_failed
+  local stored_incoming
+  local stored_label
+  local stored_msisdn
+
+  sms_daily_state_read "$file" stored_date stored_sent stored_failed stored_incoming stored_label stored_msisdn
+
+  if [[ "$stored_date" != "$today" ]]
+  then
+    stored_sent=0
+    stored_failed=0
+    stored_incoming=0
+  fi
+
+  if [[ -z "$label" && -n "$stored_label" ]]
+  then
+    label="$stored_label"
+  fi
+  if [[ -z "$msisdn" && -n "$stored_msisdn" ]]
+  then
+    msisdn="$stored_msisdn"
+  fi
+
+  local new_sent
+  local new_failed
+  local new_incoming
+
+  new_sent=$((stored_sent + sent_delta))
+  new_failed=$((stored_failed + failed_delta))
+  new_incoming=$((stored_incoming + incoming_delta))
+
+  if (( new_sent < 0 ))
+  then
+    new_sent=0
+  fi
+  if (( new_failed < 0 ))
+  then
+    new_failed=0
+  fi
+  if (( new_incoming < 0 ))
+  then
+    new_incoming=0
+  fi
+
+  if ! sms_daily_state_write_locked "$file" "$today" "$label" "$msisdn" "$new_sent" "$new_failed" "$new_incoming"
+  then
+    sms_daily_limit_lock_release "$lock_handle"
+    return 1
+  fi
+
+  if [[ -n "$__sent_out_var" ]]
+  then
+    printf -v "$__sent_out_var" '%s' "$new_sent"
+  fi
+  if [[ -n "$__failed_out_var" ]]
+  then
+    printf -v "$__failed_out_var" '%s' "$new_failed"
+  fi
+  if [[ -n "$__incoming_out_var" ]]
+  then
+    printf -v "$__incoming_out_var" '%s' "$new_incoming"
+  fi
+
+  sms_daily_limit_lock_release "$lock_handle"
   return 0
 }
 
@@ -3964,29 +4406,14 @@ sms_daily_limit_lock_release() {
 sms_daily_limit_write_state() {
   local file="$1"
   local date="$2"
-  local count="$3"
+  local sent="$3"
+  local failed="${4:-0}"
+  local incoming="${5:-0}"
+  local label="${6:-}"
+  local msisdn="${7:-}"
 
-  local dir
-  dir="$(dirname "$file")"
-
-  local tmp
-  if ! tmp="$(mktemp "$dir/.sms-count.XXXXXX")"
+  if ! sms_daily_state_write_locked "$file" "$date" "$label" "$msisdn" "$sent" "$failed" "$incoming"
   then
-    echo_error "daily limit: failed to create temporary file in '$dir'"
-    return 1
-  fi
-
-  if ! printf '%s %s\n' "$date" "$count" >"$tmp"
-  then
-    rm -f "$tmp"
-    echo_error "daily limit: failed to write temporary counter file"
-    return 1
-  fi
-
-  if ! mv "$tmp" "$file"
-  then
-    rm -f "$tmp"
-    echo_error "daily limit: failed to update counter file '$file'"
     return 1
   fi
 
@@ -4011,6 +4438,7 @@ sms_daily_limit_reserve() {
   declare -A entry_limits=()
   declare -A entry_labels=()
   declare -A entry_tokens=()
+  declare -A entry_msisdn=()
 
   if [[ -n "$SMS_DAILY_LIMIT_GLOBAL_LIMIT" ]]
   then
@@ -4018,6 +4446,7 @@ sms_daily_limit_reserve() {
     entry_limits["global"]="$SMS_DAILY_LIMIT_GLOBAL_LIMIT"
     entry_labels["global"]="global"
     entry_tokens["global"]="global"
+    entry_msisdn["global"]=""
   fi
 
   if ! sms_daily_limit_identity
@@ -4038,6 +4467,7 @@ sms_daily_limit_reserve() {
     entry_limits["$per_key"]="$msisdn_limit"
     entry_labels["$per_key"]="$SMS_DAILY_LIMIT_LABEL"
     entry_tokens["$per_key"]="$SMS_DAILY_LIMIT_KEY"
+    entry_msisdn["$per_key"]="$SMS_DAILY_LIMIT_MSISDN"
   fi
 
   if (( ${#entries[@]} == 0 ))
@@ -4065,6 +4495,9 @@ sms_daily_limit_reserve() {
   declare -A entry_currents=()
   declare -A entry_prev_exists=()
   declare -A entry_prev_content=()
+  declare -A entry_failed=()
+  declare -A entry_incoming=()
+  declare -A entry_known_labels=()
 
   for entry in "${entries[@]}"
   do
@@ -4095,17 +4528,23 @@ sms_daily_limit_reserve() {
     fi
 
     local current=0
-    local stored_date=""
-    local stored_count=""
-    if [[ -r "$file" ]]
-    then
-      read -r stored_date stored_count <"$file" || true
-      if [[ "$stored_date" == "$today" && "$stored_count" =~ ^[0-9]+$ ]]
-      then
-        current="$stored_count"
-      fi
-    fi
+    local current_failed=0
+    local current_incoming=0
+    local stored_label
+    local stored_msisdn
+    sms_daily_state_read_today "$file" "$today" current current_failed current_incoming stored_label stored_msisdn
     entry_currents["$entry"]="$current"
+    entry_failed["$entry"]="$current_failed"
+    entry_incoming["$entry"]="$current_incoming"
+    entry_known_labels["$entry"]="$stored_label"
+    if [[ -z "${entry_msisdn[$entry]:-}" && -n "$stored_msisdn" ]]
+    then
+      entry_msisdn["$entry"]="$stored_msisdn"
+    fi
+    if [[ -z "${entry_labels[$entry]:-}" && -n "$stored_label" ]]
+    then
+      entry_labels["$entry"]="$stored_label"
+    fi
   done
 
   declare -A entry_new_counts=()
@@ -4134,7 +4573,15 @@ sms_daily_limit_reserve() {
   do
     local file="${entry_files[$entry]}"
     local new_count="${entry_new_counts[$entry]}"
-    if ! sms_daily_limit_write_state "$file" "$today" "$new_count"
+    local stored_failed="${entry_failed[$entry]:-0}"
+    local stored_incoming="${entry_incoming[$entry]:-0}"
+    local label="${entry_labels[$entry]:-}"
+    local msisdn_value="${entry_msisdn[$entry]:-}"
+    if [[ -z "$label" ]]
+    then
+      label="${entry_known_labels[$entry]:-}"
+    fi
+    if ! sms_daily_limit_write_state "$file" "$today" "$new_count" "$stored_failed" "$stored_incoming" "$label" "$msisdn_value"
     then
       echo_error "daily limit: failed to update counter for ${entry_labels[$entry]}"
       local prev_entry
@@ -4172,12 +4619,14 @@ sms_daily_limit_reserve() {
   SMS_DAILY_LIMIT_ACTIVE_FILES=()
   SMS_DAILY_LIMIT_ACTIVE_LABELS=()
   SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+  SMS_DAILY_LIMIT_ACTIVE_COUNTS=()
 
   for entry in "${entries[@]}"
   do
     SMS_DAILY_LIMIT_ACTIVE_FILES["$entry"]="${entry_files[$entry]}"
     SMS_DAILY_LIMIT_ACTIVE_LABELS["$entry"]="${entry_labels[$entry]}"
     SMS_DAILY_LIMIT_ACTIVE_LIMITS["$entry"]="${entry_limits[$entry]}"
+    SMS_DAILY_LIMIT_ACTIVE_COUNTS["$entry"]="${entry_new_counts[$entry]}"
 
     local label="${entry_labels[$entry]}"
     local limit="${entry_limits[$entry]}"
@@ -4234,16 +4683,11 @@ sms_daily_limit_release() {
     fi
 
     local current=0
-    local stored_date=""
-    local stored_count=""
-    if [[ -r "$file" ]]
-    then
-      read -r stored_date stored_count <"$file" || true
-      if [[ "$stored_date" == "$today" && "$stored_count" =~ ^[0-9]+$ ]]
-      then
-        current="$stored_count"
-      fi
-    fi
+    local current_failed=0
+    local current_incoming=0
+    local stored_label
+    local stored_msisdn
+    sms_daily_state_read_today "$file" "$today" current current_failed current_incoming stored_label stored_msisdn
 
     local new_count=0
     if (( amount >= current ))
@@ -4253,7 +4697,13 @@ sms_daily_limit_release() {
       new_count=$((current - amount))
     fi
 
-    if ! sms_daily_limit_write_state "$file" "$today" "$new_count"
+    local label_for_write="$label"
+    if [[ -z "$label_for_write" && -n "$stored_label" ]]
+    then
+      label_for_write="$stored_label"
+    fi
+
+    if ! sms_daily_limit_write_state "$file" "$today" "$new_count" "$current_failed" "$current_incoming" "$label_for_write" "$stored_msisdn"
     then
       echo_warning "daily limit: failed to update counter while releasing quota for ${label}"
       rc=1
@@ -4281,6 +4731,7 @@ sms_daily_limit_reset_state() {
   SMS_DAILY_LIMIT_ACTIVE_FILES=()
   SMS_DAILY_LIMIT_ACTIVE_LABELS=()
   SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+  SMS_DAILY_LIMIT_ACTIVE_COUNTS=()
 }
 
 # Finalize a send attempt, optionally releasing unused quota on failure.
@@ -4306,6 +4757,250 @@ sms_daily_limit_finalize() {
   fi
 
   sms_daily_limit_reset_state
+}
+
+# Log daily usage after a successful send, updating counters when limits are disabled.
+sms_daily_limit_log_success() {
+  local sent_segments="$1"
+  local limit_in_use="${2:-0}"
+
+  if [[ -z "$sent_segments" || ! "$sent_segments" =~ ^[0-9]+$ ]] || (( sent_segments <= 0 ))
+  then
+    return 0
+  fi
+
+  local today
+  today="$(date +%Y-%m-%d)"
+
+  local global_logged=0
+
+  if (( limit_in_use )) && (( ${#SMS_DAILY_LIMIT_ACTIVE_KEYS[@]} > 0 ))
+  then
+    local entry
+    for entry in "${SMS_DAILY_LIMIT_ACTIVE_KEYS[@]}"
+    do
+      local label="${SMS_DAILY_LIMIT_ACTIVE_LABELS[$entry]:-}"
+      local limit="${SMS_DAILY_LIMIT_ACTIVE_LIMITS[$entry]:-}"
+      local count="${SMS_DAILY_LIMIT_ACTIVE_COUNTS[$entry]:-}"
+
+      if [[ -z "$count" ]]
+      then
+        local file="${SMS_DAILY_LIMIT_ACTIVE_FILES[$entry]:-}"
+        if [[ -n "$file" ]]
+        then
+          local stored_count=0
+          sms_daily_state_read_today "$file" "$today" stored_count
+          count="$stored_count"
+        fi
+      fi
+
+      if [[ -z "$label" ]]
+      then
+        label="$entry"
+      fi
+
+      if [[ -z "$count" ]]
+      then
+        continue
+      fi
+
+      if [[ "$entry" == "global" ]]
+      then
+        global_logged=1
+      fi
+
+      if [[ -n "$limit" ]]
+      then
+        echo_info "daily usage: label='$label' sent ${count}/${limit} message(s) today"
+      else
+        echo_info "daily usage: label='$label' sent ${count} message(s) today"
+      fi
+    done
+  else
+    local identity_ok=0
+    if sms_daily_limit_identity
+    then
+      identity_ok=1
+    fi
+
+    if (( identity_ok ))
+    then
+      local label="$SMS_DAILY_LIMIT_LABEL"
+      local token="$SMS_DAILY_LIMIT_KEY"
+      local file
+      if file="$(sms_daily_limit_state_file "$token")"
+      then
+        local msisdn="$SMS_DAILY_LIMIT_MSISDN"
+        local new_count
+        if ! sms_daily_state_increment "$file" "$label" "$msisdn" "$sent_segments" 0 0 new_count "" ""
+        then
+          echo_warning "daily usage: failed to update counter for ${label} while limit disabled"
+          return 1
+        fi
+
+        echo_info "daily usage: label='$label' sent ${new_count} message(s) today (limit disabled)"
+      fi
+    fi
+  fi
+
+  if (( sent_segments > 0 ))
+  then
+    local need_global=1
+    if (( limit_in_use )) && (( global_logged ))
+    then
+      need_global=0
+    fi
+
+    if (( need_global ))
+    then
+      local global_sent
+      if sms_daily_usage_update_global "$sent_segments" 0 0 global_sent "" ""
+      then
+        if [[ -n "$global_sent" ]]
+        then
+          echo_info "daily usage: label='global' sent ${global_sent} message(s) today"
+        fi
+      fi
+    fi
+  fi
+
+  return 0
+}
+
+# Update the global usage counters by applying the provided deltas.
+sms_daily_usage_update_global() {
+  local sent_delta="${1:-0}"
+  local failed_delta="${2:-0}"
+  local incoming_delta="${3:-0}"
+  local __sent_out_var="${4:-}"
+  local __failed_out_var="${5:-}"
+  local __incoming_out_var="${6:-}"
+
+  if [[ -z "$sent_delta" || ! "$sent_delta" =~ ^-?[0-9]+$ ]]
+  then
+    sent_delta=0
+  fi
+  if [[ -z "$failed_delta" || ! "$failed_delta" =~ ^-?[0-9]+$ ]]
+  then
+    failed_delta=0
+  fi
+  if [[ -z "$incoming_delta" || ! "$incoming_delta" =~ ^-?[0-9]+$ ]]
+  then
+    incoming_delta=0
+  fi
+
+  if (( sent_delta == 0 && failed_delta == 0 && incoming_delta == 0 ))
+  then
+    return 0
+  fi
+
+  local file
+  if ! file="$(sms_daily_limit_state_file 'global')"
+  then
+    echo_warning "daily usage: failed to locate global counter file"
+    return 1
+  fi
+
+  local new_sent
+  local new_failed
+  local new_incoming
+  if ! sms_daily_state_increment "$file" "global" "" "$sent_delta" "$failed_delta" "$incoming_delta" new_sent new_failed new_incoming
+  then
+    echo_warning "daily usage: failed to update global counter"
+    return 1
+  fi
+
+  if [[ -n "$__sent_out_var" ]]
+  then
+    printf -v "$__sent_out_var" '%s' "$new_sent"
+  fi
+  if [[ -n "$__failed_out_var" ]]
+  then
+    printf -v "$__failed_out_var" '%s' "$new_failed"
+  fi
+  if [[ -n "$__incoming_out_var" ]]
+  then
+    printf -v "$__incoming_out_var" '%s' "$new_incoming"
+  fi
+
+  return 0
+}
+
+# Record a failed attempt to send an SMS for the current modem identity.
+sms_daily_usage_record_failure() {
+  local attempts="$1"
+
+  if [[ -z "$attempts" || ! "$attempts" =~ ^[0-9]+$ ]] || (( attempts <= 0 ))
+  then
+    attempts=1
+  fi
+
+  if ! sms_daily_limit_identity
+  then
+    return 0
+  fi
+
+  local label="$SMS_DAILY_LIMIT_LABEL"
+  local token="$SMS_DAILY_LIMIT_KEY"
+  local msisdn="$SMS_DAILY_LIMIT_MSISDN"
+
+  local file
+  if ! file="$(sms_daily_limit_state_file "$token")"
+  then
+    return 0
+  fi
+
+  local updated_failed=0
+  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 "$attempts" 0 "" "$updated_failed" ""
+  then
+    echo_warning "daily usage: failed to record failure for ${label}"
+    return 1
+  fi
+
+  echo_info "daily usage: label='$label' failures=${updated_failed} today"
+  sms_daily_usage_update_global 0 "$attempts" 0 "" "" ""
+  return 0
+}
+
+# Record an incoming SMS for statistics tracking.
+sms_daily_usage_record_incoming() {
+  local msisdn_hint="${1:-}"
+
+  if [[ -n "$msisdn_hint" ]]
+  then
+    if ! sms_daily_limit_identity "$msisdn_hint" "$msisdn_hint"
+    then
+      return 0
+    fi
+  elif ! sms_daily_limit_identity
+  then
+    return 0
+  fi
+
+  local label="$SMS_DAILY_LIMIT_LABEL"
+  local token="$SMS_DAILY_LIMIT_KEY"
+  local msisdn="$SMS_DAILY_LIMIT_MSISDN"
+
+  local file
+  if ! file="$(sms_daily_limit_state_file "$token")"
+  then
+    return 0
+  fi
+
+  local updated_incoming=0
+  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 0 1 "" "" "$updated_incoming"
+  then
+    echo_warning "daily usage: failed to record incoming message for ${label}"
+    return 1
+  fi
+
+  if [[ -z "$label" ]]
+  then
+    label="$token"
+  fi
+  echo_info "daily usage: label='$label' received ${updated_incoming} message(s) today"
+  sms_daily_usage_update_global 0 0 1 "" "" ""
+  return 0
 }
 
 
@@ -4467,6 +5162,7 @@ sms_send() {
       then
         sms_daily_limit_finalize 0
       fi
+      sms_daily_usage_record_failure 1
       return $chunk_rc
     fi
     if (( limit_in_use ))
@@ -4478,7 +5174,10 @@ sms_send() {
 
   if (( limit_in_use ))
   then
+    sms_daily_limit_log_success "$total_chunks" 1
     sms_daily_limit_finalize 1
+  else
+    sms_daily_limit_log_success "$total_chunks" 0
   fi
 
   return 0
@@ -6963,6 +7662,176 @@ modem_smsc() {
   return 0
 }
 
+# Display aggregated usage statistics from daily state files.
+sms_usage_stats() {
+  local dir
+  if ! dir="$(sms_daily_limit_state_dir)"
+  then
+    echo_error "failed to access usage state directory"
+    return 1
+  fi
+
+  local -a files=()
+  local -a tokens=()
+
+  if [[ -n "$ALL_MODEMS" ]]
+  then
+    local path
+    shopt -s nullglob
+    for path in "$dir"/sms-count-*.state
+    do
+      [[ -e "$path" ]] || continue
+      local base
+      base="${path##*/}"
+      local token
+      token="${base#sms-count-}"
+      token="${token%.state}"
+      tokens+=("$token")
+      files+=("$path")
+    done
+    shopt -u nullglob
+  else
+    if ! sms_daily_limit_identity
+    then
+      echo_error "failed to determine modem identity for stats"
+      return 1
+    fi
+
+    local token
+    token="$SMS_DAILY_LIMIT_KEY"
+    local file
+    if ! file="$(sms_daily_limit_state_file "$token")"
+    then
+      echo_error "failed to resolve stats state file"
+      return 1
+    fi
+
+    tokens+=("$token")
+    files+=("$file")
+  fi
+
+  if (( ${#files[@]} == 0 ))
+  then
+    if custom_json_requested
+    then
+      printf '[]\n'
+    else
+      echo_info "no usage stats available"
+    fi
+    return 0
+  fi
+
+  local -a json_items=()
+  local index=0
+  local file
+  local token
+  local date
+  local sent
+  local failed
+  local incoming
+  local label
+  local msisdn
+  local scope
+  local display_label
+  local date_display
+  local json_entry
+
+  while (( index < ${#files[@]} ))
+  do
+    file="${files[$index]}"
+    token="${tokens[$index]}"
+
+    sms_daily_state_read "$file" date sent failed incoming label msisdn
+
+    if [[ ! "$sent" =~ ^-?[0-9]+$ ]]
+    then
+      sent=0
+    fi
+    if [[ ! "$failed" =~ ^-?[0-9]+$ ]]
+    then
+      failed=0
+    fi
+    if [[ ! "$incoming" =~ ^-?[0-9]+$ ]]
+    then
+      incoming=0
+    fi
+
+    scope="line"
+    if [[ "$token" == "global" ]]
+    then
+      scope="global"
+    fi
+
+    display_label="$label"
+    if [[ -z "$display_label" && -n "$msisdn" ]]
+    then
+      display_label="$msisdn"
+    fi
+    if [[ -z "$display_label" ]]
+    then
+      if [[ "$token" == msisdn:* ]]
+      then
+        display_label="${token#msisdn:}"
+      else
+        display_label="$token"
+      fi
+    fi
+
+    if custom_json_requested
+    then
+      json_entry="$(jq -n \
+        --arg token "$token" \
+        --arg scope "$scope" \
+        --arg date "$date" \
+        --arg label "$label" \
+        --arg msisdn "$msisdn" \
+        --argjson sent "$sent" \
+        --argjson failed "$failed" \
+        --argjson incoming "$incoming" \
+        '({token:$token, scope:$scope}
+          + (if $date == "" then {date:null} else {date:$date} end)
+          + (if $label != "" then {label:$label} else {} end)
+          + (if $msisdn != "" then {msisdn:$msisdn} else {} end)
+          + {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}})')"
+      if [[ -n "$json_entry" ]]
+      then
+        json_items+=("$json_entry")
+      fi
+    else
+      if [[ -n "$date" ]]
+      then
+        date_display="$date"
+      else
+        date_display="--"
+      fi
+
+      printf 'Stats for %s (scope=%s, date=%s)\n' "$display_label" "$scope" "$date_display"
+      printf '  outgoing sent: %s\n' "$sent"
+      printf '  outgoing failed: %s\n' "$failed"
+      printf '  incoming received: %s\n' "$incoming"
+
+      if (( index + 1 < ${#files[@]} ))
+      then
+        printf '\n'
+      fi
+    fi
+
+    index=$((index + 1))
+  done
+
+  if custom_json_requested
+  then
+    if (( ${#json_items[@]} == 1 )) && [[ -z "$ALL_MODEMS" ]]
+    then
+      printf '%s\n' "${json_items[0]}"
+    else
+      printf '%s\n' "${json_items[@]}" | jq -s '.'
+    fi
+  fi
+
+  return 0
+}
+
 # Process an incoming SMS by validating, forwarding, or executing commands.
 watch_handle_sms() {
   local id="$1"
@@ -7039,6 +7908,8 @@ watch_handle_sms() {
     local sender_cc
     sender_cc="$(phone_cc_label "$sender")"
     echo_info "received message={id='$id' sender='$sender' (cc='$sender_cc') recipient='$log_recipient' text='$log_text'}"
+
+    sms_daily_usage_record_incoming "$recipient"
 
     local sender_whitelisted
     if watch_in_whitelist "$sender"
@@ -7702,6 +8573,9 @@ main() {
       ;;
     smsc)
       modem_smsc
+      ;;
+    stats)
+      sms_usage_stats
       ;;
     reset)
       if [[ -n "$ALL_MODEMS" ]]
