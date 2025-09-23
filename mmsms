@@ -6996,6 +6996,11 @@ sms_list_print_entry() {
 # List SMS messages respecting the selected output mode and scope.
 sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
+  local empty_msg="*no messages*"
+  if [[ -z $NO_COLOR && -z $CRON ]]
+  then
+    empty_msg="$(ansi_escape "$COLOR_BOLD_YELLOW")${empty_msg}$(ansi_escape "$COLOR_RESET")"
+  fi
 
   # When listing for all modems, iterate them explicitly
   if [[ -n "$ALL_MODEMS" ]]
@@ -7013,7 +7018,7 @@ sms_list_pretty() {
       then
         printf '[]\n'
       else
-        echo "*no messages*"
+        echo -e "$empty_msg"
       fi
 
       return 0
@@ -7179,7 +7184,7 @@ sms_list_pretty() {
         had_any=1
       done
     done
-    [[ -n "$had_any" ]] || echo "*no messages*"
+    [[ -n "$had_any" ]] || echo -e "$empty_msg"
     return 0
   fi
 
@@ -7202,7 +7207,7 @@ sms_list_pretty() {
     then
       printf '[]\n'
     else
-      echo "*no messages*"
+      echo -e "$empty_msg"
     fi
     return 0
   fi
