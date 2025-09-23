@@ -408,7 +408,7 @@ Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
   -A, --auto            Fallback: if foreign blocked, use modem's default recipient
-  -a, --all             List/Prune/Enable/Reset: operate on all modems
+  -a, --all             List/Prune/Enable/Status/Reset/Number/SMSC: operate on all modems
   -c, --config PATH     Use alternate config file for watch
   -d, --debug           Enable debug output
   -F, --fallback        Send/Watch: on failure, try other modem(s)
@@ -416,7 +416,7 @@ Options:
   -f, --allow-foreign   Send: allow sending to foreign country codes
   -H, --hard            Reset: also stop/start modemmanager (hard reset)
       --replug         Reset: temporarily deauthorize the modem's USB device via sysfs
-  -j, --json            Output JSON (for list/status/read)
+  -j, --json            Output JSON (for list/status/read/number/smsc)
   -m, --modem MODEM     Modem selector or id (default: $MODEM)
                         Accepts id (e.g. 2), dbus path, 'any', or
                         a string matching manufacturer/plugin/ttyUSB/phone-number
@@ -440,7 +440,8 @@ Commands:
   logs [LOGREAD_ARGS]        Show log entries from logread
   mmcli|raw [--] [MMCLI_ARGS]
                              Run mmcli with optional modem resolution and pass-through args
-  number|phone               Print modem's own phone number
+  number|phone [-a|--all] [-j|--json]
+                             Print modem's own phone number
   prune                      Delete all SMS messages from the modem
   read MESSAGE_ID            Show details for a specific SMS
   restart                    Restart modemmanager, issue vendor reset, re-enable modem
@@ -448,7 +449,8 @@ Commands:
   pull [--hard] [--no-restart]
                              Update repository and restart service
   service [ACTION]           Control the ${SCRIPT_NAME} service (start|stop|restart|status)
-  smsc                       Print modem's configured SMSC number
+  smsc [-a|--all] [-j|--json]
+                             Print modem's configured SMSC number
   status                     Show modem status summary
   watch                      Monitor incoming SMS and forward/execute actions
 USAGE
@@ -632,18 +634,26 @@ USAGE
 # Print usage details for the number subcommand.
 usage_number() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] number|phone
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] number|phone [-a|--all] [-j|--json]
 
 Prints the modem's own number (MSISDN) if reported.
+
+Relevant flags:
+  -a, --all    Query all detected modems
+  -j, --json   Output structured JSON
 USAGE
 }
 
 # Print usage details for the smsc subcommand.
 usage_smsc() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] smsc
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] smsc [-a|--all] [-j|--json]
 
 Prints the modem\'s configured SMSC (service center) number when available.
+
+Relevant flags:
+  -a, --all    Query all detected modems
+  -j, --json   Output structured JSON
 USAGE
 }
 
@@ -1607,6 +1617,19 @@ parse_number_args() {
         PARSED_ARGS=()
         return 64
         ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
+        shift
+        continue
+        ;;
       --)
         shift
         while (( $# > 0 ))
@@ -1649,6 +1672,19 @@ parse_smsc_args() {
         print_subcommand_usage smsc
         PARSED_ARGS=()
         return 64
+        ;;
+      -a|--all)
+        DEBUG_FLAGS+=("$1")
+        ALL_MODEMS=1
+        shift
+        continue
+        ;;
+      -j|--json)
+        DEBUG_FLAGS+=("$1")
+        JSON_OUTPUT=1
+        JSON_OUTPUT_FORCED=1
+        shift
+        continue
         ;;
       --)
         shift
@@ -6161,6 +6197,27 @@ watch_run_command() {
     '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}'
 }
 
+# Query the modem's own number without caching it globally.
+query_modem_number() {
+  local json
+  if ! json="$(mmcli_cmd -J)"
+  then
+    return 1
+  fi
+
+  local number
+  number="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
+  number="$(ensure_plus "$number")"
+
+  if [[ -z "$number" ]]
+  then
+    return 2
+  fi
+
+  printf '%s' "$number"
+  return 0
+}
+
 # Load and cache the modem's own number via mmcli.
 load_own_number() {
   if [[ -n "$OWN_NUMBER" ]]
@@ -6168,20 +6225,12 @@ load_own_number() {
     return 0
   fi
 
-  local json number
-  if ! json="$(mmcli_cmd -J)"
+  local number
+  if ! number="$(query_modem_number)"
   then
     return 1
   fi
 
-  number="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
-
-  if [[ -z "$number" ]]
-  then
-    return 1
-  fi
-
-  number=$(ensure_plus "$number")
   OWN_NUMBER="$number"
 
   return 0
@@ -6663,27 +6712,254 @@ modem_status() {
   modem_status_single
 }
 
-# Print the modem's own phone number if available.
-modem_number() {
-  if ! load_own_number
+# Build a JSON object describing a modem-specific value and optional error.
+modem_value_json_object() {
+  local field="$1"
+  local value="$2"
+  local error_message="$3"
+  local modem_id="$4"
+
+  jq -cn \
+    --arg field "$field" \
+    --arg value "$value" \
+    --arg error "$error_message" \
+    --arg mid "$modem_id" '
+      def blank_to_null($v):
+        if $v == "" then null else $v end;
+      def parse_modem($m):
+        if $m == "" then null else ($m | tonumber? // $m) end;
+
+      {modem_id: parse_modem($mid)}
+      + {($field): blank_to_null($value)}
+      + (if $error == "" then {} else {error: $error} end)
+    '
+}
+
+# Print the modem's own phone number if available for the current modem.
+modem_number_single() {
+  local number
+  if number="$(query_modem_number)"
   then
-    local load_rc=$?
-    if (( load_rc == 1 ))
+    OWN_NUMBER="$number"
+    if custom_json_requested
     then
-      echo_error "could not query modem for own number"
+      modem_value_json_object "number" "$number" "" "$MODEM"
     else
-      echo_error "modem did not report own number"
+      printf '%s\n' "$number"
     fi
+    return 0
+  fi
+
+  local rc=$?
+  local error_message
+  if (( rc == 1 ))
+  then
+    error_message="could not query modem for own number"
+  else
+    error_message="modem did not report own number"
+  fi
+
+  echo_error "$error_message"
+  if custom_json_requested
+  then
+    modem_value_json_object "number" "" "$error_message" "$MODEM"
+  fi
+  return 1
+}
+
+# Print the modem's own phone number for one or all detected modems.
+modem_number() {
+  if [[ -z "$ALL_MODEMS" ]]
+  then
+    modem_number_single
+    return "$?"
+  fi
+
+  local -a mids
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
+  then
+    echo_error "failed to list modems"
     return 1
   fi
 
-  if [[ -z "$OWN_NUMBER" ]]
+  if (( ${#mids[@]} == 0 ))
   then
-    echo_error "modem did not report own number"
-    return 2
+    if custom_json_requested
+    then
+      printf '[]\n'
+    else
+      echo_info "no modems detected"
+    fi
+    return 0
   fi
 
-  printf '%s\n' "$OWN_NUMBER"
+  local prev_modem="$MODEM"
+  local prev_all="$ALL_MODEMS"
+  local prev_own="$OWN_NUMBER"
+  local overall_rc=0
+  local mid
+  local number
+  local rc
+  local error_message
+  local json_item
+  local -a json_items=()
+
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    MODEM="$mid"
+    ALL_MODEMS=""
+    OWN_NUMBER=""
+    if number="$(query_modem_number)"
+    then
+      if custom_json_requested
+      then
+        json_item="$(modem_value_json_object "number" "$number" "" "$mid")"
+        if [[ -n "$json_item" ]]
+        then
+          json_items+=("$json_item")
+        fi
+      else
+        printf 'modem %s: %s\n' "$mid" "$number"
+      fi
+      continue
+    fi
+
+    rc=$?
+    number=""
+    if (( rc == 1 ))
+    then
+      error_message="modem $mid: could not query own number"
+    else
+      error_message="modem $mid: modem did not report own number"
+    fi
+
+    echo_error "$error_message"
+    if custom_json_requested
+    then
+      json_item="$(modem_value_json_object "number" "" "$error_message" "$mid")"
+      if [[ -n "$json_item" ]]
+      then
+        json_items+=("$json_item")
+      fi
+    fi
+
+    if (( rc > overall_rc ))
+    then
+      overall_rc="$rc"
+    fi
+  done
+
+  MODEM="$prev_modem"
+  ALL_MODEMS="$prev_all"
+  OWN_NUMBER="$prev_own"
+
+  if custom_json_requested
+  then
+    if (( ${#json_items[@]} == 0 ))
+    then
+      printf '[]\n'
+    else
+      printf '%s\n' "${json_items[@]}" | jq -s '.'
+    fi
+  fi
+
+  return "$overall_rc"
+}
+
+# Print the modem's configured SMSC number for the current modem.
+modem_smsc_single() {
+  local smsc
+  if ! smsc="$(get_smsc_number)"
+  then
+    smsc=""
+  fi
+
+  if custom_json_requested
+  then
+    modem_value_json_object "smsc" "$smsc" "" "$MODEM"
+  else
+    printf '%s\n' "$smsc"
+  fi
+  return 0
+}
+
+# Print the modem's configured SMSC number for one or all detected modems.
+modem_smsc() {
+  if [[ -z "$ALL_MODEMS" ]]
+  then
+    modem_smsc_single
+    return 0
+  fi
+
+  local -a mids
+  if ! mapfile -t mids < <(list_modem_ids_sorted)
+  then
+    echo_error "failed to list modems"
+    return 1
+  fi
+
+  if (( ${#mids[@]} == 0 ))
+  then
+    if custom_json_requested
+    then
+      printf '[]\n'
+    else
+      echo_info "no modems detected"
+    fi
+    return 0
+  fi
+
+  local prev_modem="$MODEM"
+  local prev_all="$ALL_MODEMS"
+  local prev_smsc="$SMSC_NUMBER"
+  local mid
+  local smsc
+  local json_item
+  local -a json_items=()
+
+  for mid in "${mids[@]}"
+  do
+    [[ -z "$mid" ]] && continue
+    MODEM="$mid"
+    ALL_MODEMS=""
+    SMSC_NUMBER=""
+    if ! smsc="$(get_smsc_number)"
+    then
+      smsc=""
+    fi
+
+    if custom_json_requested
+    then
+      json_item="$(modem_value_json_object "smsc" "$smsc" "" "$mid")"
+      if [[ -n "$json_item" ]]
+      then
+        json_items+=("$json_item")
+      fi
+    else
+      if [[ -n "$smsc" ]]
+      then
+        printf 'modem %s: %s\n' "$mid" "$smsc"
+      else
+        printf 'modem %s:\n' "$mid"
+      fi
+    fi
+  done
+
+  MODEM="$prev_modem"
+  ALL_MODEMS="$prev_all"
+  SMSC_NUMBER="$prev_smsc"
+
+  if custom_json_requested
+  then
+    if (( ${#json_items[@]} == 0 ))
+    then
+      printf '[]\n'
+    else
+      printf '%s\n' "${json_items[@]}" | jq -s '.'
+    fi
+  fi
+
   return 0
 }
 
@@ -7425,9 +7701,7 @@ main() {
       modem_number
       ;;
     smsc)
-      local smsc
-      smsc="$(get_smsc_number)"
-      printf "%s\n" "$smsc"
+      modem_smsc
       ;;
     reset)
       if [[ -n "$ALL_MODEMS" ]]
