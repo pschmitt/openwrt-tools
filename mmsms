@@ -21,7 +21,34 @@ SMS_RETRY_COUNT="${SMS_RETRY_COUNT:-${SMS_SEND_RETRY_COUNT:-${MAX_RETRY:-3}}}"
 SMS_CHUNK_SIZE="${SMS_CHUNK_SIZE:-}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
 MAX_MESSAGES_PER_DAY="${MAX_MESSAGES_PER_DAY:-}"
-SMS_DAILY_LIMIT_DIR="${SMS_DAILY_LIMIT_DIR:-/var/lib/mmsms}"
+MMMSMS_DATA_DIR_DEFAULT="/var/lib/mmsms"
+if [[ -n "${MMMSMS_DATA_DIR:-}" ]]
+then
+  :
+elif [[ -n "${SMS_DAILY_LIMIT_DIR:-}" ]]
+then
+  MMMSMS_DATA_DIR="$SMS_DAILY_LIMIT_DIR"
+else
+  MMMSMS_DATA_DIR="$MMMSMS_DATA_DIR_DEFAULT"
+fi
+
+if [[ -z "${MMMSMS_DATA_DIR:-}" ]]
+then
+  MMMSMS_DATA_DIR="$MMMSMS_DATA_DIR_DEFAULT"
+fi
+
+SMS_DAILY_LIMIT_DIR="$MMMSMS_DATA_DIR"
+SMS_STATS_HISTORY_DAYS="${SMS_STATS_HISTORY_DAYS:-7}"
+if [[ ! "$SMS_STATS_HISTORY_DAYS" =~ ^[0-9]+$ ]]
+then
+  SMS_STATS_HISTORY_DAYS=7
+elif (( SMS_STATS_HISTORY_DAYS < 1 ))
+then
+  SMS_STATS_HISTORY_DAYS=7
+fi
+STATS_DAY="${STATS_DAY:-}"
+STATS_DUMP="${STATS_DUMP:-}"
+STATS_RESET="${STATS_RESET:-}"
 SMS_DAILY_LIMIT_STATUS=""
 SMS_DAILY_LIMIT_GLOBAL_LIMIT=""
 SMS_DAILY_LIMIT_KEY=""
@@ -410,6 +437,7 @@ Options:
   -A, --auto            Fallback: if foreign blocked, use modem's default recipient
   -a, --all             List/Prune/Enable/Status/Reset/Number/SMSC/Stats: operate on all modems
   -c, --config PATH     Use alternate config file for watch
+      --data-dir PATH   Override SMS data directory (MMMSMS_DATA_DIR)
   -d, --debug           Enable debug output
   -F, --fallback        Send/Watch: on failure, try other modem(s)
       --chunk[=SIZE]   Send: split SMS text into SIZE-character chunks (default: 160)
@@ -662,13 +690,16 @@ USAGE
 # Print usage details for the stats subcommand.
 usage_stats() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] stats [-a|--all] [-j|--json]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] stats [-a|--all] [-j|--json] [--day DATE|--dump] [--reset]
 
 Displays daily SMS usage totals for outgoing, failed, and incoming messages.
 
 Relevant flags:
-  -a, --all    Show statistics for all tracked lines
-  -j, --json   Output structured JSON
+  -a, --all         Show statistics for all tracked lines
+  -j, --json        Output structured JSON
+      --day DATE    Display statistics for DATE (YYYY-MM-DD)
+      --dump        Show the full retained history
+      --reset       Remove stored usage statistics
 USAGE
 }
 
@@ -776,6 +807,32 @@ parse_common_option() {
       DEBUG_FLAGS+=("${opt}=$value")
       CONFIG_FILE="$value"
       PARSE_SHIFT=2
+      return 0
+      ;;
+    --data-dir)
+      if [[ -z "$value" ]]
+      then
+        echo_error "missing value for $opt"
+        return 2
+      fi
+      DEBUG_FLAGS+=("${opt}=$value")
+      MMMSMS_DATA_DIR="$value"
+      SMS_DAILY_LIMIT_DIR="$MMMSMS_DATA_DIR"
+      PARSE_SHIFT=2
+      return 0
+      ;;
+    --data-dir=*)
+      local data_dir_value
+      data_dir_value="${opt#*=}"
+      if [[ -z "$data_dir_value" ]]
+      then
+        echo_error "missing value for --data-dir"
+        return 2
+      fi
+      DEBUG_FLAGS+=("--data-dir=$data_dir_value")
+      MMMSMS_DATA_DIR="$data_dir_value"
+      SMS_DAILY_LIMIT_DIR="$MMMSMS_DATA_DIR"
+      PARSE_SHIFT=1
       return 0
       ;;
     --skip-modem-init)
@@ -1735,6 +1792,9 @@ parse_smsc_args() {
 # Parse arguments for the stats command and record leftovers in PARSED_ARGS.
 parse_stats_args() {
   PARSED_ARGS=()
+  STATS_DAY=""
+  STATS_DUMP=""
+  STATS_RESET=""
   local -a out=()
 
   while (( $# > 0 ))
@@ -1755,6 +1815,55 @@ parse_stats_args() {
         DEBUG_FLAGS+=("$1")
         JSON_OUTPUT=1
         JSON_OUTPUT_FORCED=1
+        shift
+        continue
+        ;;
+      --day)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "stats: missing argument for --day"
+          return 2
+        fi
+        local day_value
+        day_value="$1"
+        if [[ ! "$day_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+        then
+          echo_error "stats: --day expects YYYY-MM-DD"
+          return 2
+        fi
+        DEBUG_FLAGS+=("--day=$day_value")
+        STATS_DAY="$day_value"
+        shift
+        continue
+        ;;
+      --day=*)
+        local day_value
+        day_value="${1#*=}"
+        if [[ -z "$day_value" ]]
+        then
+          echo_error "stats: missing argument for --day"
+          return 2
+        fi
+        if [[ ! "$day_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+        then
+          echo_error "stats: --day expects YYYY-MM-DD"
+          return 2
+        fi
+        DEBUG_FLAGS+=("--day=$day_value")
+        STATS_DAY="$day_value"
+        shift
+        continue
+        ;;
+      --dump)
+        DEBUG_FLAGS+=("$1")
+        STATS_DUMP=1
+        shift
+        continue
+        ;;
+      --reset)
+        DEBUG_FLAGS+=("$1")
+        STATS_RESET=1
         shift
         continue
         ;;
@@ -1783,6 +1892,18 @@ parse_stats_args() {
         ;;
     esac
   done
+
+  if [[ -n "$STATS_DAY" && -n "$STATS_DUMP" ]]
+  then
+    echo_error "stats: --day cannot be combined with --dump"
+    return 2
+  fi
+
+  if [[ -n "$STATS_RESET" && ( -n "$STATS_DAY" || -n "$STATS_DUMP" ) ]]
+  then
+    echo_error "stats: --reset cannot be combined with --day or --dump"
+    return 2
+  fi
 
   if (( ${#out[@]} > 0 ))
   then
@@ -4096,6 +4217,7 @@ sms_daily_state_read() {
   local incoming_var
   local label_var
   local msisdn_var
+  local history_var
   local state_date
   local state_label
   local state_msisdn
@@ -4106,6 +4228,7 @@ sms_daily_state_read() {
   local parsed
   local legacy_date
   local legacy_count
+  local state_history_json
   local opt
 
   while (( $# > 0 ))
@@ -4189,6 +4312,17 @@ sms_daily_state_read() {
         shift
         continue
         ;;
+      --out-history-json-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-history-json-var"
+          return 1
+        fi
+        history_var="$1"
+        shift
+        continue
+        ;;
       --)
         shift
         break
@@ -4209,6 +4343,10 @@ sms_daily_state_read() {
   state_sent=0
   state_failed=0
   state_incoming=0
+  if [[ -n "$history_var" ]]
+  then
+    state_history_json="[]"
+  fi
 
   if [[ -r "$file" ]]
   then
@@ -4224,6 +4362,15 @@ sms_daily_state_read() {
       if parsed="$(jq -r '[.date // "", .label // "", .msisdn // "", (.outgoing.sent // 0), (.outgoing.failed // 0), (.incoming.received // 0)] | @tsv' <<<"$content" 2>/dev/null)"
       then
         IFS=$'\t' read -r state_date state_label state_msisdn state_sent state_failed state_incoming <<<"$parsed"
+        if [[ -n "$history_var" ]]
+        then
+          if state_history_json="$(jq -c '.history // []' <<<"$content" 2>/dev/null)"
+          then
+            :
+          else
+            state_history_json="[]"
+          fi
+        fi
       else
         if read -r legacy_date legacy_count <<<"$content"
         then
@@ -4235,6 +4382,10 @@ sms_daily_state_read() {
           then
             state_sent="$legacy_count"
           fi
+        fi
+        if [[ -n "$history_var" ]]
+        then
+          state_history_json="[]"
         fi
       fi
     fi
@@ -4263,6 +4414,10 @@ sms_daily_state_read() {
   if [[ -n "$msisdn_var" ]]
   then
     printf -v "$msisdn_var" '%s' "$state_msisdn"
+  fi
+  if [[ -n "$history_var" ]]
+  then
+    printf -v "$history_var" '%s' "$state_history_json"
   fi
 
   return 0
@@ -4449,6 +4604,8 @@ sms_daily_state_write_locked() {
   local tmp
   local base
   local new_json
+  local history_days
+  local history_limit
   local opt
 
   sent=0
@@ -4574,6 +4731,20 @@ sms_daily_state_write_locked() {
     incoming=0
   fi
 
+  history_days="$SMS_STATS_HISTORY_DAYS"
+  if [[ ! "$history_days" =~ ^[0-9]+$ ]]
+  then
+    history_days=1
+  elif (( history_days < 1 ))
+  then
+    history_days=1
+  fi
+  history_limit=$((history_days - 1))
+  if (( history_limit < 0 ))
+  then
+    history_limit=0
+  fi
+
   dir="$(dirname "$file")"
 
   if ! tmp="$(mktemp "$dir/.sms-count.XXXXXX")"
@@ -4600,12 +4771,31 @@ sms_daily_state_write_locked() {
     --argjson sent "$sent" \
     --argjson failed "$failed" \
     --argjson incoming "$incoming" \
-    '(.date = $date)
-      | (if $label != "" then .label = $label else del(.label) end)
-      | (if $msisdn != "" then .msisdn = $msisdn else del(.msisdn) end)
-      | (.outgoing.sent = $sent)
-      | (.outgoing.failed = $failed)
-      | (.incoming.received = $incoming)' <<<"$base" 2>/dev/null)"
+    --argjson history_limit "$history_limit" \
+    'def mkentry($d; $label; $msisdn; $sent; $failed; $incoming):
+       (if $d == "" then {} else {date:$d} end)
+       + (if $label == "" then {} else {label:$label} end)
+       + (if $msisdn == "" then {} else {msisdn:$msisdn} end)
+       + {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}};
+     def ensure_history($hist):
+       if ($hist // empty) | type == "array" then $hist else [] end;
+     def trim_history($hist; $limit):
+       if $limit <= 0 then [] else $hist[:$limit] end;
+     . as $existing
+     | $orig_date := ($existing.date // "")
+     | $orig_label := ($existing.label // "")
+     | $orig_msisdn := ($existing.msisdn // "")
+     | $orig_sent := ($existing.outgoing.sent // 0)
+     | $orig_failed := ($existing.outgoing.failed // 0)
+     | $orig_incoming := ($existing.incoming.received // 0)
+     | $hist := ensure_history($existing.history)
+     | $hist := (if $orig_date != "" and $orig_date != $date then
+                  trim_history([mkentry($orig_date; $orig_label; $orig_msisdn; $orig_sent; $orig_failed; $orig_incoming)] + $hist; $history_limit)
+                else
+                  trim_history($hist; $history_limit)
+                end)
+     | mkentry($date; $label; $msisdn; $sent; $failed; $incoming)
+       + (if ($hist | length) > 0 then {history:$hist} else {} end)' <<<"$base" 2>/dev/null)"
   then
     if ! new_json="$(jq -n \
       --arg date "$date" \
@@ -8194,11 +8384,9 @@ modem_status_single() {
       fi
       if (( ${#raw_items[@]} == 0 ))
       then
-        printf '[]
-'
+        printf '[]\n'
       else
-        printf '%s
-' "${raw_items[@]}" | jq -s '.'
+        printf '%s\n' "${raw_items[@]}" | jq -s '.'
       fi
     else
       mmcli_cmd -J | jq
@@ -8773,6 +8961,90 @@ sms_usage_stats() {
     files+=("$file")
   fi
 
+  local stats_day="$STATS_DAY"
+  local stats_dump="$STATS_DUMP"
+  local stats_reset="$STATS_RESET"
+  local include_history=0
+  if [[ -n "$stats_day" || -n "$stats_dump" ]]
+  then
+    include_history=1
+  fi
+
+  if [[ -n "$stats_reset" ]]
+  then
+    local global_file=""
+    if ! global_file="$(sms_daily_limit_state_file 'global')"
+    then
+      global_file=""
+    fi
+    local -a reset_targets=()
+    declare -A seen_reset=()
+    if [[ -n "$ALL_MODEMS" ]]
+    then
+      local path
+      shopt -s nullglob
+      for path in "$dir"/sms-count-*.state
+      do
+        [[ -e "$path" ]] || continue
+        if [[ -z "${seen_reset[$path]:-}" ]]
+        then
+          reset_targets+=("$path")
+          seen_reset["$path"]=1
+        fi
+      done
+      shopt -u nullglob
+    else
+      local file
+      for file in "${files[@]}"
+      do
+        if [[ -z "${seen_reset[$file]:-}" ]]
+        then
+          reset_targets+=("$file")
+          seen_reset["$file"]=1
+        fi
+      done
+      if [[ -n "$global_file" && -z "${seen_reset[$global_file]:-}" ]]
+      then
+        reset_targets+=("$global_file")
+        seen_reset["$global_file"]=1
+      fi
+    fi
+
+    local removed=0
+    local reset_rc=0
+    local reset_path
+    for reset_path in "${reset_targets[@]}"
+    do
+      if [[ -e "$reset_path" ]]
+      then
+        if rm -f "$reset_path"
+        then
+          removed=$((removed + 1))
+        else
+          echo_warning "stats: failed to remove '$reset_path'"
+          reset_rc=1
+        fi
+      fi
+    done
+
+    if custom_json_requested
+    then
+      jq -n --argjson removed "$removed" '{reset:true, removed:$removed}'
+    else
+      if (( removed == 0 ))
+      then
+        echo_info "no usage stats to reset"
+      elif (( removed == 1 ))
+      then
+        echo_info "reset 1 usage stats file"
+      else
+        echo_info "reset ${removed} usage stats files"
+      fi
+    fi
+
+    return "$reset_rc"
+  fi
+
   if ! sms_daily_usage_refresh_global
   then
     echo_warning "daily usage: failed to refresh global stats before display"
@@ -8784,24 +9056,28 @@ sms_usage_stats() {
     then
       printf '[]\n'
     else
-      echo_info "no usage stats available"
+      if [[ -n "$stats_day" ]]
+      then
+        echo_info "no usage stats available for $stats_day"
+      else
+        echo_info "no usage stats available"
+      fi
     fi
     return 0
   fi
 
-  local -a entry_tokens
-  local -a entry_scopes
-  local -a entry_dates
-  local -a entry_labels
-  local -a entry_msisdns
-  local -a entry_display_labels
-  local -a entry_sent
-  local -a entry_failed
-  local -a entry_incoming
-  local line_incoming_total
-  local global_index
+  local -a entry_tokens=()
+  local -a entry_scopes=()
+  local -a entry_dates=()
+  local -a entry_labels=()
+  local -a entry_msisdns=()
+  local -a entry_display_labels=()
+  local -a entry_sent=()
+  local -a entry_failed=()
+  local -a entry_incoming=()
+  declare -A line_incoming_totals=()
+
   local file_index
-  local entry_index
   local file
   local token
   local date
@@ -8812,26 +9088,23 @@ sms_usage_stats() {
   local msisdn
   local scope
   local display_label
-  local stored_incoming
-  local date_display
-  local json_entry
-  local color_reset
-  local color_blue
-  local color_cyan
-  local color_green
-  local color_red
-  local color_magenta
-  local failed_color
-  local failed_reset
-
-  line_incoming_total=0
-  global_index=-1
+  local entry_index
+  local history_json
+  local history_lines
+  local history_date
+  local history_label
+  local history_msisdn
+  local history_sent
+  local history_failed
+  local history_incoming
+  local aggregated
 
   for file_index in "${!files[@]}"
   do
     file="${files[$file_index]}"
     token="${tokens[$file_index]}"
 
+    history_json="[]"
     if ! sms_daily_state_read \
       --file "$file" \
       --out-date-var date \
@@ -8839,7 +9112,8 @@ sms_usage_stats() {
       --out-failed-var failed \
       --out-incoming-var incoming \
       --out-label-var label \
-      --out-msisdn-var msisdn
+      --out-msisdn-var msisdn \
+      --out-history-json-var history_json
     then
       continue
     fi
@@ -8878,43 +9152,157 @@ sms_usage_stats() {
       fi
     fi
 
-    entry_index=${#entry_tokens[@]}
-    entry_tokens[entry_index]="$token"
-    entry_scopes[entry_index]="$scope"
-    entry_dates[entry_index]="$date"
-    entry_labels[entry_index]="$label"
-    entry_msisdns[entry_index]="$msisdn"
-    entry_display_labels[entry_index]="$display_label"
-    entry_sent[entry_index]="$sent"
-    entry_failed[entry_index]="$failed"
-    entry_incoming[entry_index]="$incoming"
-
-    if [[ "$scope" == "global" ]]
+    if [[ -z "$stats_day" || "$date" == "$stats_day" ]]
     then
-      global_index=$entry_index
-    else
-      line_incoming_total=$(( line_incoming_total + incoming ))
+      entry_index=${#entry_tokens[@]}
+      entry_tokens[entry_index]="$token"
+      entry_scopes[entry_index]="$scope"
+      entry_dates[entry_index]="$date"
+      entry_labels[entry_index]="$label"
+      entry_msisdns[entry_index]="$msisdn"
+      entry_display_labels[entry_index]="$display_label"
+      entry_sent[entry_index]="$sent"
+      entry_failed[entry_index]="$failed"
+      entry_incoming[entry_index]="$incoming"
+    fi
+
+    if (( include_history ))
+    then
+      if history_lines="$(jq -r 'map([.date // "", .label // "", .msisdn // "", (.outgoing.sent // 0), (.outgoing.failed // 0), (.incoming.received // 0)] | @tsv)[]' <<<"$history_json" 2>/dev/null)"
+      then
+        if [[ -n "$history_lines" ]]
+        then
+          while IFS=$'	' read -r history_date history_label history_msisdn history_sent history_failed history_incoming
+          do
+            if [[ -z "$history_date" ]]
+            then
+              continue
+            fi
+
+            if [[ ! "$history_sent" =~ ^-?[0-9]+$ ]]
+            then
+              history_sent=0
+            fi
+            if [[ ! "$history_failed" =~ ^-?[0-9]+$ ]]
+            then
+              history_failed=0
+            fi
+            if [[ ! "$history_incoming" =~ ^-?[0-9]+$ ]]
+            then
+              history_incoming=0
+            fi
+
+            if [[ -n "$stats_day" && "$history_date" != "$stats_day" ]]
+            then
+              continue
+            fi
+
+            display_label="$history_label"
+            if [[ -z "$display_label" && -n "$history_msisdn" ]]
+            then
+              display_label="$history_msisdn"
+            fi
+            if [[ -z "$display_label" ]]
+            then
+              if [[ "$token" == msisdn:* ]]
+              then
+                display_label="${token#msisdn:}"
+              else
+                display_label="$token"
+              fi
+            fi
+
+            entry_index=${#entry_tokens[@]}
+            entry_tokens[entry_index]="$token"
+            entry_scopes[entry_index]="$scope"
+            entry_dates[entry_index]="$history_date"
+            entry_labels[entry_index]="$history_label"
+            entry_msisdns[entry_index]="$history_msisdn"
+            entry_display_labels[entry_index]="$display_label"
+            entry_sent[entry_index]="$history_sent"
+            entry_failed[entry_index]="$history_failed"
+            entry_incoming[entry_index]="$history_incoming"
+          done <<<"$history_lines"
+        fi
+      fi
     fi
   done
 
-  if (( global_index >= 0 ))
+  if (( ${#entry_tokens[@]} == 0 ))
   then
-    stored_incoming="${entry_incoming[$global_index]}"
-    if [[ ! "$stored_incoming" =~ ^-?[0-9]+$ ]]
+    if custom_json_requested
     then
-      stored_incoming=0
+      printf '[]\n'
+    else
+      if [[ -n "$stats_day" ]]
+      then
+        echo_info "no usage stats available for $stats_day"
+      else
+        echo_info "no usage stats available"
+      fi
     fi
-    if (( line_incoming_total > stored_incoming ))
-    then
-      entry_incoming[$global_index]=$line_incoming_total
-    fi
+    return 0
   fi
+
+  for entry_index in "${!entry_tokens[@]}"
+  do
+    scope="${entry_scopes[$entry_index]}"
+    if [[ "$scope" == "global" ]]
+    then
+      continue
+    fi
+    incoming="${entry_incoming[$entry_index]}"
+    if [[ ! "$incoming" =~ ^-?[0-9]+$ ]]
+    then
+      incoming=0
+      entry_incoming[$entry_index]=0
+    fi
+    date="${entry_dates[$entry_index]}"
+    if [[ -z "$date" ]]
+    then
+      continue
+    fi
+    aggregated="${line_incoming_totals[$date]:-0}"
+    if [[ ! "$aggregated" =~ ^-?[0-9]+$ ]]
+    then
+      aggregated=0
+    fi
+    line_incoming_totals[$date]=$((aggregated + incoming))
+  done
+
+  for entry_index in "${!entry_tokens[@]}"
+  do
+    scope="${entry_scopes[$entry_index]}"
+    if [[ "$scope" != "global" ]]
+    then
+      continue
+    fi
+    date="${entry_dates[$entry_index]}"
+    if [[ -z "$date" ]]
+    then
+      continue
+    fi
+    incoming="${entry_incoming[$entry_index]}"
+    if [[ ! "$incoming" =~ ^-?[0-9]+$ ]]
+    then
+      incoming=0
+      entry_incoming[$entry_index]=0
+    fi
+    aggregated="${line_incoming_totals[$date]:-0}"
+    if [[ ! "$aggregated" =~ ^-?[0-9]+$ ]]
+    then
+      aggregated=0
+    fi
+    if (( aggregated > incoming ))
+    then
+      entry_incoming[$entry_index]="$aggregated"
+    fi
+  done
 
   if custom_json_requested
   then
-    local -a json_items
-    json_items=()
-
+    local -a json_items=()
+    local json_entry
     for entry_index in "${!entry_tokens[@]}"
     do
       token="${entry_tokens[$entry_index]}"
@@ -8956,6 +9344,16 @@ sms_usage_stats() {
       printf '%s\n' "${json_items[@]}" | jq -s '.'
     fi
   else
+    local color_reset
+    local color_blue
+    local color_cyan
+    local color_green
+    local color_red
+    local color_magenta
+    local failed_color
+    local failed_reset
+    local date_display
+
     color_reset="$(ansi_escape "$COLOR_RESET")"
     color_blue="$(ansi_escape "$COLOR_BOLD_BLUE")"
     color_cyan="$(ansi_escape "$COLOR_CYAN")"
