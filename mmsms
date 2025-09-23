@@ -5101,6 +5101,7 @@ enable_modem() {
   local last_error
   local last_error_is_custom
   local selector_is_any
+  local should_return
 
   if [[ "$selector" == "any" ]]
   then
@@ -5110,6 +5111,8 @@ enable_modem() {
   local -a any_ids=()
   while :
   do
+    unset should_return
+
     if [[ -n "$selector_is_any" ]]
     then
       if mapfile -t any_ids < <(list_modem_ids_sorted)
@@ -5131,11 +5134,24 @@ enable_modem() {
     else
       resolve_output="$(get_modem_id "$selector")"
       resolve_status=$?
+      if (( resolve_status == 0 ))
+      then
+        resolved_id="$resolve_output"
+        break
+      fi
       last_error="$resolve_output"
       last_error_is_custom=""
     fi
 
-    if (( resolve_status == 2 )) || [[ -z "$wait_enabled" ]]
+    if (( resolve_status == 2 ))
+    then
+      should_return=1
+    elif (( resolve_status != 0 )) && [[ -z "$wait_enabled" ]]
+    then
+      should_return=1
+    fi
+
+    if [[ -n $should_return ]]
     then
       if [[ -n "$last_error_is_custom" ]]
       then
