@@ -10091,7 +10091,7 @@ main() {
         echo_error "No SMS ID/path specified"
         # Show the message list in the same pretty/JSON/raw style
         sms_list_pretty || echo_error "failed to list SMS messages"
-        return 1
+        return 2
       fi
         if raw_json_requested
         then
