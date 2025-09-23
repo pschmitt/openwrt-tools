@@ -4292,18 +4292,9 @@ sms_send() {
     fi
   fi
 
-  if (( $# == 0 ))
+  if [[ $# -eq 0 || "$1" == "-" ]]
   then
-    if [[ -t 0 ]]
-    then
-      echo_error "no SMS text provided"
-      return 2
-    fi
-    echo_info "Reading SMS text from stdin... Ctrl-D to end"
-    text="$(cat)"
-  elif [[ "$1" == "-" ]]
-  then
-    shift
+    [[ "$1" == "-" ]] && shift
     echo_info "Reading SMS text from stdin... Ctrl-D to end"
     text="$(cat)"
   else
