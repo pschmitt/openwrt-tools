@@ -4040,38 +4040,142 @@ sms_daily_limit_state_file() {
 
 # Read the stored counters from a state file without enforcing the current date.
 sms_daily_state_read() {
-  local file="$1"
-  local __date_var="$2"
-  local __sent_var="$3"
-  local __failed_var="$4"
-  local __incoming_var="$5"
-  local __label_var="$6"
-  local __msisdn_var="$7"
-
+  local file
+  local date_var
+  local sent_var
+  local failed_var
+  local incoming_var
+  local label_var
+  local msisdn_var
   local state_date
   local state_label
   local state_msisdn
-  local state_sent=0
-  local state_failed=0
-  local state_incoming=0
+  local state_sent
+  local state_failed
+  local state_incoming
+  local content
+  local parsed
+  local legacy_date
+  local legacy_count
+  local opt
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --file)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --file"
+          return 1
+        fi
+        file="$1"
+        shift
+        continue
+        ;;
+      --out-date-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-date-var"
+          return 1
+        fi
+        date_var="$1"
+        shift
+        continue
+        ;;
+      --out-sent-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-sent-var"
+          return 1
+        fi
+        sent_var="$1"
+        shift
+        continue
+        ;;
+      --out-failed-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-failed-var"
+          return 1
+        fi
+        failed_var="$1"
+        shift
+        continue
+        ;;
+      --out-incoming-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-incoming-var"
+          return 1
+        fi
+        incoming_var="$1"
+        shift
+        continue
+        ;;
+      --out-label-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-label-var"
+          return 1
+        fi
+        label_var="$1"
+        shift
+        continue
+        ;;
+      --out-msisdn-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-msisdn-var"
+          return 1
+        fi
+        msisdn_var="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily limit: unknown argument '$opt' for sms_daily_state_read"
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]
+  then
+    echo_error "daily limit: --file is required for sms_daily_state_read"
+    return 1
+  fi
+
+  state_sent=0
+  state_failed=0
+  state_incoming=0
 
   if [[ -r "$file" ]]
   then
-    local content
-    if ! content="$(cat "$file" 2>/dev/null)"
+    if content="$(cat "$file" 2>/dev/null)"
     then
+      :
+    else
       content=""
     fi
 
     if [[ -n "$content" ]]
     then
-      local parsed
       if parsed="$(jq -r '[.date // "", .label // "", .msisdn // "", (.outgoing.sent // 0), (.outgoing.failed // 0), (.incoming.received // 0)] | @tsv' <<<"$content" 2>/dev/null)"
       then
         IFS=$'\t' read -r state_date state_label state_msisdn state_sent state_failed state_incoming <<<"$parsed"
       else
-        local legacy_date
-        local legacy_count
         if read -r legacy_date legacy_count <<<"$content"
         then
           if [[ "$legacy_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
@@ -4087,50 +4191,170 @@ sms_daily_state_read() {
     fi
   fi
 
-  if [[ -n "$__date_var" ]]
+  if [[ -n "$date_var" ]]
   then
-    printf -v "$__date_var" '%s' "$state_date"
+    printf -v "$date_var" '%s' "$state_date"
   fi
-  if [[ -n "$__sent_var" ]]
+  if [[ -n "$sent_var" ]]
   then
-    printf -v "$__sent_var" '%s' "$state_sent"
+    printf -v "$sent_var" '%s' "$state_sent"
   fi
-  if [[ -n "$__failed_var" ]]
+  if [[ -n "$failed_var" ]]
   then
-    printf -v "$__failed_var" '%s' "$state_failed"
+    printf -v "$failed_var" '%s' "$state_failed"
   fi
-  if [[ -n "$__incoming_var" ]]
+  if [[ -n "$incoming_var" ]]
   then
-    printf -v "$__incoming_var" '%s' "$state_incoming"
+    printf -v "$incoming_var" '%s' "$state_incoming"
   fi
-  if [[ -n "$__label_var" ]]
+  if [[ -n "$label_var" ]]
   then
-    printf -v "$__label_var" '%s' "$state_label"
+    printf -v "$label_var" '%s' "$state_label"
   fi
-  if [[ -n "$__msisdn_var" ]]
+  if [[ -n "$msisdn_var" ]]
   then
-    printf -v "$__msisdn_var" '%s' "$state_msisdn"
+    printf -v "$msisdn_var" '%s' "$state_msisdn"
   fi
+
+  return 0
 }
 
 # Read counters for the current day, resetting stale totals to zero.
 sms_daily_state_read_today() {
-  local file="$1"
-  local today="$2"
-  local __sent_var="$3"
-  local __failed_var="$4"
-  local __incoming_var="$5"
-  local __label_var="$6"
-  local __msisdn_var="$7"
-
+  local file
+  local today
+  local sent_var
+  local failed_var
+  local incoming_var
+  local label_var
+  local msisdn_var
   local day_date
-  local day_sent=0
-  local day_failed=0
-  local day_incoming=0
+  local day_sent
+  local day_failed
+  local day_incoming
   local day_label
   local day_msisdn
+  local opt
 
-  sms_daily_state_read "$file" day_date day_sent day_failed day_incoming day_label day_msisdn
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --file)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --file"
+          return 1
+        fi
+        file="$1"
+        shift
+        continue
+        ;;
+      --today)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --today"
+          return 1
+        fi
+        today="$1"
+        shift
+        continue
+        ;;
+      --out-sent-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-sent-var"
+          return 1
+        fi
+        sent_var="$1"
+        shift
+        continue
+        ;;
+      --out-failed-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-failed-var"
+          return 1
+        fi
+        failed_var="$1"
+        shift
+        continue
+        ;;
+      --out-incoming-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-incoming-var"
+          return 1
+        fi
+        incoming_var="$1"
+        shift
+        continue
+        ;;
+      --out-label-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-label-var"
+          return 1
+        fi
+        label_var="$1"
+        shift
+        continue
+        ;;
+      --out-msisdn-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-msisdn-var"
+          return 1
+        fi
+        msisdn_var="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily limit: unknown argument '$opt' for sms_daily_state_read_today"
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]
+  then
+    echo_error "daily limit: --file is required for sms_daily_state_read_today"
+    return 1
+  fi
+
+  if [[ -z "$today" ]]
+  then
+    echo_error "daily limit: --today is required for sms_daily_state_read_today"
+    return 1
+  fi
+
+  day_sent=0
+  day_failed=0
+  day_incoming=0
+
+  if ! sms_daily_state_read \
+    --file "$file" \
+    --out-date-var day_date \
+    --out-sent-var day_sent \
+    --out-failed-var day_failed \
+    --out-incoming-var day_incoming \
+    --out-label-var day_label \
+    --out-msisdn-var day_msisdn
+  then
+    return 1
+  fi
 
   if [[ "$day_date" != "$today" ]]
   then
@@ -4139,49 +4363,176 @@ sms_daily_state_read_today() {
     day_incoming=0
   fi
 
-  if [[ -n "$__sent_var" ]]
+  if [[ -n "$sent_var" ]]
   then
-    printf -v "$__sent_var" '%s' "$day_sent"
+    printf -v "$sent_var" '%s' "$day_sent"
   fi
-  if [[ -n "$__failed_var" ]]
+  if [[ -n "$failed_var" ]]
   then
-    printf -v "$__failed_var" '%s' "$day_failed"
+    printf -v "$failed_var" '%s' "$day_failed"
   fi
-  if [[ -n "$__incoming_var" ]]
+  if [[ -n "$incoming_var" ]]
   then
-    printf -v "$__incoming_var" '%s' "$day_incoming"
+    printf -v "$incoming_var" '%s' "$day_incoming"
   fi
-  if [[ -n "$__label_var" ]]
+  if [[ -n "$label_var" ]]
   then
-    printf -v "$__label_var" '%s' "$day_label"
+    printf -v "$label_var" '%s' "$day_label"
   fi
-  if [[ -n "$__msisdn_var" ]]
+  if [[ -n "$msisdn_var" ]]
   then
-    printf -v "$__msisdn_var" '%s' "$day_msisdn"
+    printf -v "$msisdn_var" '%s' "$day_msisdn"
   fi
+
+  return 0
 }
 
 # Persist counters to disk while the caller holds the lock for the file.
 sms_daily_state_write_locked() {
-  local file="$1"
-  local date="$2"
-  local label="$3"
-  local msisdn="$4"
-  local sent="$5"
-  local failed="$6"
-  local incoming="$7"
-
+  local file
+  local date
+  local label
+  local msisdn
+  local sent
+  local failed
+  local incoming
   local dir
+  local tmp
+  local base
+  local new_json
+  local opt
+
+  sent=0
+  failed=0
+  incoming=0
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --file)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --file"
+          return 1
+        fi
+        file="$1"
+        shift
+        continue
+        ;;
+      --date)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --date"
+          return 1
+        fi
+        date="$1"
+        shift
+        continue
+        ;;
+      --label)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --label"
+          return 1
+        fi
+        label="$1"
+        shift
+        continue
+        ;;
+      --msisdn)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn"
+          return 1
+        fi
+        msisdn="$1"
+        shift
+        continue
+        ;;
+      --sent)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --sent"
+          return 1
+        fi
+        sent="$1"
+        shift
+        continue
+        ;;
+      --failed)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --failed"
+          return 1
+        fi
+        failed="$1"
+        shift
+        continue
+        ;;
+      --incoming)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --incoming"
+          return 1
+        fi
+        incoming="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily limit: unknown argument '$opt' for sms_daily_state_write_locked"
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]
+  then
+    echo_error "daily limit: --file is required for sms_daily_state_write_locked"
+    return 1
+  fi
+
+  if [[ -z "$date" ]]
+  then
+    echo_error "daily limit: --date is required for sms_daily_state_write_locked"
+    return 1
+  fi
+
+  if [[ -z "$sent" || ! "$sent" =~ ^-?[0-9]+$ ]]
+  then
+    sent=0
+  fi
+
+  if [[ -z "$failed" || ! "$failed" =~ ^-?[0-9]+$ ]]
+  then
+    failed=0
+  fi
+
+  if [[ -z "$incoming" || ! "$incoming" =~ ^-?[0-9]+$ ]]
+  then
+    incoming=0
+  fi
+
   dir="$(dirname "$file")"
 
-  local tmp
   if ! tmp="$(mktemp "$dir/.sms-count.XXXXXX")"
   then
     echo_error "daily limit: failed to create temporary file in '$dir'"
     return 1
   fi
 
-  local base
   base="{}"
   if [[ -r "$file" ]]
   then
@@ -4193,11 +4544,10 @@ sms_daily_state_write_locked() {
     fi
   fi
 
-  local new_json
   if ! new_json="$(jq \
     --arg date "$date" \
-    --arg label "$label" \
-    --arg msisdn "$msisdn" \
+    --arg label "${label:-}" \
+    --arg msisdn "${msisdn:-}" \
     --argjson sent "$sent" \
     --argjson failed "$failed" \
     --argjson incoming "$incoming" \
@@ -4208,16 +4558,21 @@ sms_daily_state_write_locked() {
       | (.outgoing.failed = $failed)
       | (.incoming.received = $incoming)' <<<"$base" 2>/dev/null)"
   then
-    new_json="$(jq -n \
+    if ! new_json="$(jq -n \
       --arg date "$date" \
-      --arg label "$label" \
-      --arg msisdn "$msisdn" \
+      --arg label "${label:-}" \
+      --arg msisdn "${msisdn:-}" \
       --argjson sent "$sent" \
       --argjson failed "$failed" \
       --argjson incoming "$incoming" \
       '((if $label == "" then {date:$date} else {date:$date, label:$label} end)
         * (if $msisdn == "" then {} else {msisdn:$msisdn} end)
         * {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}})')"
+    then
+      rm -f "$tmp"
+      echo_error "daily limit: failed to build counter JSON"
+      return 1
+    fi
   fi
 
   if ! printf '%s\n' "$new_json" >"$tmp"
@@ -4239,18 +4594,149 @@ sms_daily_state_write_locked() {
 
 # Atomically adjust counters for a state file, updating the current day.
 sms_daily_state_increment() {
-  local file="$1"
-  local label="$2"
-  local msisdn="$3"
-  local sent_delta="$4"
-  local failed_delta="$5"
-  local incoming_delta="$6"
-  local __sent_out_var="$7"
-  local __failed_out_var="$8"
-  local __incoming_out_var="$9"
+  local file
+  local label
+  local msisdn
+  local sent_delta
+  local failed_delta
+  local incoming_delta
+  local sent_out_var
+  local failed_out_var
+  local incoming_out_var
+  local today
+  local lock_handle
+  local stored_date
+  local stored_sent
+  local stored_failed
+  local stored_incoming
+  local stored_label
+  local stored_msisdn
+  local new_sent
+  local new_failed
+  local new_incoming
+  local opt
+
+  sent_delta=0
+  failed_delta=0
+  incoming_delta=0
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --file)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --file"
+          return 1
+        fi
+        file="$1"
+        shift
+        continue
+        ;;
+      --label)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --label"
+          return 1
+        fi
+        label="$1"
+        shift
+        continue
+        ;;
+      --msisdn)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn"
+          return 1
+        fi
+        msisdn="$1"
+        shift
+        continue
+        ;;
+      --sent-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --sent-delta"
+          return 1
+        fi
+        sent_delta="$1"
+        shift
+        continue
+        ;;
+      --failed-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --failed-delta"
+          return 1
+        fi
+        failed_delta="$1"
+        shift
+        continue
+        ;;
+      --incoming-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --incoming-delta"
+          return 1
+        fi
+        incoming_delta="$1"
+        shift
+        continue
+        ;;
+      --out-sent-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-sent-var"
+          return 1
+        fi
+        sent_out_var="$1"
+        shift
+        continue
+        ;;
+      --out-failed-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-failed-var"
+          return 1
+        fi
+        failed_out_var="$1"
+        shift
+        continue
+        ;;
+      --out-incoming-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --out-incoming-var"
+          return 1
+        fi
+        incoming_out_var="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily limit: unknown argument '$opt' for sms_daily_state_increment"
+        return 1
+        ;;
+    esac
+  done
 
   if [[ -z "$file" ]]
   then
+    echo_error "daily limit: --file is required for sms_daily_state_increment"
     return 1
   fi
 
@@ -4258,32 +4744,40 @@ sms_daily_state_increment() {
   then
     sent_delta=0
   fi
+
   if [[ -z "$failed_delta" || ! "$failed_delta" =~ ^-?[0-9]+$ ]]
   then
     failed_delta=0
   fi
+
   if [[ -z "$incoming_delta" || ! "$incoming_delta" =~ ^-?[0-9]+$ ]]
   then
     incoming_delta=0
   fi
 
-  local today
   today="$(date +%Y-%m-%d)"
 
-  local lock_handle
   if ! sms_daily_limit_lock_acquire "$file" lock_handle
   then
     return 1
   fi
 
-  local stored_date
-  local stored_sent
-  local stored_failed
-  local stored_incoming
-  local stored_label
-  local stored_msisdn
+  stored_sent=0
+  stored_failed=0
+  stored_incoming=0
 
-  sms_daily_state_read "$file" stored_date stored_sent stored_failed stored_incoming stored_label stored_msisdn
+  if ! sms_daily_state_read \
+    --file "$file" \
+    --out-date-var stored_date \
+    --out-sent-var stored_sent \
+    --out-failed-var stored_failed \
+    --out-incoming-var stored_incoming \
+    --out-label-var stored_label \
+    --out-msisdn-var stored_msisdn
+  then
+    sms_daily_limit_lock_release "$lock_handle"
+    return 1
+  fi
 
   if [[ "$stored_date" != "$today" ]]
   then
@@ -4296,14 +4790,11 @@ sms_daily_state_increment() {
   then
     label="$stored_label"
   fi
+
   if [[ -z "$msisdn" && -n "$stored_msisdn" ]]
   then
     msisdn="$stored_msisdn"
   fi
-
-  local new_sent
-  local new_failed
-  local new_incoming
 
   new_sent=$((stored_sent + sent_delta))
   new_failed=$((stored_failed + failed_delta))
@@ -4313,32 +4804,43 @@ sms_daily_state_increment() {
   then
     new_sent=0
   fi
+
   if (( new_failed < 0 ))
   then
     new_failed=0
   fi
+
   if (( new_incoming < 0 ))
   then
     new_incoming=0
   fi
 
-  if ! sms_daily_state_write_locked "$file" "$today" "$label" "$msisdn" "$new_sent" "$new_failed" "$new_incoming"
+  if ! sms_daily_state_write_locked \
+    --file "$file" \
+    --date "$today" \
+    --label "${label:-}" \
+    --msisdn "${msisdn:-}" \
+    --sent "$new_sent" \
+    --failed "$new_failed" \
+    --incoming "$new_incoming"
   then
     sms_daily_limit_lock_release "$lock_handle"
     return 1
   fi
 
-  if [[ -n "$__sent_out_var" ]]
+  if [[ -n "$sent_out_var" ]]
   then
-    printf -v "$__sent_out_var" '%s' "$new_sent"
+    printf -v "$sent_out_var" '%s' "$new_sent"
   fi
-  if [[ -n "$__failed_out_var" ]]
+
+  if [[ -n "$failed_out_var" ]]
   then
-    printf -v "$__failed_out_var" '%s' "$new_failed"
+    printf -v "$failed_out_var" '%s' "$new_failed"
   fi
-  if [[ -n "$__incoming_out_var" ]]
+
+  if [[ -n "$incoming_out_var" ]]
   then
-    printf -v "$__incoming_out_var" '%s' "$new_incoming"
+    printf -v "$incoming_out_var" '%s' "$new_incoming"
   fi
 
   sms_daily_limit_lock_release "$lock_handle"
@@ -4404,15 +4906,146 @@ sms_daily_limit_lock_release() {
 
 # Persist the current counter value for the given date.
 sms_daily_limit_write_state() {
-  local file="$1"
-  local date="$2"
-  local sent="$3"
-  local failed="${4:-0}"
-  local incoming="${5:-0}"
-  local label="${6:-}"
-  local msisdn="${7:-}"
+  local file
+  local date
+  local sent
+  local failed
+  local incoming
+  local label
+  local msisdn
+  local opt
 
-  if ! sms_daily_state_write_locked "$file" "$date" "$label" "$msisdn" "$sent" "$failed" "$incoming"
+  sent=0
+  failed=0
+  incoming=0
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --file)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --file"
+          return 1
+        fi
+        file="$1"
+        shift
+        continue
+        ;;
+      --date)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --date"
+          return 1
+        fi
+        date="$1"
+        shift
+        continue
+        ;;
+      --sent)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --sent"
+          return 1
+        fi
+        sent="$1"
+        shift
+        continue
+        ;;
+      --failed)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --failed"
+          return 1
+        fi
+        failed="$1"
+        shift
+        continue
+        ;;
+      --incoming)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --incoming"
+          return 1
+        fi
+        incoming="$1"
+        shift
+        continue
+        ;;
+      --label)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --label"
+          return 1
+        fi
+        label="$1"
+        shift
+        continue
+        ;;
+      --msisdn)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn"
+          return 1
+        fi
+        msisdn="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily limit: unknown argument '$opt' for sms_daily_limit_write_state"
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]
+  then
+    echo_error "daily limit: --file is required for sms_daily_limit_write_state"
+    return 1
+  fi
+
+  if [[ -z "$date" ]]
+  then
+    echo_error "daily limit: --date is required for sms_daily_limit_write_state"
+    return 1
+  fi
+
+  if [[ -z "$sent" || ! "$sent" =~ ^-?[0-9]+$ ]]
+  then
+    sent=0
+  fi
+
+  if [[ -z "$failed" || ! "$failed" =~ ^-?[0-9]+$ ]]
+  then
+    failed=0
+  fi
+
+  if [[ -z "$incoming" || ! "$incoming" =~ ^-?[0-9]+$ ]]
+  then
+    incoming=0
+  fi
+
+  if ! sms_daily_state_write_locked \
+    --file "$file" \
+    --date "$date" \
+    --label "${label:-}" \
+    --msisdn "${msisdn:-}" \
+    --sent "$sent" \
+    --failed "$failed" \
+    --incoming "$incoming"
   then
     return 1
   fi
@@ -4532,7 +5165,14 @@ sms_daily_limit_reserve() {
     local current_incoming=0
     local stored_label
     local stored_msisdn
-    sms_daily_state_read_today "$file" "$today" current current_failed current_incoming stored_label stored_msisdn
+    sms_daily_state_read_today \
+      --file "$file" \
+      --today "$today" \
+      --out-sent-var current \
+      --out-failed-var current_failed \
+      --out-incoming-var current_incoming \
+      --out-label-var stored_label \
+      --out-msisdn-var stored_msisdn
     entry_currents["$entry"]="$current"
     entry_failed["$entry"]="$current_failed"
     entry_incoming["$entry"]="$current_incoming"
@@ -4581,7 +5221,14 @@ sms_daily_limit_reserve() {
     then
       label="${entry_known_labels[$entry]:-}"
     fi
-    if ! sms_daily_limit_write_state "$file" "$today" "$new_count" "$stored_failed" "$stored_incoming" "$label" "$msisdn_value"
+    if ! sms_daily_limit_write_state \
+      --file "$file" \
+      --date "$today" \
+      --sent "$new_count" \
+      --failed "$stored_failed" \
+      --incoming "$stored_incoming" \
+      --label "$label" \
+      --msisdn "$msisdn_value"
     then
       echo_error "daily limit: failed to update counter for ${entry_labels[$entry]}"
       local prev_entry
@@ -4687,7 +5334,14 @@ sms_daily_limit_release() {
     local current_incoming=0
     local stored_label
     local stored_msisdn
-    sms_daily_state_read_today "$file" "$today" current current_failed current_incoming stored_label stored_msisdn
+    sms_daily_state_read_today \
+      --file "$file" \
+      --today "$today" \
+      --out-sent-var current \
+      --out-failed-var current_failed \
+      --out-incoming-var current_incoming \
+      --out-label-var stored_label \
+      --out-msisdn-var stored_msisdn
 
     local new_count=0
     if (( amount >= current ))
@@ -4703,7 +5357,14 @@ sms_daily_limit_release() {
       label_for_write="$stored_label"
     fi
 
-    if ! sms_daily_limit_write_state "$file" "$today" "$new_count" "$current_failed" "$current_incoming" "$label_for_write" "$stored_msisdn"
+    if ! sms_daily_limit_write_state \
+      --file "$file" \
+      --date "$today" \
+      --sent "$new_count" \
+      --failed "$current_failed" \
+      --incoming "$current_incoming" \
+      --label "$label_for_write" \
+      --msisdn "$stored_msisdn"
     then
       echo_warning "daily limit: failed to update counter while releasing quota for ${label}"
       rc=1
@@ -4789,7 +5450,10 @@ sms_daily_limit_log_success() {
         if [[ -n "$file" ]]
         then
           local stored_count=0
-          sms_daily_state_read_today "$file" "$today" stored_count
+          sms_daily_state_read_today \
+            --file "$file" \
+            --today "$today" \
+            --out-sent-var stored_count
           count="$stored_count"
         fi
       fi
@@ -4832,7 +5496,12 @@ sms_daily_limit_log_success() {
       then
         local msisdn="$SMS_DAILY_LIMIT_MSISDN"
         local new_count
-        if ! sms_daily_state_increment "$file" "$label" "$msisdn" "$sent_segments" 0 0 new_count "" ""
+        if ! sms_daily_state_increment \
+          --file "$file" \
+          --label "$label" \
+          --msisdn "$msisdn" \
+          --sent-delta "$sent_segments" \
+          --out-sent-var new_count
         then
           echo_warning "daily usage: failed to update counter for ${label} while limit disabled"
           return 1
@@ -4854,7 +5523,9 @@ sms_daily_limit_log_success() {
     if (( need_global ))
     then
       local global_sent
-      if sms_daily_usage_update_global "$sent_segments" 0 0 global_sent "" ""
+      if sms_daily_usage_update_global \
+        --sent-delta "$sent_segments" \
+        --out-sent-var global_sent
       then
         if [[ -n "$global_sent" ]]
         then
@@ -4867,14 +5538,286 @@ sms_daily_limit_log_success() {
   return 0
 }
 
+# Recompute the global statistics by aggregating all modem counters.
+sms_daily_usage_refresh_global() {
+  local sent_var
+  local failed_var
+  local incoming_var
+  local dir
+  local global_file
+  local today
+  local total_sent
+  local total_failed
+  local total_incoming
+  local path
+  local entry_sent
+  local entry_failed
+  local entry_incoming
+  local lock_handle
+  local base_label
+  local base_msisdn
+  local opt
+
+  total_sent=0
+  total_failed=0
+  total_incoming=0
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --out-sent-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-sent-var"
+          return 1
+        fi
+        sent_var="$1"
+        shift
+        continue
+        ;;
+      --out-failed-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-failed-var"
+          return 1
+        fi
+        failed_var="$1"
+        shift
+        continue
+        ;;
+      --out-incoming-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-incoming-var"
+          return 1
+        fi
+        incoming_var="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily usage: unknown argument '$opt' for sms_daily_usage_refresh_global"
+        return 1
+        ;;
+    esac
+  done
+
+  if ! dir="$(sms_daily_limit_state_dir)"
+  then
+    echo_warning "daily usage: failed to access usage state directory"
+    return 1
+  fi
+
+  if ! global_file="$(sms_daily_limit_state_file 'global')"
+  then
+    echo_warning "daily usage: failed to resolve global counter file"
+    return 1
+  fi
+
+  today="$(date +%Y-%m-%d)"
+
+  shopt -s nullglob
+  for path in "$dir"/sms-count-*.state
+  do
+    [[ -e "$path" ]] || continue
+    if [[ "$path" == "$global_file" ]]
+    then
+      continue
+    fi
+
+    entry_sent=0
+    entry_failed=0
+    entry_incoming=0
+    if ! sms_daily_state_read_today \
+      --file "$path" \
+      --today "$today" \
+      --out-sent-var entry_sent \
+      --out-failed-var entry_failed \
+      --out-incoming-var entry_incoming
+    then
+      continue
+    fi
+
+    if [[ ! "$entry_sent" =~ ^-?[0-9]+$ ]]
+    then
+      entry_sent=0
+    fi
+
+    if [[ ! "$entry_failed" =~ ^-?[0-9]+$ ]]
+    then
+      entry_failed=0
+    fi
+
+    if [[ ! "$entry_incoming" =~ ^-?[0-9]+$ ]]
+    then
+      entry_incoming=0
+    fi
+
+    total_sent=$(( total_sent + entry_sent ))
+    total_failed=$(( total_failed + entry_failed ))
+    total_incoming=$(( total_incoming + entry_incoming ))
+  done
+  shopt -u nullglob
+
+  if ! sms_daily_limit_lock_acquire "$global_file" lock_handle
+  then
+    echo_warning "daily usage: failed to lock global counter for refresh"
+    return 1
+  fi
+
+  base_label=""
+  base_msisdn=""
+  if ! sms_daily_state_read \
+    --file "$global_file" \
+    --out-label-var base_label \
+    --out-msisdn-var base_msisdn
+  then
+    base_label=""
+    base_msisdn=""
+  fi
+
+  if [[ -z "$base_label" ]]
+  then
+    base_label="global"
+  fi
+
+  if ! sms_daily_state_write_locked \
+    --file "$global_file" \
+    --date "$today" \
+    --label "$base_label" \
+    --msisdn "${base_msisdn:-}" \
+    --sent "$total_sent" \
+    --failed "$total_failed" \
+    --incoming "$total_incoming"
+  then
+    sms_daily_limit_lock_release "$lock_handle"
+    echo_warning "daily usage: failed to refresh global counter"
+    return 1
+  fi
+
+  sms_daily_limit_lock_release "$lock_handle"
+
+  if [[ -n "$sent_var" ]]
+  then
+    printf -v "$sent_var" '%s' "$total_sent"
+  fi
+
+  if [[ -n "$failed_var" ]]
+  then
+    printf -v "$failed_var" '%s' "$total_failed"
+  fi
+
+  if [[ -n "$incoming_var" ]]
+  then
+    printf -v "$incoming_var" '%s' "$total_incoming"
+  fi
+
+  return 0
+}
+
 # Update the global usage counters by applying the provided deltas.
 sms_daily_usage_update_global() {
-  local sent_delta="${1:-0}"
-  local failed_delta="${2:-0}"
-  local incoming_delta="${3:-0}"
-  local __sent_out_var="${4:-}"
-  local __failed_out_var="${5:-}"
-  local __incoming_out_var="${6:-}"
+  local sent_delta
+  local failed_delta
+  local incoming_delta
+  local sent_out_var
+  local failed_out_var
+  local incoming_out_var
+  local -a refresh_args
+  local opt
+
+  sent_delta=0
+  failed_delta=0
+  incoming_delta=0
+
+  while (( $# > 0 ))
+  do
+    opt="$1"
+    case "$opt" in
+      --sent-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --sent-delta"
+          return 1
+        fi
+        sent_delta="$1"
+        shift
+        continue
+        ;;
+      --failed-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --failed-delta"
+          return 1
+        fi
+        failed_delta="$1"
+        shift
+        continue
+        ;;
+      --incoming-delta)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --incoming-delta"
+          return 1
+        fi
+        incoming_delta="$1"
+        shift
+        continue
+        ;;
+      --out-sent-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-sent-var"
+          return 1
+        fi
+        sent_out_var="$1"
+        shift
+        continue
+        ;;
+      --out-failed-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-failed-var"
+          return 1
+        fi
+        failed_out_var="$1"
+        shift
+        continue
+        ;;
+      --out-incoming-var)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily usage: missing argument for --out-incoming-var"
+          return 1
+        fi
+        incoming_out_var="$1"
+        shift
+        continue
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo_error "daily usage: unknown argument '$opt' for sms_daily_usage_update_global"
+        return 1
+        ;;
+    esac
+  done
 
   if [[ -z "$sent_delta" || ! "$sent_delta" =~ ^-?[0-9]+$ ]]
   then
@@ -4894,33 +5837,27 @@ sms_daily_usage_update_global() {
     return 0
   fi
 
-  local file
-  if ! file="$(sms_daily_limit_state_file 'global')"
+  refresh_args=()
+
+  if [[ -n "$sent_out_var" ]]
   then
-    echo_warning "daily usage: failed to locate global counter file"
-    return 1
+    refresh_args+=("--out-sent-var" "$sent_out_var")
   fi
 
-  local new_sent
-  local new_failed
-  local new_incoming
-  if ! sms_daily_state_increment "$file" "global" "" "$sent_delta" "$failed_delta" "$incoming_delta" new_sent new_failed new_incoming
+  if [[ -n "$failed_out_var" ]]
   then
-    echo_warning "daily usage: failed to update global counter"
-    return 1
+    refresh_args+=("--out-failed-var" "$failed_out_var")
   fi
 
-  if [[ -n "$__sent_out_var" ]]
+  if [[ -n "$incoming_out_var" ]]
   then
-    printf -v "$__sent_out_var" '%s' "$new_sent"
+    refresh_args+=("--out-incoming-var" "$incoming_out_var")
   fi
-  if [[ -n "$__failed_out_var" ]]
+
+  if ! sms_daily_usage_refresh_global "${refresh_args[@]}"
   then
-    printf -v "$__failed_out_var" '%s' "$new_failed"
-  fi
-  if [[ -n "$__incoming_out_var" ]]
-  then
-    printf -v "$__incoming_out_var" '%s' "$new_incoming"
+    echo_warning "daily usage: failed to refresh global counter"
+    return 1
   fi
 
   return 0
@@ -4951,14 +5888,20 @@ sms_daily_usage_record_failure() {
   fi
 
   local updated_failed=0
-  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 "$attempts" 0 "" updated_failed ""
+  if ! sms_daily_state_increment \
+    --file "$file" \
+    --label "$label" \
+    --msisdn "$msisdn" \
+    --failed-delta "$attempts" \
+    --out-failed-var updated_failed
   then
     echo_warning "daily usage: failed to record failure for ${label}"
     return 1
   fi
 
   echo_info "daily usage: label='$label' failures=${updated_failed} today"
-  sms_daily_usage_update_global 0 "$attempts" 0 "" "" ""
+  sms_daily_usage_update_global \
+    --failed-delta "$attempts"
   return 0
 }
 
@@ -4988,7 +5931,12 @@ sms_daily_usage_record_incoming() {
   fi
 
   local updated_incoming=0
-  if ! sms_daily_state_increment "$file" "$label" "$msisdn" 0 0 1 "" "" updated_incoming
+  if ! sms_daily_state_increment \
+    --file "$file" \
+    --label "$label" \
+    --msisdn "$msisdn" \
+    --incoming-delta 1 \
+    --out-incoming-var updated_incoming
   then
     echo_warning "daily usage: failed to record incoming message for ${label}"
     return 1
@@ -4999,7 +5947,8 @@ sms_daily_usage_record_incoming() {
     label="$token"
   fi
   echo_info "daily usage: label='$label' received ${updated_incoming} message(s) today"
-  sms_daily_usage_update_global 0 0 1 "" "" ""
+  sms_daily_usage_update_global \
+    --incoming-delta 1
   return 0
 }
 
@@ -7705,6 +8654,11 @@ sms_usage_stats() {
     files+=("$file")
   fi
 
+  if ! sms_daily_usage_refresh_global
+  then
+    echo_warning "daily usage: failed to refresh global stats before display"
+  fi
+
   if (( ${#files[@]} == 0 ))
   then
     if custom_json_requested
@@ -7759,7 +8713,17 @@ sms_usage_stats() {
     file="${files[$file_index]}"
     token="${tokens[$file_index]}"
 
-    sms_daily_state_read "$file" date sent failed incoming label msisdn
+    if ! sms_daily_state_read \
+      --file "$file" \
+      --out-date-var date \
+      --out-sent-var sent \
+      --out-failed-var failed \
+      --out-incoming-var incoming \
+      --out-label-var label \
+      --out-msisdn-var msisdn
+    then
+      continue
+    fi
 
     if [[ ! "$sent" =~ ^-?[0-9]+$ ]]
     then
