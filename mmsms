@@ -2001,7 +2001,7 @@ country_to_cc() {
 #  - Derive from OWN_NUMBER (heuristic: +1 -> 1, otherwise first two digits)
 get_home_cc() {
   local target_mid="${1:-}"
-  local cc=""
+  local cc
   if [[ -n "$HOME_CC" ]]
   then
     cc="${HOME_CC//[^0-9]/}"
@@ -2010,7 +2010,7 @@ get_home_cc() {
   fi
 
   # Prefer using load_own_number to respect current MODEM context
-  local own=""
+  local own
   if [[ -n "$target_mid" ]]
   then
     if MODEM="$target_mid" load_own_number
@@ -2171,7 +2171,7 @@ modem_info_matches_selector() {
   local selector_lc="${selector,,}"
   local selector_digits="${selector//[^0-9+]/}"
 
-  local cc_filter=""
+  local cc_filter
   if ! cc_filter="$(country_to_cc "$selector")"
   then
     cc_filter=""
@@ -2558,7 +2558,7 @@ get_modem_at_port() {
 
   while :
   do
-    local mmcli_out="" json="" port=""
+    local mmcli_out json port
 
     if ! mmcli_out="$(mmcli -m "$MODEM" -J 2>&1)"
     then
@@ -2664,7 +2664,7 @@ at_command_direct() {
   echo_debug "AT TX -> $cmd"
   printf '%s\r' "$cmd" >&$fd
 
-  local resp="" line="" timeout_count=0
+  local resp line timeout_count=0
   while (( timeout_count < AT_FALLBACK_MAX_READS ))
   do
     if ! read -r -t "$AT_FALLBACK_READ_TIMEOUT" -u $fd line
@@ -2733,7 +2733,7 @@ configure_quectel_modem() {
 modem_vendor_from_info_json() {
   local info_json="$1"
 
-  local plugin manufacturer vendor=""
+  local plugin manufacturer vendor
   plugin="$(jq -r '.modem.generic.plugin // ""' <<<"$info_json")"
   manufacturer="$(jq -r '.modem.generic.manufacturer // ""' <<<"$info_json")"
 
@@ -2806,7 +2806,7 @@ configure_modem_vendor() {
 reset_quectel_modem() {
   reset_log "quectel: sending AT+QPOWD=0"
 
-  local resp=""
+  local resp
   if ! resp="$(at_command 'AT+QPOWD=0')"
   then
     echo_error "quectel reset failed"
@@ -2848,7 +2848,7 @@ reset_modem_vendor() {
 # Find the sysfs path backing a modem port name.
 usb_sysfs_path_for_port() {
   local port="$1"
-  local path=""
+  local path
   local -a bases=(
     "/sys/class/tty/$port"
     "/sys/class/usbmisc/$port"
@@ -3329,7 +3329,7 @@ at_decode_ucs2() {
 
   if [[ "$s" =~ ^([0-9A-Fa-f]{4})+$ ]]
   then
-    local out=""
+    local out
     local pos=0 len=${#s} hb
     while (( pos < len ))
     do
@@ -3445,7 +3445,7 @@ sms_read_raw() {
 # Collect rich JSON details for an SMS message using mmcli.
 sms_read_details_json() {
   local msg_id="$1"
-  local js pdu msg_type own="" number smsc party_info direction remote_label local_label remote_value local_value payload
+  local js pdu msg_type own number smsc party_info direction remote_label local_label remote_value local_value payload
 
 
   if ! js="$(mmcli_cmd --sms "$msg_id" -J)"
@@ -3807,7 +3807,7 @@ sms_daily_limit_enabled() {
           continue
         fi
 
-        local normalized=""
+        local normalized
         if normalized="$(sms_daily_limit_normalize_msisdn "$trimmed_key")"
         then
           SMS_DAILY_LIMIT_MSISDN_LIMITS["$normalized"]="$value"
@@ -4048,9 +4048,9 @@ sms_daily_state_read() {
   local __label_var="$6"
   local __msisdn_var="$7"
 
-  local state_date=""
-  local state_label=""
-  local state_msisdn=""
+  local state_date
+  local state_label
+  local state_msisdn
   local state_sent=0
   local state_failed=0
   local state_incoming=0
@@ -4123,12 +4123,12 @@ sms_daily_state_read_today() {
   local __label_var="$6"
   local __msisdn_var="$7"
 
-  local day_date=""
+  local day_date
   local day_sent=0
   local day_failed=0
   local day_incoming=0
-  local day_label=""
-  local day_msisdn=""
+  local day_label
+  local day_msisdn
 
   sms_daily_state_read "$file" day_date day_sent day_failed day_incoming day_label day_msisdn
 
@@ -4454,7 +4454,7 @@ sms_daily_limit_reserve() {
     return 1
   fi
 
-  local msisdn_limit=""
+  local msisdn_limit
   if [[ -n "$SMS_DAILY_LIMIT_MSISDN" ]]
   then
     msisdn_limit="${SMS_DAILY_LIMIT_MSISDN_LIMITS[$SMS_DAILY_LIMIT_MSISDN]:-}"
@@ -4502,7 +4502,7 @@ sms_daily_limit_reserve() {
   for entry in "${entries[@]}"
   do
     local file="${entry_files[$entry]}"
-    local lock_handle=""
+    local lock_handle
     if ! sms_daily_limit_lock_acquire "$file" lock_handle
     then
       echo_error "daily limit: unable to lock counter for ${entry_labels[$entry]}"
@@ -4674,7 +4674,7 @@ sms_daily_limit_release() {
       continue
     fi
 
-    local lock_handle=""
+    local lock_handle
     if ! sms_daily_limit_lock_acquire "$file" lock_handle
     then
       echo_warning "daily limit: could not lock counter to release quota for ${label}"
@@ -5191,13 +5191,13 @@ sms_send_chunk_text() {
   local chunk_total="${4:-1}"
   local chunk_size="${5:-}"
 
-  local chunk_label=""
+  local chunk_label
   if (( chunk_total > 1 ))
   then
     chunk_label=" chunk ${chunk_index}/${chunk_total}"
   fi
 
-  local chunk_size_note=""
+  local chunk_size_note
   if (( chunk_total > 1 )) && [[ -n "$chunk_size" ]]
   then
     chunk_size_note=" (chunk-size=$chunk_size)"
@@ -5628,7 +5628,7 @@ sms_prune_all_modems() {
 
 # Print the header row for SMS listing output.
 sms_list_print_header() {
-  local include_mid=""
+  local include_mid
   local header
 
   while (( $# > 0 ))
@@ -5667,7 +5667,7 @@ sms_list_print_entry() {
   local js="$3"
   shift 3
 
-  local include_mid=""
+  local include_mid
   local maxlen=80
   local sender text msg_type pdu
 
@@ -5742,7 +5742,7 @@ sms_list_pretty() {
   # When listing for all modems, iterate them explicitly
   if [[ -n "$ALL_MODEMS" ]]
   then
-    local mids mid had_any=""
+    local mids mid had_any
     if ! mapfile -t mids < <(list_modem_ids_sorted)
     then
       echo_error "failed to list modems"
@@ -5861,7 +5861,7 @@ sms_list_pretty() {
           fi
           pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
           msg_type="$(pdu_to_type "$pdu")"
-          local json_item=""
+          local json_item
           json_item="$(jq -c \
             --arg mid "$mid" \
             --arg id "$id" \
@@ -5962,7 +5962,7 @@ sms_list_pretty() {
   then
     # Emit one compact JSON object per SMS, then wrap into an array
     # Determine our own number for recipient mapping of received messages
-    local own=""
+    local own
     if load_own_number
     then
       own="$OWN_NUMBER"
@@ -6257,7 +6257,7 @@ enable_all_modems() {
 # Reset the current modem with optional service restarts and USB replugging.
 modem_reset() {
   local service="/etc/init.d/modemmanager"
-  local has_service=""
+  local has_service
 
   if [[ -x "$service" ]]
   then
@@ -6266,7 +6266,7 @@ modem_reset() {
     echo_warning "modemmanager init script not found or not executable at $service"
   fi
 
-  local info_json="" vendor=""
+  local info_json vendor
   if info_json="$(mmcli_cmd -J)"
   then
     if ! vendor="$(modem_vendor_from_info_json "$info_json")"
@@ -6967,7 +6967,7 @@ get_smsc_number() {
 
 # Build a structured JSON object summarizing modem status details.
 modem_status_details_json() {
-  local js own smsc country_code="" country_label="" payload
+  local js own smsc country_code country_label payload
   local fallback_modem="$MODEM"
 
   if ! js="$(mmcli_cmd -J)"
@@ -6987,10 +6987,7 @@ modem_status_details_json() {
     OWN_NUMBER="$own"
   fi
 
-  if ! smsc="$(get_smsc_number)"
-  then
-    smsc=""
-  fi
+  smsc="$(get_smsc_number)" || smsc=""
   smsc="$(ensure_plus "$smsc")"
 
   if [[ "$own" == +* ]]
@@ -7570,10 +7567,7 @@ modem_number() {
 # Print the modem's configured SMSC number for the current modem.
 modem_smsc_single() {
   local smsc
-  if ! smsc="$(get_smsc_number)"
-  then
-    smsc=""
-  fi
+  smsc="$(get_smsc_number)" || smsc=""
 
   if custom_json_requested
   then
@@ -7891,7 +7885,7 @@ watch_handle_sms() {
 
     # Determine recipient (SIM MSISDN) for the modem that received the SMS
     # Prefer querying the current modem directly to avoid cross-modem mixups.
-    local recipient=""
+    local recipient
     local om_json
     if om_json="$(mmcli_cmd -J)"
     then
@@ -8055,7 +8049,7 @@ watch_messages() {
     watch_start_enable_monitor
   fi
 
-  local current_modem_id=""
+  local current_modem_id
   while IFS= read -r line
   do
     # Track the modem id from the signal's path
@@ -8099,7 +8093,7 @@ command_requires_modem_resolution() {
 # Resolve MODEM to a concrete modem id and log the selection context.
 resolve_modem_selection() {
   local cmd="$1"
-  local defer_resolution=""
+  local defer_resolution
 
   if [[ "$cmd" == "enable" && -n "$ENABLE_WAIT_MODEM" && -z "$ALL_MODEMS" ]]
   then
@@ -8219,7 +8213,7 @@ resolve_modem_selection() {
 
 # Parse CLI arguments, resolve configuration, and dispatch the requested command.
 main() {
-  local command=""
+  local command
   local -a PRE_ARGS=()
   local -a ARGS=()
   local -a DEBUG_FLAGS=()
@@ -8459,7 +8453,7 @@ main() {
     fi
   fi
 
-  local dbg_args="" dbg_flags=""
+  local dbg_args dbg_flags
   if (( ${#DEBUG_FLAGS[@]} > 0 ))
   then
     local dbg_flags_str
