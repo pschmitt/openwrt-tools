@@ -2808,11 +2808,22 @@ mmsms_service_action() {
   "/etc/init.d/${SCRIPT_NAME}" "$@"
 }
 
+mmsms_service_debug_cleanup() {
+  echo_info "Restarting $SCRIPT_NAME service after debug session"
+  if ! mmsms_service_action start
+  then
+    echo_error "failed to start $SCRIPT_NAME service"
+    return 1
+  fi
+}
+
 # Stop the service, run a debug watch session with optional flags, then start service again.
 mmsms_service_debug() {
   local -a default_flags=(--debug --all --enable)
   local -a watch_flags=()
   local -a extra_flags=("$@")
+
+  trap 'mmsms_service_debug_cleanup' EXIT
 
   if (( ${#extra_flags[@]} == 0 ))
   then
@@ -2831,19 +2842,11 @@ mmsms_service_debug() {
     fi
   fi
 
-  local watch_flags_desc=""
-  if (( ${#watch_flags[@]} > 0 ))
-  then
-    printf -v watch_flags_desc '%q ' "${watch_flags[@]}"
-    watch_flags_desc="${watch_flags_desc%% }"
-  fi
-
   echo_info "Stopping $SCRIPT_NAME service for debug session"
-  local stop_rc=0
   if ! mmsms_service_action stop
   then
     echo_error "failed to stop $SCRIPT_NAME service"
-    stop_rc=1
+    return 1
   fi
 
   local debug_prev="$DEBUG"
@@ -2859,7 +2862,14 @@ mmsms_service_debug() {
   else
     echo_warning "config file not readable: $CONFIG_FILE"
   fi
-  DEBUG="$debug_prev"
+  DEBUG="$debug_prev" # restore
+
+  local watch_flags_desc
+  if (( ${#watch_flags[@]} > 0 ))
+  then
+    printf -v watch_flags_desc '%q ' "${watch_flags[@]}"
+    watch_flags_desc="${watch_flags_desc%% }"
+  fi
 
   if [[ -n "$watch_flags_desc" ]]
   then
@@ -2869,24 +2879,14 @@ mmsms_service_debug() {
     echo_debug "service debug watch has no flags"
     echo_info "Starting $SCRIPT_NAME watch for debug session"
   fi
-  local watch_rc=0
-  CONFIG_FILE="$CONFIG_FILE" MODEM="$MODEM" QUIET="$QUIET" ECHO_SYSLOG="$ECHO_SYSLOG" \
-    VERBOSE="$VERBOSE" NO_COLOR="$NO_COLOR" "$0" watch "${watch_flags[@]}"
-  watch_rc=$?
 
-  echo_info "Restarting $SCRIPT_NAME service after debug session"
-  local start_rc=0
-  if ! mmsms_service_action start
-  then
-    echo_error "failed to start $SCRIPT_NAME service"
-    start_rc=1
-  fi
-
-  local rc="$stop_rc"
-  (( watch_rc != 0 )) && rc="$watch_rc"
-  (( start_rc != 0 )) && rc="$start_rc"
-
-  return "$rc"
+  CONFIG_FILE="$CONFIG_FILE" \
+  MODEM="$MODEM" \
+  QUIET="$QUIET" \
+  ECHO_SYSLOG="$ECHO_SYSLOG" \
+  VERBOSE="$VERBOSE" \
+  NO_COLOR="$NO_COLOR" \
+    "$0" watch "${watch_flags[@]}"
 }
 
 # Update the repository and optionally restart the service after pulling.
@@ -4424,13 +4424,8 @@ enable_modem() {
         resolve_status=1
       fi
     else
-      resolve_output="$(get_modem_id "$selector" 2>&1)"
+      resolve_output="$(get_modem_id "$selector")"
       resolve_status=$?
-      if (( resolve_status == 0 ))
-      then
-        resolved_id="$(trim "$resolve_output")"
-        break
-      fi
       last_error="$resolve_output"
       last_error_is_custom=""
     fi
