@@ -5755,7 +5755,7 @@ sms_list_pretty() {
       then
         printf '[]\n'
       else
-        echo "no messages"
+        echo "*no messages*"
       fi
 
       return 0
