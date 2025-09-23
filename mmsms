@@ -20,6 +20,20 @@ SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
 SMS_RETRY_COUNT="${SMS_RETRY_COUNT:-${SMS_SEND_RETRY_COUNT:-${MAX_RETRY:-3}}}"
 SMS_CHUNK_SIZE="${SMS_CHUNK_SIZE:-}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-4000}"
+MAX_MESSAGES_PER_DAY="${MAX_MESSAGES_PER_DAY:-}"
+SMS_DAILY_LIMIT_DIR="${SMS_DAILY_LIMIT_DIR:-/var/lib/mmsms}"
+SMS_DAILY_LIMIT_STATUS=""
+SMS_DAILY_LIMIT_GLOBAL_LIMIT=""
+SMS_DAILY_LIMIT_KEY=""
+SMS_DAILY_LIMIT_LABEL=""
+SMS_DAILY_LIMIT_MSISDN=""
+declare -A SMS_DAILY_LIMIT_MSISDN_LIMITS=()
+declare -a SMS_DAILY_LIMIT_ACTIVE_KEYS=()
+declare -A SMS_DAILY_LIMIT_ACTIVE_FILES=()
+declare -A SMS_DAILY_LIMIT_ACTIVE_LABELS=()
+declare -A SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+SMS_DAILY_LIMIT_RESERVED=0
+SMS_DAILY_LIMIT_SENT=0
 
 AT_FALLBACK_MAX_READS="${AT_FALLBACK_MAX_READS:-25}"
 AT_FALLBACK_READ_TIMEOUT="${AT_FALLBACK_READ_TIMEOUT:-0.2}"
@@ -3340,6 +3354,671 @@ sms_read_json() {
   printf '%s\n' "$payload"
 }
 
+# Normalize a phone number to +E.164 form for limit matching.
+sms_daily_limit_normalize_msisdn() {
+  local raw
+  raw="$(trim "${1:-}")"
+  raw="${raw//[[:space:]]/}"
+  raw="${raw//[^0-9+]/}"
+
+  if [[ -z "$raw" ]]
+  then
+    return 1
+  fi
+
+  if [[ "$raw" =~ ^\+?[0-9]+$ ]]
+  then
+    raw="${raw#+}"
+    printf '+%s' "$raw"
+    return 0
+  fi
+
+  return 1
+}
+
+
+# Determine whether the daily SMS limit should be enforced.
+sms_daily_limit_enabled() {
+  if [[ "$SMS_DAILY_LIMIT_STATUS" == "enabled" ]]
+  then
+    return 0
+  fi
+
+  if [[ "$SMS_DAILY_LIMIT_STATUS" == "disabled" || "$SMS_DAILY_LIMIT_STATUS" == "invalid" ]]
+  then
+    return 1
+  fi
+
+  SMS_DAILY_LIMIT_GLOBAL_LIMIT=""
+  SMS_DAILY_LIMIT_MSISDN_LIMITS=()
+
+  local found_valid=0
+  local found_invalid=0
+
+  local decl
+  if decl="$(declare -p MAX_DAILY_MESSAGES 2>/dev/null)"
+  then
+    if [[ "$decl" == "declare -A"* ]]
+    then
+      local -a limit_keys=()
+      eval "limit_keys=(\"\${!MAX_DAILY_MESSAGES[@]}\")"
+
+      local key
+      for key in "${limit_keys[@]}"
+      do
+        local value
+        eval "value=\${MAX_DAILY_MESSAGES[\"$key\"]}"
+        value="$(trim "$value")"
+        if [[ -z "$value" ]]
+        then
+          continue
+        fi
+
+        if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value <= 0 ))
+        then
+          echo_warning "ignoring MAX_DAILY_MESSAGES['$key']='$value'; expected positive integer"
+          found_invalid=1
+          continue
+        fi
+
+        local trimmed_key="$(trim "$key")"
+        if [[ -z "$trimmed_key" ]]
+        then
+          continue
+        fi
+
+        local lower_key="${trimmed_key,,}"
+        if [[ "$lower_key" == "global" ]]
+        then
+          SMS_DAILY_LIMIT_GLOBAL_LIMIT="$value"
+          found_valid=1
+          continue
+        fi
+
+        local normalized=""
+        if normalized="$(sms_daily_limit_normalize_msisdn "$trimmed_key")"
+        then
+          SMS_DAILY_LIMIT_MSISDN_LIMITS["$normalized"]="$value"
+          found_valid=1
+        else
+          echo_warning "ignoring MAX_DAILY_MESSAGES['$key']='$value'; expected phone number key"
+          found_invalid=1
+        fi
+      done
+    else
+      local scalar
+      scalar="$(trim "${MAX_DAILY_MESSAGES:-}")"
+      if [[ -n "$scalar" ]]
+      then
+        if [[ "$scalar" =~ ^[0-9]+$ ]] && (( scalar > 0 ))
+        then
+          SMS_DAILY_LIMIT_GLOBAL_LIMIT="$scalar"
+          found_valid=1
+        else
+          echo_warning "ignoring MAX_DAILY_MESSAGES='$scalar'; expected positive integer"
+          found_invalid=1
+        fi
+      fi
+    fi
+  fi
+
+  local legacy
+  legacy="$(trim "${MAX_MESSAGES_PER_DAY:-}")"
+  if [[ -n "$legacy" ]]
+  then
+    if [[ "$legacy" =~ ^[0-9]+$ ]] && (( legacy > 0 ))
+    then
+      if [[ -z "$SMS_DAILY_LIMIT_GLOBAL_LIMIT" ]]
+      then
+        SMS_DAILY_LIMIT_GLOBAL_LIMIT="$legacy"
+        found_valid=1
+      elif [[ "$legacy" != "$SMS_DAILY_LIMIT_GLOBAL_LIMIT" ]]
+      then
+        echo_warning "ignoring MAX_MESSAGES_PER_DAY='$legacy'; global limit already set via MAX_DAILY_MESSAGES"
+      fi
+    else
+      echo_warning "ignoring MAX_MESSAGES_PER_DAY='$legacy'; expected positive integer"
+      found_invalid=1
+    fi
+  fi
+
+  if (( found_valid ))
+  then
+    SMS_DAILY_LIMIT_STATUS="enabled"
+    return 0
+  fi
+
+  if (( found_invalid ))
+  then
+    SMS_DAILY_LIMIT_STATUS="invalid"
+  else
+    SMS_DAILY_LIMIT_STATUS="disabled"
+  fi
+
+  return 1
+}
+
+# Ensure the directory used for storing daily limit state exists.
+sms_daily_limit_state_dir() {
+  local dir="${SMS_DAILY_LIMIT_DIR:-}"
+  dir="$(trim "$dir")"
+
+  if [[ -z "$dir" ]]
+  then
+    dir="/var/lib/mmsms"
+  fi
+
+  if [[ ! -d "$dir" ]]
+  then
+    if ! mkdir -p "$dir"
+    then
+      echo_error "daily limit: failed to create state directory '$dir'"
+      return 1
+    fi
+  fi
+
+  printf '%s' "$dir"
+  return 0
+}
+
+# Identify the SIM/modem used for tracking daily limits.
+sms_daily_limit_identity() {
+  local label=""
+  local modem_hint=""
+  local info_json=""
+  SMS_DAILY_LIMIT_MSISDN=""
+
+  if load_own_number
+  then
+    label="$OWN_NUMBER"
+  fi
+
+  if [[ -z "$label" || -z "$modem_hint" ]]
+  then
+    if info_json="$(mmcli_cmd -J 2>/dev/null)"
+    then
+      if [[ -z "$modem_hint" ]]
+      then
+        modem_hint="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$info_json")"
+      fi
+      if [[ -z "$label" ]]
+      then
+        label="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
+      fi
+    fi
+  fi
+
+  if [[ -n "$label" ]]
+  then
+    label="$(ensure_plus "$label")"
+  fi
+
+  if [[ -z "$label" ]]
+  then
+    if [[ -n "$modem_hint" ]]
+    then
+      label="modem $modem_hint"
+    elif [[ -n "$MODEM" ]]
+    then
+      label="modem $MODEM"
+      modem_hint="$MODEM"
+    else
+      label="modem"
+    fi
+  fi
+
+  local normalized=""
+  if normalized="$(sms_daily_limit_normalize_msisdn "$label")"
+  then
+    SMS_DAILY_LIMIT_MSISDN="$normalized"
+  fi
+
+  local key_source="$label"
+  if [[ -n "$modem_hint" && "$modem_hint" != "$label" ]]
+  then
+    key_source="${key_source}_${modem_hint}"
+  fi
+
+  local sanitized="${key_source//[^A-Za-z0-9]/_}"
+  sanitized="${sanitized##_}"
+  if [[ -z "$sanitized" ]]
+  then
+    sanitized="modem"
+  fi
+
+  SMS_DAILY_LIMIT_LABEL="$label"
+  SMS_DAILY_LIMIT_KEY="$sanitized"
+  return 0
+}
+
+# Return the full path to the counter file for a given identity token.
+sms_daily_limit_state_file() {
+  local token="${1:-}"
+
+  if [[ -z "$token" ]]
+  then
+    if ! sms_daily_limit_identity
+    then
+      return 1
+    fi
+    token="$SMS_DAILY_LIMIT_KEY"
+  fi
+
+  local dir
+  if ! dir="$(sms_daily_limit_state_dir)"
+  then
+    return 1
+  fi
+
+  printf '%s/sms-count-%s.state' "$dir" "$token"
+  return 0
+}
+
+# Acquire an exclusive lock for manipulating the counter file.
+sms_daily_limit_lock_acquire() {
+  local file="$1"
+  local __out_var="$2"
+  local lock_path="${file}.lock"
+
+  if command -v flock >/dev/null 2>&1
+  then
+    exec {__lock_fd}>"$lock_path" || return 1
+    if flock "$__lock_fd"
+    then
+      printf -v "$__out_var" 'flock:%s:%s' "$__lock_fd" "$lock_path"
+      return 0
+    fi
+    exec {__lock_fd}>&-
+  fi
+
+  local attempts=0
+  local max_attempts=50
+  while ! ( set -o noclobber; : >"$lock_path" ) 2>/dev/null
+  do
+    sleep 0.1
+    attempts=$((attempts + 1))
+    if (( attempts >= max_attempts ))
+    then
+      return 1
+    fi
+  done
+
+  printf -v "$__out_var" 'file:%s' "$lock_path"
+  return 0
+}
+
+# Release a previously acquired counter lock.
+sms_daily_limit_lock_release() {
+  local handle="$1"
+  [[ -z "$handle" ]] && return 0
+
+  local type="${handle%%:*}"
+  local rest="${handle#*:}"
+
+  case "$type" in
+    flock)
+      local fd="${rest%%:*}"
+      local path="${rest#*:}"
+      if [[ "$fd" =~ ^[0-9]+$ ]]
+      then
+        eval "exec ${fd}>&-"
+      fi
+      [[ -n "$path" ]] && rm -f "$path"
+      ;;
+    file)
+      [[ -n "$rest" ]] && rm -f "$rest"
+      ;;
+  esac
+}
+
+# Persist the current counter value for the given date.
+sms_daily_limit_write_state() {
+  local file="$1"
+  local date="$2"
+  local count="$3"
+
+  local dir
+  dir="$(dirname "$file")"
+
+  local tmp
+  if ! tmp="$(mktemp "$dir/.sms-count.XXXXXX")"
+  then
+    echo_error "daily limit: failed to create temporary file in '$dir'"
+    return 1
+  fi
+
+  if ! printf '%s %s\n' "$date" "$count" >"$tmp"
+  then
+    rm -f "$tmp"
+    echo_error "daily limit: failed to write temporary counter file"
+    return 1
+  fi
+
+  if ! mv "$tmp" "$file"
+  then
+    rm -f "$tmp"
+    echo_error "daily limit: failed to update counter file '$file'"
+    return 1
+  fi
+
+  return 0
+}
+
+# Reserve capacity for the specified number of outgoing SMS segments.
+sms_daily_limit_reserve() {
+  local requested="$1"
+
+  if ! sms_daily_limit_enabled
+  then
+    return 0
+  fi
+
+  if [[ -z "$requested" || ! "$requested" =~ ^[0-9]+$ ]] || (( requested <= 0 ))
+  then
+    return 0
+  fi
+
+  local -a entries=()
+  declare -A entry_limits=()
+  declare -A entry_labels=()
+  declare -A entry_tokens=()
+
+  if [[ -n "$SMS_DAILY_LIMIT_GLOBAL_LIMIT" ]]
+  then
+    entries+=("global")
+    entry_limits["global"]="$SMS_DAILY_LIMIT_GLOBAL_LIMIT"
+    entry_labels["global"]="global"
+    entry_tokens["global"]="global"
+  fi
+
+  if ! sms_daily_limit_identity
+  then
+    return 1
+  fi
+
+  local msisdn_limit=""
+  if [[ -n "$SMS_DAILY_LIMIT_MSISDN" ]]
+  then
+    msisdn_limit="${SMS_DAILY_LIMIT_MSISDN_LIMITS[$SMS_DAILY_LIMIT_MSISDN]:-}"
+  fi
+
+  if [[ -n "$msisdn_limit" ]]
+  then
+    local per_key="msisdn:${SMS_DAILY_LIMIT_KEY}"
+    entries+=("$per_key")
+    entry_limits["$per_key"]="$msisdn_limit"
+    entry_labels["$per_key"]="$SMS_DAILY_LIMIT_LABEL"
+    entry_tokens["$per_key"]="$SMS_DAILY_LIMIT_KEY"
+  fi
+
+  if (( ${#entries[@]} == 0 ))
+  then
+    return 0
+  fi
+
+  declare -A entry_files=()
+  local entry other
+  for entry in "${entries[@]}"
+  do
+    local token="${entry_tokens[$entry]}"
+    local file
+    if ! file="$(sms_daily_limit_state_file "$token")"
+    then
+      return 1
+    fi
+    entry_files["$entry"]="$file"
+  done
+
+  local today
+  today="$(date +%Y-%m-%d)"
+
+  declare -A entry_locks=()
+  declare -A entry_currents=()
+  declare -A entry_prev_exists=()
+  declare -A entry_prev_content=()
+
+  for entry in "${entries[@]}"
+  do
+    local file="${entry_files[$entry]}"
+    local lock_handle=""
+    if ! sms_daily_limit_lock_acquire "$file" lock_handle
+    then
+      echo_error "daily limit: unable to lock counter for ${entry_labels[$entry]}"
+      for other in "${entries[@]}"
+      do
+        if [[ -n "${entry_locks[$other]:-}" ]]
+        then
+          sms_daily_limit_lock_release "${entry_locks[$other]}"
+        fi
+      done
+      return 1
+    fi
+
+    entry_locks["$entry"]="$lock_handle"
+
+    if [[ -e "$file" ]]
+    then
+      entry_prev_exists["$entry"]=1
+      entry_prev_content["$entry"]="$(cat "$file" 2>/dev/null)"
+    else
+      entry_prev_exists["$entry"]=0
+      entry_prev_content["$entry"]=""
+    fi
+
+    local current=0
+    local stored_date=""
+    local stored_count=""
+    if [[ -r "$file" ]]
+    then
+      read -r stored_date stored_count <"$file" || true
+      if [[ "$stored_date" == "$today" && "$stored_count" =~ ^[0-9]+$ ]]
+      then
+        current="$stored_count"
+      fi
+    fi
+    entry_currents["$entry"]="$current"
+  done
+
+  declare -A entry_new_counts=()
+  for entry in "${entries[@]}"
+  do
+    local limit="${entry_limits[$entry]}"
+    local current="${entry_currents[$entry]}"
+    if (( current + requested > limit ))
+    then
+      local label="${entry_labels[$entry]}"
+      echo_error "daily SMS limit reached for ${label} (limit=$limit, used=$current, requested=$requested)"
+      for other in "${entries[@]}"
+      do
+        if [[ -n "${entry_locks[$other]:-}" ]]
+        then
+          sms_daily_limit_lock_release "${entry_locks[$other]}"
+        fi
+      done
+      return 1
+    fi
+    entry_new_counts["$entry"]=$((current + requested))
+  done
+
+  local -a updated_entries=()
+  for entry in "${entries[@]}"
+  do
+    local file="${entry_files[$entry]}"
+    local new_count="${entry_new_counts[$entry]}"
+    if ! sms_daily_limit_write_state "$file" "$today" "$new_count"
+    then
+      echo_error "daily limit: failed to update counter for ${entry_labels[$entry]}"
+      local prev_entry
+      for prev_entry in "${updated_entries[@]}"
+      do
+        local prev_file="${entry_files[$prev_entry]}"
+        if (( ${entry_prev_exists[$prev_entry]} ))
+        then
+          printf '%s\n' "${entry_prev_content[$prev_entry]}" >"$prev_file" 2>/dev/null || true
+        else
+          rm -f "$prev_file" 2>/dev/null || true
+        fi
+      done
+      for other in "${entries[@]}"
+      do
+        if [[ -n "${entry_locks[$other]:-}" ]]
+        then
+          sms_daily_limit_lock_release "${entry_locks[$other]}"
+        fi
+      done
+      return 1
+    fi
+    updated_entries+=("$entry")
+  done
+
+  for entry in "${entries[@]}"
+  do
+    if [[ -n "${entry_locks[$entry]:-}" ]]
+    then
+      sms_daily_limit_lock_release "${entry_locks[$entry]}"
+    fi
+  done
+
+  SMS_DAILY_LIMIT_ACTIVE_KEYS=("${entries[@]}")
+  SMS_DAILY_LIMIT_ACTIVE_FILES=()
+  SMS_DAILY_LIMIT_ACTIVE_LABELS=()
+  SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+
+  for entry in "${entries[@]}"
+  do
+    SMS_DAILY_LIMIT_ACTIVE_FILES["$entry"]="${entry_files[$entry]}"
+    SMS_DAILY_LIMIT_ACTIVE_LABELS["$entry"]="${entry_labels[$entry]}"
+    SMS_DAILY_LIMIT_ACTIVE_LIMITS["$entry"]="${entry_limits[$entry]}"
+
+    local label="${entry_labels[$entry]}"
+    local limit="${entry_limits[$entry]}"
+    local new_count="${entry_new_counts[$entry]}"
+    echo_debug "daily limit: reserved $requested message(s) for ${label} (used=$new_count/$limit)"
+  done
+
+  SMS_DAILY_LIMIT_RESERVED="$requested"
+  SMS_DAILY_LIMIT_SENT=0
+  return 0
+}
+
+# Release previously reserved capacity from the counter.
+sms_daily_limit_release() {
+  local amount="$1"
+
+  if ! sms_daily_limit_enabled
+  then
+    return 0
+  fi
+
+  if [[ -z "$amount" || ! "$amount" =~ ^[0-9]+$ ]] || (( amount <= 0 ))
+  then
+    return 0
+  fi
+
+  if (( ${#SMS_DAILY_LIMIT_ACTIVE_KEYS[@]} == 0 ))
+  then
+    return 0
+  fi
+
+  local today
+  today="$(date +%Y-%m-%d)"
+
+  local rc=0
+  local entry
+  for entry in "${SMS_DAILY_LIMIT_ACTIVE_KEYS[@]}"
+  do
+    local file="${SMS_DAILY_LIMIT_ACTIVE_FILES[$entry]:-}"
+    local label="${SMS_DAILY_LIMIT_ACTIVE_LABELS[$entry]:-}"
+    local limit="${SMS_DAILY_LIMIT_ACTIVE_LIMITS[$entry]:-}"
+
+    if [[ -z "$file" ]]
+    then
+      continue
+    fi
+
+    local lock_handle=""
+    if ! sms_daily_limit_lock_acquire "$file" lock_handle
+    then
+      echo_warning "daily limit: could not lock counter to release quota for ${label}"
+      rc=1
+      continue
+    fi
+
+    local current=0
+    local stored_date=""
+    local stored_count=""
+    if [[ -r "$file" ]]
+    then
+      read -r stored_date stored_count <"$file" || true
+      if [[ "$stored_date" == "$today" && "$stored_count" =~ ^[0-9]+$ ]]
+      then
+        current="$stored_count"
+      fi
+    fi
+
+    local new_count=0
+    if (( amount >= current ))
+    then
+      new_count=0
+    else
+      new_count=$((current - amount))
+    fi
+
+    if ! sms_daily_limit_write_state "$file" "$today" "$new_count"
+    then
+      echo_warning "daily limit: failed to update counter while releasing quota for ${label}"
+      rc=1
+      sms_daily_limit_lock_release "$lock_handle"
+      continue
+    fi
+
+    sms_daily_limit_lock_release "$lock_handle"
+    if [[ -n "$limit" ]]
+    then
+      echo_debug "daily limit: released $amount message(s) for ${label} (used=$new_count/$limit)"
+    else
+      echo_debug "daily limit: released $amount message(s) for ${label} (used=$new_count)"
+    fi
+  done
+
+  return $rc
+}
+
+# Reset per-message tracking variables after a send attempt finishes.
+sms_daily_limit_reset_state() {
+  SMS_DAILY_LIMIT_RESERVED=0
+  SMS_DAILY_LIMIT_SENT=0
+  SMS_DAILY_LIMIT_ACTIVE_KEYS=()
+  SMS_DAILY_LIMIT_ACTIVE_FILES=()
+  SMS_DAILY_LIMIT_ACTIVE_LABELS=()
+  SMS_DAILY_LIMIT_ACTIVE_LIMITS=()
+}
+
+# Finalize a send attempt, optionally releasing unused quota on failure.
+sms_daily_limit_finalize() {
+  local success="${1:-0}"
+
+  if (( success ))
+  then
+    sms_daily_limit_reset_state
+    return 0
+  fi
+
+  local reserved="${SMS_DAILY_LIMIT_RESERVED:-0}"
+  local sent="${SMS_DAILY_LIMIT_SENT:-0}"
+
+  if (( reserved > sent ))
+  then
+    local unused=$((reserved - sent))
+    if ! sms_daily_limit_release "$unused"
+    then
+      echo_warning "daily limit: failed to release $unused reserved message(s)"
+    fi
+  fi
+
+  sms_daily_limit_reset_state
+}
+
 
 # Send an SMS, handling defaults, validation, and optional chunking.
 sms_send() {
@@ -3485,16 +4164,42 @@ sms_send() {
   local chunk_index=1
   local chunk_rc=0
 
+  sms_daily_limit_reset_state
+
+  local limit_in_use=0
+  if (( total_chunks > 0 )) && sms_daily_limit_enabled
+  then
+    if ! sms_daily_limit_reserve "$total_chunks"
+    then
+      sms_daily_limit_reset_state
+      return 1
+    fi
+    limit_in_use=1
+  fi
+
   for chunk_text in "${send_chunks[@]}"
   do
     sms_send_chunk_text "$recipient" "$chunk_text" "$chunk_index" "$total_chunks" "$chunk_size"
     chunk_rc=$?
     if (( chunk_rc != 0 ))
     then
+      if (( limit_in_use ))
+      then
+        sms_daily_limit_finalize 0
+      fi
       return $chunk_rc
+    fi
+    if (( limit_in_use ))
+    then
+      SMS_DAILY_LIMIT_SENT=$((SMS_DAILY_LIMIT_SENT + 1))
     fi
     chunk_index=$((chunk_index + 1))
   done
+
+  if (( limit_in_use ))
+  then
+    sms_daily_limit_finalize 1
+  fi
 
   return 0
 }
