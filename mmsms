@@ -7716,8 +7716,19 @@ sms_usage_stats() {
     return 0
   fi
 
-  local -a json_items=()
-  local index=0
+  local -a entry_tokens
+  local -a entry_scopes
+  local -a entry_dates
+  local -a entry_labels
+  local -a entry_msisdns
+  local -a entry_display_labels
+  local -a entry_sent
+  local -a entry_failed
+  local -a entry_incoming
+  local line_incoming_total
+  local global_index
+  local file_index
+  local entry_index
   local file
   local token
   local date
@@ -7728,13 +7739,25 @@ sms_usage_stats() {
   local msisdn
   local scope
   local display_label
+  local stored_incoming
   local date_display
   local json_entry
+  local color_reset
+  local color_blue
+  local color_cyan
+  local color_green
+  local color_red
+  local color_magenta
+  local failed_color
+  local failed_reset
 
-  while (( index < ${#files[@]} ))
+  line_incoming_total=0
+  global_index=-1
+
+  for file_index in "${!files[@]}"
   do
-    file="${files[$index]}"
-    token="${tokens[$index]}"
+    file="${files[$file_index]}"
+    token="${tokens[$file_index]}"
 
     sms_daily_state_read "$file" date sent failed incoming label msisdn
 
@@ -7772,8 +7795,54 @@ sms_usage_stats() {
       fi
     fi
 
-    if custom_json_requested
+    entry_index=${#entry_tokens[@]}
+    entry_tokens[entry_index]="$token"
+    entry_scopes[entry_index]="$scope"
+    entry_dates[entry_index]="$date"
+    entry_labels[entry_index]="$label"
+    entry_msisdns[entry_index]="$msisdn"
+    entry_display_labels[entry_index]="$display_label"
+    entry_sent[entry_index]="$sent"
+    entry_failed[entry_index]="$failed"
+    entry_incoming[entry_index]="$incoming"
+
+    if [[ "$scope" == "global" ]]
     then
+      global_index=$entry_index
+    else
+      line_incoming_total=$(( line_incoming_total + incoming ))
+    fi
+  done
+
+  if (( global_index >= 0 ))
+  then
+    stored_incoming="${entry_incoming[$global_index]}"
+    if [[ ! "$stored_incoming" =~ ^-?[0-9]+$ ]]
+    then
+      stored_incoming=0
+    fi
+    if (( line_incoming_total > stored_incoming ))
+    then
+      entry_incoming[$global_index]=$line_incoming_total
+    fi
+  fi
+
+  if custom_json_requested
+  then
+    local -a json_items
+    json_items=()
+
+    for entry_index in "${!entry_tokens[@]}"
+    do
+      token="${entry_tokens[$entry_index]}"
+      scope="${entry_scopes[$entry_index]}"
+      date="${entry_dates[$entry_index]}"
+      label="${entry_labels[$entry_index]}"
+      msisdn="${entry_msisdns[$entry_index]}"
+      sent="${entry_sent[$entry_index]}"
+      failed="${entry_failed[$entry_index]}"
+      incoming="${entry_incoming[$entry_index]}"
+
       json_entry="$(jq -n \
         --arg token "$token" \
         --arg scope "$scope" \
@@ -7792,7 +7861,34 @@ sms_usage_stats() {
       then
         json_items+=("$json_entry")
       fi
+    done
+
+    if (( ${#json_items[@]} == 0 ))
+    then
+      printf '[]\n'
+    elif (( ${#json_items[@]} == 1 )) && [[ -z "$ALL_MODEMS" ]]
+    then
+      printf '%s\n' "${json_items[0]}"
     else
+      printf '%s\n' "${json_items[@]}" | jq -s '.'
+    fi
+  else
+    color_reset="$(ansi_escape "$COLOR_RESET")"
+    color_blue="$(ansi_escape "$COLOR_BOLD_BLUE")"
+    color_cyan="$(ansi_escape "$COLOR_CYAN")"
+    color_green="$(ansi_escape "$COLOR_BOLD_GREEN")"
+    color_red="$(ansi_escape "$COLOR_BOLD_RED")"
+    color_magenta="$(ansi_escape "$COLOR_BOLD_MAGENTA")"
+
+    for entry_index in "${!entry_tokens[@]}"
+    do
+      display_label="${entry_display_labels[$entry_index]}"
+      scope="${entry_scopes[$entry_index]}"
+      date="${entry_dates[$entry_index]}"
+      sent="${entry_sent[$entry_index]}"
+      failed="${entry_failed[$entry_index]}"
+      incoming="${entry_incoming[$entry_index]}"
+
       if [[ -n "$date" ]]
       then
         date_display="$date"
@@ -7800,28 +7896,27 @@ sms_usage_stats() {
         date_display="--"
       fi
 
-      printf 'Stats for %s (scope=%s, date=%s)\n' "$display_label" "$scope" "$date_display"
-      printf '  outgoing sent: %s\n' "$sent"
-      printf '  outgoing failed: %s\n' "$failed"
-      printf '  incoming received: %s\n' "$incoming"
+      failed_color=""
+      failed_reset=""
+      if (( failed > 0 ))
+      then
+        failed_color="$color_red"
+        failed_reset="$color_reset"
+      fi
 
-      if (( index + 1 < ${#files[@]} ))
+      printf 'Stats for %s%s%s (scope=%s%s%s, date=%s%s%s)\n' \
+        "$color_blue" "$display_label" "$color_reset" \
+        "$color_magenta" "$scope" "$color_reset" \
+        "$color_cyan" "$date_display" "$color_reset"
+      printf '  outgoing sent: %s%s%s\n' "$color_green" "$sent" "$color_reset"
+      printf '  outgoing failed: %s%s%s\n' "$failed_color" "$failed" "$failed_reset"
+      printf '  incoming received: %s%s%s\n' "$color_blue" "$incoming" "$color_reset"
+
+      if (( entry_index + 1 < ${#entry_tokens[@]} ))
       then
         printf '\n'
       fi
-    fi
-
-    index=$((index + 1))
-  done
-
-  if custom_json_requested
-  then
-    if (( ${#json_items[@]} == 1 )) && [[ -z "$ALL_MODEMS" ]]
-    then
-      printf '%s\n' "${json_items[0]}"
-    else
-      printf '%s\n' "${json_items[@]}" | jq -s '.'
-    fi
+    done
   fi
 
   return 0
