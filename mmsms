@@ -3403,6 +3403,55 @@ sms_type_color() { # $1=type
   esac
 }
 
+# Choose a stable ANSI color for a modem ID value.
+sms_mid_color() { # $1=mid
+  local mid="$1"
+  if [[ -z "$mid" ]]
+  then
+    printf '%s' "$COLOR_BOLD_WHITE"
+    return 0
+  fi
+
+  local -a palette=(
+    "$COLOR_BOLD_BLUE"
+    "$COLOR_BOLD_GREEN"
+    "$COLOR_BOLD_MAGENTA"
+    "$COLOR_BOLD_CYAN"
+    "$COLOR_BOLD_YELLOW"
+    "$COLOR_BOLD_RED"
+    "$COLOR_BOLD_WHITE"
+  )
+
+  local palette_size
+  palette_size=${#palette[@]}
+
+  if (( palette_size == 0 ))
+  then
+    printf '%s' "$COLOR_BOLD_WHITE"
+    return 0
+  fi
+
+  local index
+  if [[ "$mid" =~ ^[0-9]+$ ]]
+  then
+    index=$((mid % palette_size))
+  else
+    local checksum_raw
+    checksum_raw="$(printf '%s' "$mid" | cksum 2>/dev/null)"
+    local checksum
+    checksum="${checksum_raw%% *}"
+
+    if [[ -z "$checksum" ]]
+    then
+      checksum=0
+    fi
+
+    index=$((checksum % palette_size))
+  fi
+
+  printf '%s' "${palette[index]}"
+}
+
 # Summarize SMS direction and party labels for display.
 sms_read_party_info() { # $1=type, $2=remote, $3=own
   local type="${1,,}"
@@ -6676,11 +6725,81 @@ sms_list_print_entry() {
     text="${text:0:maxlen}…"
   fi
 
+  local id_display
+  printf -v id_display '%-4s' "$id"
+
+  local type_display
+  printf -v type_display '%-10s' "$msg_type"
+
+  local recipient_display
+  printf -v recipient_display '%-18s' "$sender"
+
+  local message_display="$text"
+
+  local mid_display
   if [[ -n "$include_mid" ]]
   then
-    printf '%-4s %-4s %-10s %-18s %s\n' "$mid" "$id" "$msg_type" "$sender" "$text"
+    printf -v mid_display '%-4s' "$mid"
+  fi
+
+  if [[ -z "$NO_COLOR" && -z "$CRON" ]]
+  then
+    local color_reset
+    color_reset="$(ansi_escape "$COLOR_RESET")"
+
+    if [[ -n "$color_reset" ]]
+    then
+      local type_color_code
+      type_color_code="$(sms_type_color "$msg_type")"
+
+      if [[ -n "$type_color_code" ]]
+      then
+        local type_color_seq
+        type_color_seq="$(ansi_escape "$type_color_code")"
+        if [[ -n "$type_color_seq" ]]
+        then
+          type_display="${type_color_seq}${type_display}${color_reset}"
+        fi
+      fi
+
+      local recipient_color_seq
+      recipient_color_seq="$(ansi_escape "$COLOR_BOLD_MAGENTA")"
+      if [[ -n "$recipient_color_seq" ]]
+      then
+        recipient_display="${recipient_color_seq}${recipient_display}${color_reset}"
+      fi
+
+      local message_color_seq
+      message_color_seq="$(ansi_escape "$COLOR_BOLD_YELLOW")"
+      if [[ -n "$message_color_seq" ]]
+      then
+        message_display="${message_color_seq}${message_display}${color_reset}"
+      fi
+
+      if [[ -n "$include_mid" ]]
+      then
+        local mid_color_code
+        mid_color_code="$(sms_mid_color "$mid")"
+
+        if [[ -n "$mid_color_code" ]]
+        then
+          local mid_color_seq
+          mid_color_seq="$(ansi_escape "$mid_color_code")"
+          if [[ -n "$mid_color_seq" ]]
+          then
+            mid_display="${mid_color_seq}${mid_display}${color_reset}"
+            id_display="${mid_color_seq}${id_display}${color_reset}"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -n "$include_mid" ]]
+  then
+    printf '%s %s %s %s %s\n' "$mid_display" "$id_display" "$type_display" "$recipient_display" "$message_display"
   else
-    printf '%-4s %-10s %-18s %s\n' "$id" "$msg_type" "$sender" "$text"
+    printf '%s %s %s %s\n' "$id_display" "$type_display" "$recipient_display" "$message_display"
   fi
 }
 
