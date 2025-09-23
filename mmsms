@@ -3793,7 +3793,8 @@ sms_daily_limit_enabled() {
           continue
         fi
 
-        local trimmed_key="$(trim "$key")"
+        local trimmed_key
+        trimmed_key="$(trim "$key")"
         if [[ -z "$trimmed_key" ]]
         then
           continue
@@ -6586,6 +6587,7 @@ watch_spawn_worker() {
       sleep "$WATCH_WORKER_LOCK_SLEEP"
     done
 
+    # shellcheck disable=SC2064
     trap "watch_worker_release_lock '$lock_path'" EXIT INT TERM
 
     echo_debug "watch: worker $$ handling SMS $id for modem $modem_key"
