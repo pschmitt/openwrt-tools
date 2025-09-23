@@ -9762,30 +9762,30 @@ resolve_modem_selection() {
         done
         MODEM_DETAILS_LOGGED=1
       else
-        echo_info "operating on all modems: none detected"
+        echo_warning "operating on all modems: none detected"
       fi
     else
-      echo_info "operating on all modems"
+      echo_debug "operating on all modems"
     fi
   elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
   then
     local _info
     if _info="$(get_modem_info "$MODEM" "selected ")"
     then
-      echo_info "$_info"
+      echo_debug "$_info"
     else
-      echo_info "selected modem={id='$MODEM'}"
+      echo_debug "selected modem={id='$MODEM'}"
     fi
   else
     local _info
     if _info="$(get_modem_info "$MODEM" "selected ")"
     then
-      echo_info "$_info"
+      echo_debug "$_info"
     elif [[ "$MODEM" != "any" && -n "$MODEM" ]]
     then
-      echo_info "selected modem={id='$MODEM'}"
+      echo_debug "selected modem={id='$MODEM'}"
     else
-      echo_info "selected modem: any"
+      echo_debug "selected modem: any"
     fi
   fi
 
