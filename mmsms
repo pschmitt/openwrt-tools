@@ -5974,6 +5974,22 @@ sms_daily_usage_refresh_global() {
   local base_label
   local msisdn_count
   local msisdn_count_json
+  local stored_date
+  local stored_sent
+  local stored_failed
+  local stored_incoming
+  local stored_msisdn_count
+  local existing_label
+  local have_existing
+  local need_update
+  local stored_sent_value
+  local stored_failed_value
+  local stored_incoming_value
+  local stored_msisdn_value
+  local stored_sent_valid
+  local stored_failed_valid
+  local stored_incoming_valid
+  local stored_msisdn_valid
   local opt
 
   total_sent=0
@@ -6094,12 +6110,21 @@ sms_daily_usage_refresh_global() {
     return 1
   fi
 
+  have_existing=0
   base_label=""
-  if ! sms_daily_state_read \
+  if sms_daily_state_read \
     --file "$global_file" \
+    --out-date-var stored_date \
     --out-label-var base_label \
+    --out-sent-var stored_sent \
+    --out-failed-var stored_failed \
+    --out-incoming-var stored_incoming \
+    --out-msisdn-var stored_msisdn_count \
     --msisdn-key msisdn_count
   then
+    have_existing=1
+    existing_label="$base_label"
+  else
     base_label=""
   fi
 
@@ -6108,21 +6133,75 @@ sms_daily_usage_refresh_global() {
     base_label="global"
   fi
 
+  need_update=1
+  if (( have_existing ))
+  then
+    stored_sent_value=0
+    stored_failed_value=0
+    stored_incoming_value=0
+    stored_msisdn_value=0
+    stored_sent_valid=0
+    stored_failed_valid=0
+    stored_incoming_valid=0
+    stored_msisdn_valid=0
+
+    if [[ "$stored_sent" =~ ^-?[0-9]+$ ]]
+    then
+      stored_sent_value="$stored_sent"
+      stored_sent_valid=1
+    fi
+
+    if [[ "$stored_failed" =~ ^-?[0-9]+$ ]]
+    then
+      stored_failed_value="$stored_failed"
+      stored_failed_valid=1
+    fi
+
+    if [[ "$stored_incoming" =~ ^-?[0-9]+$ ]]
+    then
+      stored_incoming_value="$stored_incoming"
+      stored_incoming_valid=1
+    fi
+
+    if [[ "$stored_msisdn_count" =~ ^-?[0-9]+$ ]]
+    then
+      stored_msisdn_value="$stored_msisdn_count"
+      stored_msisdn_valid=1
+    fi
+
+    if [[ "$existing_label" == "$base_label" ]] \
+      && [[ "$stored_date" == "$today" ]] \
+      && (( stored_sent_valid )) \
+      && (( stored_failed_valid )) \
+      && (( stored_incoming_valid )) \
+      && (( stored_msisdn_valid )) \
+      && (( total_sent == stored_sent_value )) \
+      && (( total_failed == stored_failed_value )) \
+      && (( total_incoming == stored_incoming_value )) \
+      && (( msisdn_count == stored_msisdn_value ))
+    then
+      need_update=0
+    fi
+  fi
+
   msisdn_count_json="$msisdn_count"
 
-  if ! sms_daily_state_write_locked \
-    --file "$global_file" \
-    --date "$today" \
-    --label "$base_label" \
-    --msisdn-key msisdn_count \
-    --msisdn-json "$msisdn_count_json" \
-    --sent "$total_sent" \
-    --failed "$total_failed" \
-    --incoming "$total_incoming"
+  if (( need_update ))
   then
-    sms_daily_limit_lock_release "$lock_handle"
-    echo_warning "daily usage: failed to refresh global counter"
-    return 1
+    if ! sms_daily_state_write_locked \
+      --file "$global_file" \
+      --date "$today" \
+      --label "$base_label" \
+      --msisdn-key msisdn_count \
+      --msisdn-json "$msisdn_count_json" \
+      --sent "$total_sent" \
+      --failed "$total_failed" \
+      --incoming "$total_incoming"
+    then
+      sms_daily_limit_lock_release "$lock_handle"
+      echo_warning "daily usage: failed to refresh global counter"
+      return 1
+    fi
   fi
 
   sms_daily_limit_lock_release "$lock_handle"
@@ -6176,21 +6255,23 @@ sms_daily_usage_fix_global_state() {
     return 1
   fi
 
-  local state_date
-  local state_label
-  local state_sent
-  local state_failed
-  local state_incoming
-  local state_history_json
-  local state_msisdn_json
+  local stored_date
+  local stored_label
+  local stored_sent
+  local stored_failed
+  local stored_incoming
+  local stored_history_json
+  local stored_msisdn_json
+  local have_existing
   local msisdn_changed
   local msisdn_entry_count
   local new_msisdn_json
-  state_sent=0
-  state_failed=0
-  state_incoming=0
-  state_history_json="[]"
-  state_msisdn_json="null"
+  stored_sent=0
+  stored_failed=0
+  stored_incoming=0
+  stored_history_json="[]"
+  stored_msisdn_json="null"
+  have_existing=0
   msisdn_changed=0
   msisdn_entry_count=0
   new_msisdn_json="null"
@@ -6199,15 +6280,15 @@ sms_daily_usage_fix_global_state() {
   then
     if sms_daily_state_read \
       --file "$global_file" \
-      --out-date-var state_date \
-      --out-label-var state_label \
-      --out-sent-var state_sent \
-      --out-failed-var state_failed \
-      --out-incoming-var state_incoming \
-      --out-history-json-var state_history_json \
+      --out-date-var stored_date \
+      --out-label-var stored_label \
+      --out-sent-var stored_sent \
+      --out-failed-var stored_failed \
+      --out-incoming-var stored_incoming \
+      --out-history-json-var stored_history_json \
       --msisdn-key msisdn_count
     then
-      :
+      have_existing=1
     else
       echo_warning "daily usage: failed to read global counter while repairing"
     fi
@@ -6220,24 +6301,62 @@ sms_daily_usage_fix_global_state() {
     then
       if [[ "$msisdn_probe" != '"__MMSMS_MISSING__"' ]]
       then
-        state_msisdn_json="$msisdn_probe"
+        stored_msisdn_json="$msisdn_probe"
       fi
     fi
   fi
 
-  if [[ ! "$state_sent" =~ ^-?[0-9]+$ ]]
+  if [[ ! "$stored_sent" =~ ^-?[0-9]+$ ]]
   then
-    state_sent=0
+    stored_sent=0
   fi
 
-  if [[ ! "$state_failed" =~ ^-?[0-9]+$ ]]
+  if [[ ! "$stored_failed" =~ ^-?[0-9]+$ ]]
   then
-    state_failed=0
+    stored_failed=0
   fi
 
-  if [[ ! "$state_incoming" =~ ^-?[0-9]+$ ]]
+  if [[ ! "$stored_incoming" =~ ^-?[0-9]+$ ]]
   then
-    state_incoming=0
+    stored_incoming=0
+  fi
+
+  local -a existing_history_lines=()
+  if [[ -n "$stored_history_json" && "$stored_history_json" != "[]" ]]
+  then
+    local history_lines_text
+    history_lines_text="$(jq -r 'map([.date // "", (.outgoing.sent // 0), (.outgoing.failed // 0), (.incoming.received // 0)] | @tsv)[]' <<<"$stored_history_json" 2>/dev/null)"
+    if [[ -n "$history_lines_text" ]]
+    then
+      local hist_date
+      local hist_sent
+      local hist_failed
+      local hist_incoming
+      while IFS=$'\t' read -r hist_date hist_sent hist_failed hist_incoming
+      do
+        if [[ -z "$hist_date" ]]
+        then
+          continue
+        fi
+
+        if [[ ! "$hist_sent" =~ ^-?[0-9]+$ ]]
+        then
+          hist_sent=0
+        fi
+
+        if [[ ! "$hist_failed" =~ ^-?[0-9]+$ ]]
+        then
+          hist_failed=0
+        fi
+
+        if [[ ! "$hist_incoming" =~ ^-?[0-9]+$ ]]
+        then
+          hist_incoming=0
+        fi
+
+        existing_history_lines+=("$hist_date\t$hist_sent\t$hist_failed\t$hist_incoming")
+      done <<<"$history_lines_text"
+    fi
   fi
 
   local state_dir
@@ -6408,7 +6527,7 @@ sms_daily_usage_fix_global_state() {
 
   new_msisdn_json="$msisdn_entry_count"
 
-  if [[ "$state_msisdn_json" != "$new_msisdn_json" ]]
+  if [[ "$stored_msisdn_json" != "$new_msisdn_json" ]]
   then
     msisdn_changed=1
   fi
@@ -6424,7 +6543,7 @@ sms_daily_usage_fix_global_state() {
   fi
 
   local write_label
-  write_label="$state_label"
+  write_label="$stored_label"
   if [[ -z "$write_label" ]]
   then
     write_label="global"
@@ -6478,61 +6597,168 @@ sms_daily_usage_fix_global_state() {
 
       if (( ${#write_dates[@]} > 0 ))
       then
-        rebuild_done=1
-        rm -f "$global_file"
+        local latest_index
+        latest_index=$(( ${#write_dates[@]} - 1 ))
 
-        local date_to_write
-        for date_to_write in "${write_dates[@]}"
+        local desired_date
+        desired_date="${write_dates[$latest_index]}"
+
+        local desired_sent
+        desired_sent="${aggregated_sent[$desired_date]:-0}"
+        if [[ ! "$desired_sent" =~ ^-?[0-9]+$ ]]
+        then
+          desired_sent=0
+        fi
+
+        local desired_failed
+        desired_failed="${aggregated_failed[$desired_date]:-0}"
+        if [[ ! "$desired_failed" =~ ^-?[0-9]+$ ]]
+        then
+          desired_failed=0
+        fi
+
+        local desired_incoming
+        desired_incoming="${aggregated_incoming[$desired_date]:-0}"
+        if [[ ! "$desired_incoming" =~ ^-?[0-9]+$ ]]
+        then
+          desired_incoming=0
+        fi
+
+        local -a desired_history_entries=()
+        local history_idx
+        for (( history_idx=latest_index - 1; history_idx >= 0; history_idx-- ))
         do
-          local write_sent="${aggregated_sent[$date_to_write]:-0}"
-          local write_failed="${aggregated_failed[$date_to_write]:-0}"
-          local write_incoming="${aggregated_incoming[$date_to_write]:-0}"
-
-          if [[ ! "$write_sent" =~ ^-?[0-9]+$ ]]
+          local hist_date
+          hist_date="${write_dates[$history_idx]}"
+          if [[ -z "$hist_date" ]]
           then
-            write_sent=0
-          fi
-          if [[ ! "$write_failed" =~ ^-?[0-9]+$ ]]
-          then
-            write_failed=0
-          fi
-          if [[ ! "$write_incoming" =~ ^-?[0-9]+$ ]]
-          then
-            write_incoming=0
+            continue
           fi
 
-          if ! sms_daily_state_write_locked \
-            --file "$global_file" \
-            --date "$date_to_write" \
-            --label "$write_label" \
-            --msisdn-key msisdn_count \
-            --msisdn-json "$new_msisdn_json" \
-            --sent "$write_sent" \
-            --failed "$write_failed" \
-            --incoming "$write_incoming"
+          local hist_sent
+          hist_sent="${aggregated_sent[$hist_date]:-0}"
+          if [[ ! "$hist_sent" =~ ^-?[0-9]+$ ]]
           then
-            sms_daily_limit_lock_release "$lock_handle"
-            echo_warning "daily usage: failed to repair global counter"
-            return 1
+            hist_sent=0
           fi
+
+          local hist_failed
+          hist_failed="${aggregated_failed[$hist_date]:-0}"
+          if [[ ! "$hist_failed" =~ ^-?[0-9]+$ ]]
+          then
+            hist_failed=0
+          fi
+
+          local hist_incoming
+          hist_incoming="${aggregated_incoming[$hist_date]:-0}"
+          if [[ ! "$hist_incoming" =~ ^-?[0-9]+$ ]]
+          then
+            hist_incoming=0
+          fi
+
+          desired_history_entries+=("$hist_date\t$hist_sent\t$hist_failed\t$hist_incoming")
         done
 
-        selected_date="${write_dates[$(( ${#write_dates[@]} - 1 ))]}"
-        new_sent="${aggregated_sent[$selected_date]:-0}"
-        new_failed="${aggregated_failed[$selected_date]:-0}"
-        new_incoming="${aggregated_incoming[$selected_date]:-0}"
+        local need_rebuild
+        need_rebuild=1
+        if (( have_existing ))
+        then
+          local matches
+          matches=1
+          if [[ "$stored_label" != "$write_label" ]]
+          then
+            matches=0
+          elif [[ "$stored_msisdn_json" != "$new_msisdn_json" ]]
+          then
+            matches=0
+          elif [[ "$stored_date" != "$desired_date" ]]
+          then
+            matches=0
+          elif (( stored_sent != desired_sent || stored_failed != desired_failed || stored_incoming != desired_incoming ))
+          then
+            matches=0
+          else
+            local desired_count
+            desired_count=${#desired_history_entries[@]}
+            local existing_count
+            existing_count=${#existing_history_lines[@]}
+            if (( desired_count != existing_count ))
+            then
+              matches=0
+            else
+              local compare_idx
+              for (( compare_idx=0; compare_idx<desired_count; compare_idx++ ))
+              do
+                if [[ "${desired_history_entries[$compare_idx]}" != "${existing_history_lines[$compare_idx]}" ]]
+                then
+                  matches=0
+                  break
+                fi
+              done
+            fi
+          fi
 
-        if [[ ! "$new_sent" =~ ^-?[0-9]+$ ]]
-        then
-          new_sent=0
+          if (( matches ))
+          then
+            need_rebuild=0
+          fi
         fi
-        if [[ ! "$new_failed" =~ ^-?[0-9]+$ ]]
+
+        if (( need_rebuild ))
         then
-          new_failed=0
-        fi
-        if [[ ! "$new_incoming" =~ ^-?[0-9]+$ ]]
-        then
-          new_incoming=0
+          rebuild_done=1
+          rm -f "$global_file"
+
+          local date_to_write
+          for date_to_write in "${write_dates[@]}"
+          do
+            local write_sent
+            write_sent="${aggregated_sent[$date_to_write]:-0}"
+            if [[ ! "$write_sent" =~ ^-?[0-9]+$ ]]
+            then
+              write_sent=0
+            fi
+
+            local write_failed
+            write_failed="${aggregated_failed[$date_to_write]:-0}"
+            if [[ ! "$write_failed" =~ ^-?[0-9]+$ ]]
+            then
+              write_failed=0
+            fi
+
+            local write_incoming
+            write_incoming="${aggregated_incoming[$date_to_write]:-0}"
+            if [[ ! "$write_incoming" =~ ^-?[0-9]+$ ]]
+            then
+              write_incoming=0
+            fi
+
+            if ! sms_daily_state_write_locked \
+              --file "$global_file" \
+              --date "$date_to_write" \
+              --label "$write_label" \
+              --msisdn-key msisdn_count \
+              --msisdn-json "$new_msisdn_json" \
+              --sent "$write_sent" \
+              --failed "$write_failed" \
+              --incoming "$write_incoming"
+            then
+              sms_daily_limit_lock_release "$lock_handle"
+              echo_warning "daily usage: failed to repair global counter"
+              return 1
+            fi
+          done
+
+          selected_date="$desired_date"
+          new_sent="$desired_sent"
+          new_failed="$desired_failed"
+          new_incoming="$desired_incoming"
+        else
+          rebuild_done=1
+          selected_date="$desired_date"
+          new_sent="$desired_sent"
+          new_failed="$desired_failed"
+          new_incoming="$desired_incoming"
         fi
       fi
     fi
@@ -6540,9 +6766,9 @@ sms_daily_usage_fix_global_state() {
 
   if (( ! rebuild_done ))
   then
-    if [[ -n "$state_date" && -n "${aggregated_seen[$state_date]:-}" ]]
+    if [[ -n "$stored_date" && -n "${aggregated_seen[$stored_date]:-}" ]]
     then
-      selected_date="$state_date"
+      selected_date="$stored_date"
     fi
 
     if [[ -z "$selected_date" ]]
@@ -6562,19 +6788,19 @@ sms_daily_usage_fix_global_state() {
       done
     fi
 
-    if [[ -z "$selected_date" && -n "$state_history_json" && "$state_history_json" != "[]" ]]
+    if [[ -z "$selected_date" && -n "$stored_history_json" && "$stored_history_json" != "[]" ]]
     then
       local history_candidate
-      history_candidate="$(jq -r 'map(.date // empty) | map(select(. != "")) | .[0] // empty' <<<"$state_history_json" 2>/dev/null)"
+      history_candidate="$(jq -r 'map(.date // empty) | map(select(. != "")) | .[0] // empty' <<<"$stored_history_json" 2>/dev/null)"
       if [[ -n "$history_candidate" ]]
       then
         selected_date="$history_candidate"
       fi
     fi
 
-    if [[ -z "$selected_date" && -n "$state_date" ]]
+    if [[ -z "$selected_date" && -n "$stored_date" ]]
     then
-      selected_date="$state_date"
+      selected_date="$stored_date"
     fi
 
     if [[ -z "$selected_date" ]]
@@ -6615,15 +6841,15 @@ sms_daily_usage_fix_global_state() {
       needs_update=1
     fi
 
-    if [[ "$selected_date" != "${state_date:-}" ]]
+    if [[ "$selected_date" != "${stored_date:-}" ]]
     then
       needs_update=1
-    elif (( new_sent != state_sent || new_failed != state_failed || new_incoming != state_incoming ))
+    elif (( new_sent != stored_sent || new_failed != stored_failed || new_incoming != stored_incoming ))
     then
       needs_update=1
     fi
 
-    if [[ "$write_label" != "${state_label:-}" ]]
+    if [[ "$write_label" != "${stored_label:-}" ]]
     then
       needs_update=1
     fi
