@@ -4238,6 +4238,8 @@ sms_daily_state_read() {
   local label_var
   local msisdn_var
   local history_var
+  local msisdn_key
+  local msisdn_alt_key
   local state_date
   local state_label
   local state_msisdn
@@ -4250,6 +4252,9 @@ sms_daily_state_read() {
   local legacy_count
   local state_history_json
   local opt
+
+  msisdn_key="msisdn"
+  msisdn_alt_key=""
 
   while (( $# > 0 ))
   do
@@ -4332,6 +4337,17 @@ sms_daily_state_read() {
         shift
         continue
         ;;
+      --msisdn-key)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn-key"
+          return 1
+        fi
+        msisdn_key="$1"
+        shift
+        continue
+        ;;
       --out-history-json-var)
         shift
         if (( $# == 0 ))
@@ -4353,6 +4369,13 @@ sms_daily_state_read() {
         ;;
     esac
   done
+
+  if [[ "$msisdn_key" == "msisdn" ]]
+  then
+    msisdn_alt_key="msisdn_count"
+  else
+    msisdn_alt_key="msisdn"
+  fi
 
   if [[ -z "$file" ]]
   then
@@ -4381,7 +4404,10 @@ sms_daily_state_read() {
     then
       local sep
       sep=$'\x1f'
-      if parsed="$(jq -r '[.date // "", .label // "", .msisdn // "", ((.outgoing.sent // 0) | tostring), ((.outgoing.failed // 0) | tostring), ((.incoming.received // 0) | tostring)] | join("\u001f")' <<<"$content" 2>/dev/null)"
+      if parsed="$(jq -r \
+        --arg msisdn_key "$msisdn_key" \
+        --arg msisdn_alt_key "$msisdn_alt_key" \
+        '[.date // "", .label // "", ((.[$msisdn_key] // (if $msisdn_alt_key == "" then null else .[$msisdn_alt_key] end) // "") | tostring), ((.outgoing.sent // 0) | tostring), ((.outgoing.failed // 0) | tostring), ((.incoming.received // 0) | tostring)] | join("\u001f")' <<<"$content" 2>/dev/null)"
       then
         local parsed_fields
         printf -v parsed_fields '%s%s' "$parsed" "$sep"
@@ -4456,6 +4482,7 @@ sms_daily_state_read_today() {
   local incoming_var
   local label_var
   local msisdn_var
+  local msisdn_key
   local day_date
   local day_sent
   local day_failed
@@ -4463,6 +4490,8 @@ sms_daily_state_read_today() {
   local day_label
   local day_msisdn
   local opt
+
+  msisdn_key="msisdn"
 
   while (( $# > 0 ))
   do
@@ -4545,6 +4574,17 @@ sms_daily_state_read_today() {
         shift
         continue
         ;;
+      --msisdn-key)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn-key"
+          return 1
+        fi
+        msisdn_key="$1"
+        shift
+        continue
+        ;;
       --)
         shift
         break
@@ -4579,7 +4619,8 @@ sms_daily_state_read_today() {
     --out-failed-var day_failed \
     --out-incoming-var day_incoming \
     --out-label-var day_label \
-    --out-msisdn-var day_msisdn
+    --out-msisdn-var day_msisdn \
+    --msisdn-key "$msisdn_key"
   then
     return 1
   fi
@@ -4621,6 +4662,11 @@ sms_daily_state_write_locked() {
   local date
   local label
   local msisdn
+  local msisdn_key
+  local msisdn_alt_key
+  local msisdn_json_value
+  local use_msisdn_json
+  local use_msisdn_str
   local sent
   local failed
   local incoming
@@ -4635,6 +4681,11 @@ sms_daily_state_write_locked() {
   sent=0
   failed=0
   incoming=0
+  msisdn_key="msisdn"
+  msisdn_alt_key=""
+  msisdn_json_value="null"
+  use_msisdn_json=0
+  use_msisdn_str=0
 
   while (( $# > 0 ))
   do
@@ -4681,6 +4732,30 @@ sms_daily_state_write_locked() {
           return 1
         fi
         msisdn="$1"
+        use_msisdn_str=1
+        shift
+        continue
+        ;;
+      --msisdn-key)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn-key"
+          return 1
+        fi
+        msisdn_key="$1"
+        shift
+        continue
+        ;;
+      --msisdn-json)
+        shift
+        if (( $# == 0 ))
+        then
+          echo_error "daily limit: missing argument for --msisdn-json"
+          return 1
+        fi
+        msisdn_json_value="$1"
+        use_msisdn_json=1
         shift
         continue
         ;;
@@ -4727,6 +4802,18 @@ sms_daily_state_write_locked() {
         ;;
     esac
   done
+
+  if [[ "$msisdn_key" == "msisdn" ]]
+  then
+    msisdn_alt_key="msisdn_count"
+  else
+    msisdn_alt_key="msisdn"
+  fi
+
+  if (( use_msisdn_json ))
+  then
+    use_msisdn_str=0
+  fi
 
   if [[ -z "$file" ]]
   then
@@ -4794,46 +4881,110 @@ sms_daily_state_write_locked() {
   if ! new_json="$(jq \
     --arg date "$date" \
     --arg label "${label:-}" \
-    --arg msisdn "${msisdn:-}" \
+    --arg msisdn_key "$msisdn_key" \
+    --arg msisdn_alt_key "$msisdn_alt_key" \
+    --arg new_msisdn_str "${msisdn:-}" \
+    --arg use_msisdn_str "$use_msisdn_str" \
+    --arg use_msisdn_json "$use_msisdn_json" \
+    --argjson new_msisdn_json "$msisdn_json_value" \
     --argjson sent "$sent" \
     --argjson failed "$failed" \
     --argjson incoming "$incoming" \
     --argjson history_limit "$history_limit" \
-    'def mkentry($d; $label; $msisdn; $sent; $failed; $incoming):
+    'def mkentry($d; $label; $msisdn_obj; $sent; $failed; $incoming):
        (if $d == "" then {} else {date:$d} end)
        + (if $label == "" then {} else {label:$label} end)
-       + (if $msisdn == "" then {} else {msisdn:$msisdn} end)
+       + $msisdn_obj
        + {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}};
      def ensure_history($hist):
-       if ($hist | type) == "array" then $hist else [] end;
+       if ($hist | type) == "array" then
+         $hist
+         | map(
+             if (type == "object") then
+               (if $msisdn_key != "" and $msisdn_key != $msisdn_alt_key then
+                  (if (has($msisdn_alt_key) and (has($msisdn_key) | not)) then
+                     . + {($msisdn_key): .[$msisdn_alt_key]} | del(.[$msisdn_alt_key])
+                   elif ($msisdn_alt_key == "msisdn" and has("msisdn") and (has($msisdn_key) | not)) then
+                     . + {($msisdn_key): .msisdn} | del(.msisdn)
+                   else .
+                   end)
+                elif $msisdn_key == "msisdn" and has("msisdn_count") and (has("msisdn") | not) then
+                  . + {msisdn:(.msisdn_count | tostring)} | del(.msisdn_count)
+                else .
+                end)
+             else .
+             end)
+       else [] end;
      def trim_history($hist; $limit):
        if $limit <= 0 then [] else $hist[:$limit] end;
+     def msisdn_obj($value):
+       if $msisdn_key == "" then {}
+       elif $value == "__MMSMS_UNSET__" then {}
+       else {($msisdn_key): $value}
+       end;
+     def new_msisdn_obj($orig_value):
+       if $use_msisdn_json == "1" then
+         msisdn_obj($new_msisdn_json)
+       elif $use_msisdn_str == "1" then
+         if $new_msisdn_str == "" then msisdn_obj("__MMSMS_UNSET__") else msisdn_obj($new_msisdn_str) end
+       else
+         msisdn_obj($orig_value)
+       end;
+     def cleanup_alt($obj):
+       if ($msisdn_key != "" and $msisdn_key != $msisdn_alt_key and ($obj | type) == "object") then
+         $obj | del(.[$msisdn_alt_key])
+       else
+         $obj
+       end;
      . as $existing
      | ($existing.date // "") as $orig_date
      | ($existing.label // "") as $orig_label
-     | ($existing.msisdn // "") as $orig_msisdn
      | ($existing.outgoing.sent // 0) as $orig_sent
      | ($existing.outgoing.failed // 0) as $orig_failed
      | ($existing.incoming.received // 0) as $orig_incoming
      | ensure_history($existing.history) as $existing_hist
+     | cleanup_alt($existing) as $clean_existing
+     | ($clean_existing[$msisdn_key] // (if $msisdn_alt_key == "" then null else $clean_existing[$msisdn_alt_key] end)) as $orig_msisdn
      | (if $orig_date != "" and $orig_date != $date then
-          trim_history([mkentry($orig_date; $orig_label; $orig_msisdn; $orig_sent; $orig_failed; $orig_incoming)] + $existing_hist; $history_limit)
+          trim_history([mkentry($orig_date; $orig_label; msisdn_obj($orig_msisdn); $orig_sent; $orig_failed; $orig_incoming)] + $existing_hist; $history_limit)
         else
           trim_history($existing_hist; $history_limit)
         end) as $hist
-     | mkentry($date; $label; $msisdn; $sent; $failed; $incoming)
-       + (if ($hist | length) > 0 then {history:$hist} else {} end)' <<<"$base" 2>/dev/null)"
+     | mkentry($date; $label; new_msisdn_obj($orig_msisdn); $sent; $failed; $incoming)
+       + {history:$hist}
+     | cleanup_alt(.)' <<<"$base" 2>/dev/null)"
   then
     if ! new_json="$(jq -n \
       --arg date "$date" \
       --arg label "${label:-}" \
-      --arg msisdn "${msisdn:-}" \
+      --arg msisdn_key "$msisdn_key" \
+      --arg new_msisdn_str "${msisdn:-}" \
+      --arg use_msisdn_str "$use_msisdn_str" \
+      --arg use_msisdn_json "$use_msisdn_json" \
+      --argjson new_msisdn_json "$msisdn_json_value" \
       --argjson sent "$sent" \
       --argjson failed "$failed" \
       --argjson incoming "$incoming" \
-      '((if $label == "" then {date:$date} else {date:$date, label:$label} end)
-        * (if $msisdn == "" then {} else {msisdn:$msisdn} end)
-        * {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}})')"
+      'def mkentry($d; $label; $msisdn_obj; $sent; $failed; $incoming):
+         (if $d == "" then {} else {date:$d} end)
+         + (if $label == "" then {} else {label:$label} end)
+         + $msisdn_obj
+         + {outgoing:{sent:$sent, failed:$failed}, incoming:{received:$incoming}};
+       def msisdn_obj($value):
+         if $msisdn_key == "" then {}
+         elif $value == "__MMSMS_UNSET__" then {}
+         else {($msisdn_key): $value}
+         end;
+       def new_msisdn_obj:
+         if $use_msisdn_json == "1" then
+           msisdn_obj($new_msisdn_json)
+         elif $use_msisdn_str == "1" then
+           if $new_msisdn_str == "" then msisdn_obj("__MMSMS_UNSET__") else msisdn_obj($new_msisdn_str) end
+         else
+           msisdn_obj("__MMSMS_UNSET__")
+         end;
+       mkentry($date; $label; new_msisdn_obj; $sent; $failed; $incoming)
+       + {history:[]}')"
     then
       rm -f "$tmp"
       echo_error "daily limit: failed to build counter JSON"
@@ -5821,12 +5972,14 @@ sms_daily_usage_refresh_global() {
   local entry_incoming
   local lock_handle
   local base_label
-  local base_msisdn
+  local msisdn_count
+  local msisdn_count_json
   local opt
 
   total_sent=0
   total_failed=0
   total_incoming=0
+  msisdn_count=0
 
   while (( $# > 0 ))
   do
@@ -5899,6 +6052,8 @@ sms_daily_usage_refresh_global() {
       continue
     fi
 
+    msisdn_count=$(( msisdn_count + 1 ))
+
     entry_sent=0
     entry_failed=0
     entry_incoming=0
@@ -5940,43 +6095,12 @@ sms_daily_usage_refresh_global() {
   fi
 
   base_label=""
-  base_msisdn=""
-  local base_msisdn_present
-  base_msisdn_present=0
   if ! sms_daily_state_read \
     --file "$global_file" \
     --out-label-var base_label \
-    --out-msisdn-var base_msisdn
+    --msisdn-key msisdn_count
   then
     base_label=""
-    base_msisdn=""
-  fi
-
-  if [[ -n "$base_msisdn" ]]
-  then
-    base_msisdn_present=1
-  fi
-
-  local msisdn_probe
-  if [[ -r "$global_file" ]]
-  then
-    if msisdn_probe="$(jq -r 'if has("msisdn") then (if (.msisdn == null) then "__MMSMS_NULL__" else (.msisdn | tostring) end) else "__MMSMS_MISSING__" end' "$global_file" 2>/dev/null)"
-    then
-      if [[ "$msisdn_probe" == "__MMSMS_NULL__" ]]
-      then
-        base_msisdn="null"
-        base_msisdn_present=1
-      elif [[ "$msisdn_probe" != "__MMSMS_MISSING__" ]]
-      then
-        base_msisdn="$msisdn_probe"
-        base_msisdn_present=1
-      fi
-    fi
-  fi
-
-  if (( ! base_msisdn_present ))
-  then
-    base_msisdn="null"
   fi
 
   if [[ -z "$base_label" ]]
@@ -5984,11 +6108,14 @@ sms_daily_usage_refresh_global() {
     base_label="global"
   fi
 
+  msisdn_count_json="$msisdn_count"
+
   if ! sms_daily_state_write_locked \
     --file "$global_file" \
     --date "$today" \
     --label "$base_label" \
-    --msisdn "${base_msisdn:-}" \
+    --msisdn-key msisdn_count \
+    --msisdn-json "$msisdn_count_json" \
     --sent "$total_sent" \
     --failed "$total_failed" \
     --incoming "$total_incoming"
@@ -6051,21 +6178,22 @@ sms_daily_usage_fix_global_state() {
 
   local state_date
   local state_label
-  local state_msisdn
   local state_sent
   local state_failed
   local state_incoming
   local state_history_json
-  local state_msisdn_present
-  local state_msisdn_raw
-  local msisdn_probe
+  local state_msisdn_json
   local msisdn_changed
+  local msisdn_entry_count
+  local new_msisdn_json
   state_sent=0
   state_failed=0
   state_incoming=0
   state_history_json="[]"
-  state_msisdn_present=0
+  state_msisdn_json="null"
   msisdn_changed=0
+  msisdn_entry_count=0
+  new_msisdn_json="null"
 
   if (( file_exists ))
   then
@@ -6073,11 +6201,11 @@ sms_daily_usage_fix_global_state() {
       --file "$global_file" \
       --out-date-var state_date \
       --out-label-var state_label \
-      --out-msisdn-var state_msisdn \
       --out-sent-var state_sent \
       --out-failed-var state_failed \
       --out-incoming-var state_incoming \
-      --out-history-json-var state_history_json
+      --out-history-json-var state_history_json \
+      --msisdn-key msisdn_count
     then
       :
     else
@@ -6085,37 +6213,16 @@ sms_daily_usage_fix_global_state() {
     fi
   fi
 
-  state_msisdn_raw="$state_msisdn"
-
-  if [[ -n "$state_msisdn" ]]
+  if (( file_exists )) && [[ -r "$global_file" ]]
   then
-    state_msisdn_present=1
-  fi
-
-  if (( file_exists ))
-  then
-    if msisdn_probe="$(jq -r 'if has("msisdn") then (if (.msisdn == null) then "__MMSMS_NULL__" else (.msisdn | tostring) end) else "__MMSMS_MISSING__" end' "$global_file" 2>/dev/null)"
+    local msisdn_probe
+    if msisdn_probe="$(jq -c 'if has("msisdn_count") then .msisdn_count elif has("msisdn") then .msisdn else "__MMSMS_MISSING__" end' "$global_file" 2>/dev/null)"
     then
-      if [[ "$msisdn_probe" == "__MMSMS_NULL__" ]]
+      if [[ "$msisdn_probe" != '"__MMSMS_MISSING__"' ]]
       then
-        state_msisdn="null"
-        state_msisdn_present=1
-      elif [[ "$msisdn_probe" != "__MMSMS_MISSING__" ]]
-      then
-        state_msisdn="$msisdn_probe"
-        state_msisdn_present=1
+        state_msisdn_json="$msisdn_probe"
       fi
     fi
-  fi
-
-  if (( ! state_msisdn_present ))
-  then
-    state_msisdn="null"
-  fi
-
-  if [[ "$state_msisdn" != "${state_msisdn_raw:-}" ]]
-  then
-    msisdn_changed=1
   fi
 
   if [[ ! "$state_sent" =~ ^-?[0-9]+$ ]]
@@ -6157,6 +6264,8 @@ sms_daily_usage_fix_global_state() {
       then
         continue
       fi
+
+      msisdn_entry_count=$(( msisdn_entry_count + 1 ))
 
       local entry_date
       local entry_sent
@@ -6297,6 +6406,13 @@ sms_daily_usage_fix_global_state() {
     shopt -u nullglob
   fi
 
+  new_msisdn_json="$msisdn_entry_count"
+
+  if [[ "$state_msisdn_json" != "$new_msisdn_json" ]]
+  then
+    msisdn_changed=1
+  fi
+
   local history_days_config
   history_days_config="$SMS_STATS_HISTORY_DAYS"
   if [[ ! "$history_days_config" =~ ^[0-9]+$ ]]
@@ -6389,7 +6505,8 @@ sms_daily_usage_fix_global_state() {
             --file "$global_file" \
             --date "$date_to_write" \
             --label "$write_label" \
-            --msisdn "${state_msisdn:-}" \
+            --msisdn-key msisdn_count \
+            --msisdn-json "$new_msisdn_json" \
             --sent "$write_sent" \
             --failed "$write_failed" \
             --incoming "$write_incoming"
@@ -6526,7 +6643,8 @@ sms_daily_usage_fix_global_state() {
       --file "$global_file" \
       --date "$selected_date" \
       --label "$write_label" \
-      --msisdn "${state_msisdn:-}" \
+      --msisdn-key msisdn_count \
+      --msisdn-json "$new_msisdn_json" \
       --sent "$new_sent" \
       --failed "$new_failed" \
       --incoming "$new_incoming"
@@ -9840,7 +9958,7 @@ sms_usage_stats() {
     then
       local history_sep
       history_sep=$'\x1f'
-      if history_lines="$(jq -r 'map([.date // "", .label // "", .msisdn // "", ((.outgoing.sent // 0) | tostring), ((.outgoing.failed // 0) | tostring), ((.incoming.received // 0) | tostring)] | join("\u001f"))[]' <<<"$history_json" 2>/dev/null)"
+      if history_lines="$(jq -r 'map([.date // "", .label // "", (if has("msisdn") then .msisdn elif has("msisdn_count") then (.msisdn_count | tostring) else "" end), ((.outgoing.sent // 0) | tostring), ((.outgoing.failed // 0) | tostring), ((.incoming.received // 0) | tostring)] | join("\u001f"))[]' <<<"$history_json" 2>/dev/null)"
       then
         if [[ -n "$history_lines" ]]
         then
