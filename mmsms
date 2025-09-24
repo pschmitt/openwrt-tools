@@ -6297,76 +6297,14 @@ sms_daily_usage_fix_global_state() {
     shopt -u nullglob
   fi
 
-  local selected_date
-  if [[ -n "$state_date" && -n "${aggregated_seen[$state_date]:-}" ]]
+  local history_days_config
+  history_days_config="$SMS_STATS_HISTORY_DAYS"
+  if [[ ! "$history_days_config" =~ ^[0-9]+$ ]]
   then
-    selected_date="$state_date"
-  fi
-
-  if [[ -z "$selected_date" ]]
+    history_days_config=7
+  elif (( history_days_config < 1 ))
   then
-    local candidate
-    for candidate in "${aggregated_order[@]}"
-    do
-      if [[ -z "$candidate" ]]
-      then
-        continue
-      fi
-
-      if [[ -z "$selected_date" || "$candidate" > "$selected_date" ]]
-      then
-        selected_date="$candidate"
-      fi
-    done
-  fi
-
-  if [[ -z "$selected_date" && -n "$state_history_json" && "$state_history_json" != "[]" ]]
-  then
-    local history_candidate
-    history_candidate="$(jq -r 'map(.date // empty) | map(select(. != "")) | .[0] // empty' <<<"$state_history_json" 2>/dev/null)"
-    if [[ -n "$history_candidate" ]]
-    then
-      selected_date="$history_candidate"
-    fi
-  fi
-
-  if [[ -z "$selected_date" && -n "$state_date" ]]
-  then
-    selected_date="$state_date"
-  fi
-
-  if [[ -z "$selected_date" ]]
-  then
-    selected_date="$(date +%Y-%m-%d)"
-  fi
-
-  local new_sent
-  local new_failed
-  local new_incoming
-  new_sent=0
-  new_failed=0
-  new_incoming=0
-
-  if [[ -n "$selected_date" && -n "${aggregated_seen[$selected_date]:-}" ]]
-  then
-    new_sent="${aggregated_sent[$selected_date]:-0}"
-    new_failed="${aggregated_failed[$selected_date]:-0}"
-    new_incoming="${aggregated_incoming[$selected_date]:-0}"
-  fi
-
-  if [[ ! "$new_sent" =~ ^-?[0-9]+$ ]]
-  then
-    new_sent=0
-  fi
-
-  if [[ ! "$new_failed" =~ ^-?[0-9]+$ ]]
-  then
-    new_failed=0
-  fi
-
-  if [[ ! "$new_incoming" =~ ^-?[0-9]+$ ]]
-  then
-    new_incoming=0
+    history_days_config=7
   fi
 
   local write_label
@@ -6376,49 +6314,227 @@ sms_daily_usage_fix_global_state() {
     write_label="global"
   fi
 
-  local needs_update
-  needs_update=0
-  if (( ! file_exists || file_empty ))
+  local rebuild_done
+  rebuild_done=0
+
+  local selected_date=""
+  local new_sent=0
+  local new_failed=0
+  local new_incoming=0
+
+  if (( ${#aggregated_order[@]} > 0 ))
   then
-    needs_update=1
+    local -a sorted_dates=()
+    if mapfile -t sorted_dates < <(printf '%s\n' "${aggregated_order[@]}" | sed '/^$/d' | sort)
+    then
+      :
+    else
+      sorted_dates=()
+    fi
+
+    local sorted_count=${#sorted_dates[@]}
+    if (( sorted_count > 0 ))
+    then
+      local history_days="$history_days_config"
+      if [[ ! "$history_days" =~ ^[0-9]+$ ]]
+      then
+        history_days=7
+      elif (( history_days < 1 ))
+      then
+        history_days=1
+      fi
+
+      local start_index=0
+      if (( sorted_count > history_days ))
+      then
+        start_index=$((sorted_count - history_days))
+      fi
+
+      local -a write_dates=()
+      local idx
+      for (( idx=start_index; idx<sorted_count; idx++ ))
+      do
+        if [[ -n "${sorted_dates[idx]}" ]]
+        then
+          write_dates+=("${sorted_dates[idx]}")
+        fi
+      done
+
+      if (( ${#write_dates[@]} > 0 ))
+      then
+        rebuild_done=1
+        rm -f "$global_file"
+
+        local date_to_write
+        for date_to_write in "${write_dates[@]}"
+        do
+          local write_sent="${aggregated_sent[$date_to_write]:-0}"
+          local write_failed="${aggregated_failed[$date_to_write]:-0}"
+          local write_incoming="${aggregated_incoming[$date_to_write]:-0}"
+
+          if [[ ! "$write_sent" =~ ^-?[0-9]+$ ]]
+          then
+            write_sent=0
+          fi
+          if [[ ! "$write_failed" =~ ^-?[0-9]+$ ]]
+          then
+            write_failed=0
+          fi
+          if [[ ! "$write_incoming" =~ ^-?[0-9]+$ ]]
+          then
+            write_incoming=0
+          fi
+
+          if ! sms_daily_state_write_locked \
+            --file "$global_file" \
+            --date "$date_to_write" \
+            --label "$write_label" \
+            --msisdn "${state_msisdn:-}" \
+            --sent "$write_sent" \
+            --failed "$write_failed" \
+            --incoming "$write_incoming"
+          then
+            sms_daily_limit_lock_release "$lock_handle"
+            echo_warning "daily usage: failed to repair global counter"
+            return 1
+          fi
+        done
+
+        selected_date="${write_dates[$(( ${#write_dates[@]} - 1 ))]}"
+        new_sent="${aggregated_sent[$selected_date]:-0}"
+        new_failed="${aggregated_failed[$selected_date]:-0}"
+        new_incoming="${aggregated_incoming[$selected_date]:-0}"
+
+        if [[ ! "$new_sent" =~ ^-?[0-9]+$ ]]
+        then
+          new_sent=0
+        fi
+        if [[ ! "$new_failed" =~ ^-?[0-9]+$ ]]
+        then
+          new_failed=0
+        fi
+        if [[ ! "$new_incoming" =~ ^-?[0-9]+$ ]]
+        then
+          new_incoming=0
+        fi
+      fi
+    fi
   fi
 
-  if [[ "$selected_date" != "${state_date:-}" ]]
+  if (( ! rebuild_done ))
   then
-    needs_update=1
-  elif (( new_sent != state_sent || new_failed != state_failed || new_incoming != state_incoming ))
-  then
-    needs_update=1
-  fi
+    if [[ -n "$state_date" && -n "${aggregated_seen[$state_date]:-}" ]]
+    then
+      selected_date="$state_date"
+    fi
 
-  if [[ "$write_label" != "${state_label:-}" ]]
-  then
-    needs_update=1
-  fi
+    if [[ -z "$selected_date" ]]
+    then
+      local candidate
+      for candidate in "${aggregated_order[@]}"
+      do
+        if [[ -z "$candidate" ]]
+        then
+          continue
+        fi
 
-  if (( msisdn_changed ))
-  then
-    needs_update=1
-  fi
+        if [[ -z "$selected_date" || "$candidate" > "$selected_date" ]]
+        then
+          selected_date="$candidate"
+        fi
+      done
+    fi
 
-  if (( ! needs_update ))
-  then
-    sms_daily_limit_lock_release "$lock_handle"
-    return 0
-  fi
+    if [[ -z "$selected_date" && -n "$state_history_json" && "$state_history_json" != "[]" ]]
+    then
+      local history_candidate
+      history_candidate="$(jq -r 'map(.date // empty) | map(select(. != "")) | .[0] // empty' <<<"$state_history_json" 2>/dev/null)"
+      if [[ -n "$history_candidate" ]]
+      then
+        selected_date="$history_candidate"
+      fi
+    fi
 
-  if ! sms_daily_state_write_locked \
-    --file "$global_file" \
-    --date "$selected_date" \
-    --label "$write_label" \
-    --msisdn "${state_msisdn:-}" \
-    --sent "$new_sent" \
-    --failed "$new_failed" \
-    --incoming "$new_incoming"
-  then
-    sms_daily_limit_lock_release "$lock_handle"
-    echo_warning "daily usage: failed to repair global counter"
-    return 1
+    if [[ -z "$selected_date" && -n "$state_date" ]]
+    then
+      selected_date="$state_date"
+    fi
+
+    if [[ -z "$selected_date" ]]
+    then
+      selected_date="$(date +%Y-%m-%d)"
+    fi
+
+    new_sent=0
+    new_failed=0
+    new_incoming=0
+
+    if [[ -n "$selected_date" && -n "${aggregated_seen[$selected_date]:-}" ]]
+    then
+      new_sent="${aggregated_sent[$selected_date]:-0}"
+      new_failed="${aggregated_failed[$selected_date]:-0}"
+      new_incoming="${aggregated_incoming[$selected_date]:-0}"
+    fi
+
+    if [[ ! "$new_sent" =~ ^-?[0-9]+$ ]]
+    then
+      new_sent=0
+    fi
+
+    if [[ ! "$new_failed" =~ ^-?[0-9]+$ ]]
+    then
+      new_failed=0
+    fi
+
+    if [[ ! "$new_incoming" =~ ^-?[0-9]+$ ]]
+    then
+      new_incoming=0
+    fi
+
+    local needs_update
+    needs_update=0
+    if (( ! file_exists || file_empty ))
+    then
+      needs_update=1
+    fi
+
+    if [[ "$selected_date" != "${state_date:-}" ]]
+    then
+      needs_update=1
+    elif (( new_sent != state_sent || new_failed != state_failed || new_incoming != state_incoming ))
+    then
+      needs_update=1
+    fi
+
+    if [[ "$write_label" != "${state_label:-}" ]]
+    then
+      needs_update=1
+    fi
+
+    if (( msisdn_changed ))
+    then
+      needs_update=1
+    fi
+
+    if (( ! needs_update ))
+    then
+      sms_daily_limit_lock_release "$lock_handle"
+      return 0
+    fi
+
+    if ! sms_daily_state_write_locked \
+      --file "$global_file" \
+      --date "$selected_date" \
+      --label "$write_label" \
+      --msisdn "${state_msisdn:-}" \
+      --sent "$new_sent" \
+      --failed "$new_failed" \
+      --incoming "$new_incoming"
+    then
+      sms_daily_limit_lock_release "$lock_handle"
+      echo_warning "daily usage: failed to repair global counter"
+      return 1
+    fi
   fi
 
   sms_daily_limit_lock_release "$lock_handle"
