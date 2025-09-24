@@ -79,8 +79,10 @@ ENABLE_WAIT_TIMEOUT="${ENABLE_WAIT_TIMEOUT:-0}"
 
 WEBHOOK_URL="${WEBHOOK_URL:-}"
 
-WATCH_DELETE_AFTER="${WATCH_DELETE_AFTER:-${DELETE_AFTER:-0}}"
-WATCH_DELETE_AFTER_CLI_OVERRIDE=""
+WATCH_DELETE_SENT="${WATCH_DELETE_SENT:-0}"
+WATCH_DELETE_RECEIVED="${WATCH_DELETE_RECEIVED:-${WATCH_DELETE_AFTER:-${DELETE_AFTER:-0}}}"
+WATCH_DELETE_SENT_CLI_OVERRIDE=""
+WATCH_DELETE_RECEIVED_CLI_OVERRIDE=""
 WATCH_RETRY_SLEEP="${RETRY_SLEEP:-1}"
 WATCH_CMD_TIMEOUT="${CMD_TIMEOUT:-8}"
 WATCH_CMD_KILL_TIMEOUT="${WATCH_CMD_KILL_TIMEOUT:-${CMD_KILL_TIMEOUT:-20}}"
@@ -673,7 +675,7 @@ USAGE
 # Print usage details for the watch subcommand.
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT|infinite] [-k|--dry-run] [--delete-sent]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT|infinite] [-k|--dry-run] [--delete-sent] [--delete-received] [--delete]
 
 Watches incoming SMS and executes reply/webhook logic.
 
@@ -687,7 +689,9 @@ Relevant flags:
   -P, --prune           Delete existing SMS on startup before watching
   -R, --retry COUNT     Override SMS resend attempts
   -k, --dry-run         Log reply details without sending
-      --delete-sent     Delete SMS from the modem after handling (default: keep)
+      --delete-sent     Delete sent SMS before sending replies (default: keep)
+      --delete-received Delete processed incoming SMS (default: keep)
+      --delete          Enable both --delete-sent and --delete-received
 USAGE
 }
 
@@ -1832,8 +1836,24 @@ parse_watch_args() {
         ;;
       --delete-sent)
         DEBUG_FLAGS+=("$flag_name")
-        WATCH_DELETE_AFTER=1
-        WATCH_DELETE_AFTER_CLI_OVERRIDE=1
+        WATCH_DELETE_SENT=1
+        WATCH_DELETE_SENT_CLI_OVERRIDE=1
+        shift
+        continue
+        ;;
+      --delete-received)
+        DEBUG_FLAGS+=("$flag_name")
+        WATCH_DELETE_RECEIVED=1
+        WATCH_DELETE_RECEIVED_CLI_OVERRIDE=1
+        shift
+        continue
+        ;;
+      --delete)
+        DEBUG_FLAGS+=("$flag_name")
+        WATCH_DELETE_SENT=1
+        WATCH_DELETE_RECEIVED=1
+        WATCH_DELETE_SENT_CLI_OVERRIDE=1
+        WATCH_DELETE_RECEIVED_CLI_OVERRIDE=1
         shift
         continue
         ;;
@@ -10841,8 +10861,11 @@ watch_handle_sms() {
           output="$(jq -r '.output' <<<"$cmd_result")"
           cmd_header="$(jq -cr '{cmd, rc, status, date}' <<<"$cmd_result")"
           echo_info "command from $sender finished rc=$rc status=$status"
-          # Before sending our reply, prune already-sent messages on this modem
-          sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
+          if (( WATCH_DELETE_SENT == 1 ))
+          then
+            # Before sending our reply, prune already-sent messages on this modem
+            sms_prune_sent || echo_warning "failed to prune sent SMS before reply"
+          fi
           watch_send_reply "$sender" "${cmd_header}\n${output:-*no output*}"
         fi
 
@@ -10895,7 +10918,7 @@ watch_handle_sms() {
       fi
     fi
 
-    if (( WATCH_DELETE_AFTER == 1 ))
+    if (( WATCH_DELETE_RECEIVED == 1 ))
     then
       if ! mmcli_cmd --messaging-delete-sms="$id" >/dev/null
       then
@@ -11390,9 +11413,13 @@ main() {
     return $?
   fi
 
-  if [[ "$command" == "watch" && -n "$WATCH_DELETE_AFTER_CLI_OVERRIDE" ]]
+  if [[ "$command" == "watch" && -n "$WATCH_DELETE_SENT_CLI_OVERRIDE" ]]
   then
-    WATCH_DELETE_AFTER=1
+    WATCH_DELETE_SENT=1
+  fi
+  if [[ "$command" == "watch" && -n "$WATCH_DELETE_RECEIVED_CLI_OVERRIDE" ]]
+  then
+    WATCH_DELETE_RECEIVED=1
   fi
 
   if [[ -n "$RAW_OUTPUT_FORCED" ]]
