@@ -1031,8 +1031,7 @@ parse_at_args() {
         ;;
       *)
         parse_common_option "$arg" "$provided_value"
-        local status
-        status=$?
+        local status=$?
         if (( status == 0 ))
         then
           if (( PARSE_SHIFT > 0 ))
@@ -1175,8 +1174,7 @@ parse_send_args() {
         ;;
       *)
         parse_common_option "$arg" "$provided_value"
-        local status
-        status=$?
+        local status=$?
         if (( status == 0 ))
         then
           if (( PARSE_SHIFT > 0 ))
@@ -1496,8 +1494,7 @@ parse_enable_args() {
         ;;
       *)
         parse_common_option "$arg" "$provided_value"
-        local status
-        status=$?
+        local status=$?
         if (( status == 0 ))
         then
           if (( PARSE_SHIFT > 0 ))
@@ -1851,8 +1848,7 @@ parse_watch_args() {
         ;;
       *)
         parse_common_option "$arg" "$provided_value"
-        local status
-        status=$?
+        local status=$?
         if (( status == 0 ))
         then
           if (( PARSE_SHIFT > 0 ))
@@ -2081,8 +2077,7 @@ parse_stats_args() {
         ;;
       *)
         parse_common_option "$arg" "$provided_value"
-        local status
-        status=$?
+        local status=$?
         if (( status == 0 ))
         then
           if (( PARSE_SHIFT > 0 ))
