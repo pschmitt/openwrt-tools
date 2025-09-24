@@ -5941,6 +5941,8 @@ sms_daily_usage_refresh_global() {
 
   base_label=""
   base_msisdn=""
+  local base_msisdn_present
+  base_msisdn_present=0
   if ! sms_daily_state_read \
     --file "$global_file" \
     --out-label-var base_label \
@@ -5948,6 +5950,33 @@ sms_daily_usage_refresh_global() {
   then
     base_label=""
     base_msisdn=""
+  fi
+
+  if [[ -n "$base_msisdn" ]]
+  then
+    base_msisdn_present=1
+  fi
+
+  local msisdn_probe
+  if [[ -r "$global_file" ]]
+  then
+    if msisdn_probe="$(jq -r 'if has("msisdn") then (if (.msisdn == null) then "__MMSMS_NULL__" else (.msisdn | tostring) end) else "__MMSMS_MISSING__" end' "$global_file" 2>/dev/null)"
+    then
+      if [[ "$msisdn_probe" == "__MMSMS_NULL__" ]]
+      then
+        base_msisdn="null"
+        base_msisdn_present=1
+      elif [[ "$msisdn_probe" != "__MMSMS_MISSING__" ]]
+      then
+        base_msisdn="$msisdn_probe"
+        base_msisdn_present=1
+      fi
+    fi
+  fi
+
+  if (( ! base_msisdn_present ))
+  then
+    base_msisdn="null"
   fi
 
   if [[ -z "$base_label" ]]
@@ -6027,14 +6056,20 @@ sms_daily_usage_fix_global_state() {
   local state_failed
   local state_incoming
   local state_history_json
+  local state_msisdn_present
+  local state_msisdn_raw
+  local msisdn_probe
+  local msisdn_changed
   state_sent=0
   state_failed=0
   state_incoming=0
   state_history_json="[]"
+  state_msisdn_present=0
+  msisdn_changed=0
 
   if (( file_exists ))
   then
-    if ! sms_daily_state_read \
+    if sms_daily_state_read \
       --file "$global_file" \
       --out-date-var state_date \
       --out-label-var state_label \
@@ -6044,10 +6079,43 @@ sms_daily_usage_fix_global_state() {
       --out-incoming-var state_incoming \
       --out-history-json-var state_history_json
     then
-      sms_daily_limit_lock_release "$lock_handle"
+      :
+    else
       echo_warning "daily usage: failed to read global counter while repairing"
-      return 1
     fi
+  fi
+
+  state_msisdn_raw="$state_msisdn"
+
+  if [[ -n "$state_msisdn" ]]
+  then
+    state_msisdn_present=1
+  fi
+
+  if (( file_exists ))
+  then
+    if msisdn_probe="$(jq -r 'if has("msisdn") then (if (.msisdn == null) then "__MMSMS_NULL__" else (.msisdn | tostring) end) else "__MMSMS_MISSING__" end' "$global_file" 2>/dev/null)"
+    then
+      if [[ "$msisdn_probe" == "__MMSMS_NULL__" ]]
+      then
+        state_msisdn="null"
+        state_msisdn_present=1
+      elif [[ "$msisdn_probe" != "__MMSMS_MISSING__" ]]
+      then
+        state_msisdn="$msisdn_probe"
+        state_msisdn_present=1
+      fi
+    fi
+  fi
+
+  if (( ! state_msisdn_present ))
+  then
+    state_msisdn="null"
+  fi
+
+  if [[ "$state_msisdn" != "${state_msisdn_raw:-}" ]]
+  then
+    msisdn_changed=1
   fi
 
   if [[ ! "$state_sent" =~ ^-?[0-9]+$ ]]
@@ -6324,6 +6392,11 @@ sms_daily_usage_fix_global_state() {
   fi
 
   if [[ "$write_label" != "${state_label:-}" ]]
+  then
+    needs_update=1
+  fi
+
+  if (( msisdn_changed ))
   then
     needs_update=1
   fi
