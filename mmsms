@@ -103,6 +103,7 @@ SENT_ONLY="${SENT_ONLY:-}"
 ALLOW_FOREIGN="${ALLOW_FOREIGN:-}"
 HOME_CC="${HOME_CC:-}"
 FALLBACK="${FALLBACK:-}"
+CRITICAL_SEND="${CRITICAL_SEND:-}"
 AUTO_RECIPIENT="${AUTO_RECIPIENT:-}"
 PULL_NO_RESTART="${PULL_NO_RESTART:-}"
 PULL_HARD_RESET="${PULL_HARD_RESET:-}"
@@ -166,6 +167,27 @@ add_skip_modem_init_pattern() {
   done
 
   SKIP_MODEM_INIT_PATTERNS+=("$pattern")
+}
+
+# Return success when the provided retry count value represents infinite retries.
+sms_retry_is_infinite_value() {
+  local value="${1:-}"
+  value="${value,,}"
+  [[ "$value" == "infinite" || "$value" == "inf" ]]
+}
+
+# Format retry progress for logging, displaying "attempt X/infinite" when unlimited.
+sms_retry_attempt_progress() {
+  local attempt="$1"
+  local unlimited="$2"
+  local limit="$3"
+
+  if (( unlimited ))
+  then
+    printf '%s/infinite' "$attempt"
+  else
+    printf '%s/%s' "$attempt" "$limit"
+  fi
 }
 
 # Populate skip-modem-init patterns from config variables and formats.
@@ -440,6 +462,7 @@ Options:
       --data-dir PATH   Override SMS data directory (MMMSMS_DATA_DIR)
   -d, --debug           Enable debug output
   -F, --fallback        Send/Watch: on failure, try other modem(s)
+      --critical        Send: retry across modem(s) until success (enables fallback and infinite retries)
       --chunk[=SIZE]   Send: split SMS text into SIZE-character chunks (default: 160)
   -f, --allow-foreign   Send: allow sending to foreign country codes
   -H, --hard            Reset: also stop/start modemmanager (hard reset)
@@ -452,7 +475,8 @@ Options:
   -q, --quiet           Suppress info output (warnings/errors only) and status output (exit code only)
       --silent          Same as --quiet
   -r, --raw             Use mmcli output format; combine with --json for raw mmcli JSON
-  -R, --retry COUNT     Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
+  -R, --retry COUNT|infinite
+                        Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
   -s, --syslog          Mirror logs to syslog (in addition to stderr)
   -S, --sent            Prune: delete only sent outgoing messages
       --skip-modem-init PATTERN
@@ -513,9 +537,11 @@ Relevant flags:
   -A, --auto           During fallback, use modem default recipient if original blocked (cc restriction)
   -c, --config PATH    Load config for defaults (only needed outside 'watch')
   -F, --fallback       Try other modems on failure (sorted by id)
+      --critical       Retry across modem(s) until success (enables fallback and infinite retries)
       --chunk[=SIZE]   Split message into SIZE-character chunks (default: 160 when omitted)
   -f, --allow-foreign  Allow sending outside the modem's home country code
-  -R, --retry COUNT    Override SMS resend attempts
+  -R, --retry COUNT|infinite
+                        Override SMS resend attempts
 USAGE
 }
 
@@ -644,7 +670,7 @@ USAGE
 # Print usage details for the watch subcommand.
 usage_watch() {
   cat <<USAGE
-Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT] [--delete-sent]
+Usage: $SCRIPT_NAME [GLOBAL OPTIONS] watch [-A|--auto-recipient] [-a|--all] [-c|--config PATH] [-E|--enable] [-F|--fallback] [-f|--allow-foreign] [-P|--prune] [-R|--retry COUNT|infinite] [--delete-sent]
 
 Watches incoming SMS and executes reply/webhook logic.
 
@@ -656,7 +682,8 @@ Relevant flags:
   -F, --fallback      When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign Allow replies to recipients outside the modem's home CC
   -P, --prune         Delete existing SMS on startup before watching
-  -R, --retry COUNT   Override SMS resend attempts
+  -R, --retry COUNT|infinite
+                      Override SMS resend attempts
       --delete-sent   Delete SMS from the modem after handling (default: keep)
 USAGE
 }
@@ -944,6 +971,8 @@ parse_at_args() {
 parse_send_args() {
   PARSED_ARGS=()
   local -a out=()
+  local retry_value
+  local retry_lower
 
   while (( $# > 0 ))
   do
@@ -962,6 +991,14 @@ parse_send_args() {
       -F|--fallback)
         DEBUG_FLAGS+=("$1")
         FALLBACK=1
+        shift
+        continue
+        ;;
+      --critical)
+        DEBUG_FLAGS+=("$1")
+        CRITICAL_SEND=1
+        FALLBACK=1
+        SMS_RETRY_COUNT="infinite"
         shift
         continue
         ;;
@@ -1012,13 +1049,20 @@ parse_send_args() {
           echo_error "missing value for $1"
           return 2
         fi
-        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        retry_value="$2"
+        retry_lower="${retry_value,,}"
+        if [[ "$retry_lower" == "infinite" || "$retry_lower" == "inf" ]]
         then
-          echo_error "--retry requires a non-negative integer"
+          DEBUG_FLAGS+=("$1=infinite")
+          SMS_RETRY_COUNT="infinite"
+        elif [[ "$retry_value" =~ ^[0-9]+$ ]]
+        then
+          DEBUG_FLAGS+=("$1=$retry_value")
+          SMS_RETRY_COUNT="$retry_value"
+        else
+          echo_error "--retry requires a non-negative integer or 'infinite'"
           return 2
         fi
-        DEBUG_FLAGS+=("$1=$2")
-        SMS_RETRY_COUNT="$2"
         shift 2
         continue
         ;;
@@ -1579,6 +1623,8 @@ parse_reset_args() {
 parse_watch_args() {
   PARSED_ARGS=()
   local -a out=()
+  local retry_value
+  local retry_lower
 
   while (( $# > 0 ))
   do
@@ -1630,13 +1676,20 @@ parse_watch_args() {
           echo_error "missing value for $1"
           return 2
         fi
-        if [[ ! "$2" =~ ^[0-9]+$ ]]
+        retry_value="$2"
+        retry_lower="${retry_value,,}"
+        if [[ "$retry_lower" == "infinite" || "$retry_lower" == "inf" ]]
         then
-          echo_error "--retry requires a non-negative integer"
+          DEBUG_FLAGS+=("$1=infinite")
+          SMS_RETRY_COUNT="infinite"
+        elif [[ "$retry_value" =~ ^[0-9]+$ ]]
+        then
+          DEBUG_FLAGS+=("$1=$retry_value")
+          SMS_RETRY_COUNT="$retry_value"
+        else
+          echo_error "--retry requires a non-negative integer or 'infinite'"
           return 2
         fi
-        DEBUG_FLAGS+=("$1=$2")
-        SMS_RETRY_COUNT="$2"
         shift 2
         continue
         ;;
@@ -7363,44 +7416,59 @@ sms_send_chunk_text() {
   fi
 
   local create_attempt=1
-  local max_attempts=$SMS_RETRY_COUNT
   local rc=1
+  local retry_value="$SMS_RETRY_COUNT"
+  if [[ -n "${SMS_RETRY_COUNT_OVERRIDE:-}" ]]
+  then
+    retry_value="$SMS_RETRY_COUNT_OVERRIDE"
+  fi
 
-  # Create the SMS first (retrying creation only if creation itself fails)
-  if (( max_attempts < 1 ))
+  local retry_unlimited=0
+  local max_attempts=0
+  local attempt_note
+  if sms_retry_is_infinite_value "$retry_value"
+  then
+    retry_unlimited=1
+  else
+    max_attempts="$retry_value"
+  fi
+
+  if (( ! retry_unlimited )) && (( max_attempts < 1 ))
   then
     max_attempts=1
   fi
 
   local create_json
-  while (( create_attempt <= max_attempts ))
+  while (( retry_unlimited )) || (( create_attempt <= max_attempts ))
   do
     sms_id=""
     if ! create_json="$(mmcli_cmd -J --messaging-create-sms="number=${recipient}${smsc_params}" \
       --messaging-create-sms-with-text="$tmpfile")"
     then
-      if (( create_attempt >= max_attempts ))
+      if (( ! retry_unlimited )) && (( create_attempt >= max_attempts ))
       then
         echo_error "failed to create SMS${chunk_label} after $max_attempts attempts"
         rm -f "$tmpfile"
         return 1
       fi
 
-      echo_warning "failed to create SMS${chunk_label} (attempt $create_attempt/$max_attempts), retrying"
+      attempt_note="$(sms_retry_attempt_progress "$create_attempt" "$retry_unlimited" "$max_attempts")"
+      echo_warning "failed to create SMS${chunk_label} (attempt $attempt_note), retrying"
       create_attempt=$((create_attempt + 1))
       continue
     fi
 
     if ! sms_id="$(jq -er '.modem.messaging["created-sms"] // empty' <<<"$create_json")"
     then
-      if (( create_attempt == max_attempts ))
+      if (( ! retry_unlimited )) && (( create_attempt == max_attempts ))
       then
         echo_error "failed to create SMS${chunk_label} after $max_attempts attempts"
         rm -f "$tmpfile"
         return 1
       fi
 
-      echo_warning "received empty SMS id${chunk_label} (attempt $create_attempt/$max_attempts), retrying"
+      attempt_note="$(sms_retry_attempt_progress "$create_attempt" "$retry_unlimited" "$max_attempts")"
+      echo_warning "received empty SMS id${chunk_label} (attempt $attempt_note), retrying"
       create_attempt=$((create_attempt + 1))
       continue
     fi
@@ -7409,12 +7477,7 @@ sms_send_chunk_text() {
 
   # Now retry only the send step for the created SMS id
   local send_attempt=1
-  if (( max_attempts < 1 ))
-  then
-    max_attempts=1
-  fi
-
-  while (( send_attempt <= max_attempts ))
+  while (( retry_unlimited )) || (( send_attempt <= max_attempts ))
   do
     if mmcli_cmd --sms "$sms_id" --send --timeout="$SMS_SEND_TIMEOUT"
     then
@@ -7423,13 +7486,14 @@ sms_send_chunk_text() {
       break
     fi
 
-    if (( send_attempt >= max_attempts ))
+    if (( ! retry_unlimited )) && (( send_attempt >= max_attempts ))
     then
       echo_error "failed to send SMS '${sms_id}'${chunk_label} after $max_attempts attempts"
       break
     fi
 
-    echo_warning "failed to send SMS '${sms_id}'${chunk_label} (attempt $send_attempt/$max_attempts), retrying"
+    attempt_note="$(sms_retry_attempt_progress "$send_attempt" "$retry_unlimited" "$max_attempts")"
+    echo_warning "failed to send SMS '${sms_id}'${chunk_label} (attempt $attempt_note), retrying"
     send_attempt=$((send_attempt + 1))
   done
 
@@ -7474,16 +7538,15 @@ sms_send_with_fallback() {
   local args=("$@")
   local recipient
   local text
+  local fallback_retry_unlimited=0
+  local SMS_RETRY_COUNT_OVERRIDE
+  local -a mids=()
+  local mid
 
-  # First attempt with the original arguments
-  if sms_send "${orig_args[@]}"
+  if [[ -n "$FALLBACK" ]] && sms_retry_is_infinite_value "$SMS_RETRY_COUNT"
   then
-    return 0
-  fi
-
-  if [[ -z "$FALLBACK" ]]
-  then
-    return 1
+    fallback_retry_unlimited=1
+    SMS_RETRY_COUNT_OVERRIDE="1"
   fi
 
   # Parse optional recipient from arguments
@@ -7520,99 +7583,115 @@ sms_send_with_fallback() {
   local orig_recipient_default_flag="${SMS_LAST_RECIPIENT_FROM_DEFAULT:-0}"
   recipient="$resolved_recipient"
 
-  # Gather other modems
-  local cur_id="$MODEM"
-
-  if [[ "$cur_id" == "any" ]]
-  then
-    local _j
-    if _j="$(mmcli_cmd -J)"
-    then
-      cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
-    fi
-  fi
-
-  local mids
-  if ! mapfile -t mids < <(list_modem_ids_sorted)
-  then
-    return 1
-  fi
-
-  local mid
-  for mid in "${mids[@]}"
+  while :
   do
-    [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
-    local prev_mode="$MODEM"
-    MODEM="$mid"
-    local candidate_recipient="$recipient"
-    local used_auto
-    local auto_tried=0
-
-    if ! recipient_allowed_for_modem "$candidate_recipient" "$mid"
+    if sms_send "${orig_args[@]}"
     then
-      if [[ -n "$AUTO_RECIPIENT" && "$orig_recipient_default_flag" == "1" ]]
+      return 0
+    fi
+
+    if [[ -z "$FALLBACK" ]]
+    then
+      return 1
+    fi
+
+    local cur_id="$MODEM"
+
+    if [[ "$cur_id" == "any" ]]
+    then
+      local _j
+      if _j="$(mmcli_cmd -J)"
       then
-        auto_tried=1
-        local auto_recipient
-        if auto_recipient="$(resolve_default_recipient "$mid")"
+        cur_id="$(jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$_j")"
+      fi
+    fi
+
+    if ! mapfile -t mids < <(list_modem_ids_sorted)
+    then
+      return 1
+    fi
+
+    for mid in "${mids[@]}"
+    do
+      [[ -z "$mid" || "$mid" == "$cur_id" ]] && continue
+      local prev_mode="$MODEM"
+      MODEM="$mid"
+      local candidate_recipient="$recipient"
+      local used_auto
+      local auto_tried=0
+
+      if ! recipient_allowed_for_modem "$candidate_recipient" "$mid"
+      then
+        if [[ -n "$AUTO_RECIPIENT" && "$orig_recipient_default_flag" == "1" ]]
         then
-          auto_recipient="${auto_recipient//[[:space:]]/}"
-          auto_recipient="$(ensure_plus "$auto_recipient")"
-        else
-          auto_recipient=""
+          auto_tried=1
+          local auto_recipient
+          if auto_recipient="$(resolve_default_recipient "$mid")"
+          then
+            auto_recipient="${auto_recipient//[[:space:]]/}"
+            auto_recipient="$(ensure_plus "$auto_recipient")"
+          else
+            auto_recipient=""
+          fi
+
+          if [[ -n "$auto_recipient" ]] && ! recipient_allowed_for_modem "$auto_recipient" "$mid"
+          then
+            auto_recipient=""
+          fi
+
+          if [[ -n "$auto_recipient" ]]
+          then
+            candidate_recipient="$auto_recipient"
+            used_auto=1
+          fi
         fi
 
-        if [[ -n "$auto_recipient" ]] && ! recipient_allowed_for_modem "$auto_recipient" "$mid"
+        if [[ -z "$used_auto" ]]
         then
-          auto_recipient=""
-        fi
-
-        if [[ -n "$auto_recipient" ]]
-        then
-          candidate_recipient="$auto_recipient"
-          used_auto=1
+          local info
+          info="$(modem_info_brief)"
+          if [[ "$auto_tried" == 1 ]]
+          then
+            echo_warning "fallback: modem=$info has no eligible default recipient (auto-recipient unavailable)"
+          else
+            echo_warning "fallback: cannot use modem=$info for recipient $recipient (foreign not allowed; use --allow-foreign)"
+          fi
+          MODEM="$prev_mode"
+          continue
         fi
       fi
 
-      if [[ -z "$used_auto" ]]
+      if [[ -n "$used_auto" ]]
       then
         local info
         info="$(modem_info_brief)"
-        if [[ "$auto_tried" == 1 ]]
-        then
-          echo_warning "fallback: modem=$info has no eligible default recipient (auto-recipient unavailable)"
-        else
-          echo_warning "fallback: cannot use modem=$info for recipient $recipient (foreign not allowed; use --allow-foreign)"
-        fi
-        MODEM="$prev_mode"
-        continue
+        echo_info "fallback: using modem=$info default_recipient='$candidate_recipient'"
       fi
-    fi
 
-    if [[ -n "$used_auto" ]]
-    then
-      local info
-      info="$(modem_info_brief)"
-      echo_info "fallback: using modem=$info default_recipient='$candidate_recipient'"
-    fi
+      echo_debug "fallback: sending text='$text'"
+      echo_debug "fallback: trying modem $mid"
 
-    echo_debug "fallback: sending text='$text'"
-    echo_debug "fallback: trying modem $mid"
+      if sms_send "$candidate_recipient" "$text"
+      then
+        local info
+        info="$(modem_info_brief)"
+        MODEM="$prev_mode"
 
-    if sms_send "$candidate_recipient" "$text"
-    then
-      local info
-      info="$(modem_info_brief)"
+        echo_info "fallback send succeeded using modem=$info"
+        return 0
+      fi
       MODEM="$prev_mode"
+    done
 
-      echo_info "fallback send succeeded using modem=$info"
-      return 0
+    if (( fallback_retry_unlimited ))
+    then
+      echo_warning "fallback: no eligible modem could send the message (retrying)"
+      continue
     fi
-    MODEM="$prev_mode"
-  done
 
-  echo_warning "fallback: no eligible modem could send the message"
-  return 1
+    echo_warning "fallback: no eligible modem could send the message"
+    return 1
+  done
 }
 
 # Delete all SMS messages on the currently selected modem.
@@ -10481,11 +10560,19 @@ watch_handle_sms() {
       return
     fi
 
-    if [[ -z "$text" && $tries -lt $SMS_RETRY_COUNT ]]
+    if [[ -z "$text" ]]
     then
-      tries=$((tries + 1))
-      sleep "$WATCH_RETRY_SLEEP"
-      continue
+      if sms_retry_is_infinite_value "$SMS_RETRY_COUNT"
+      then
+        tries=$((tries + 1))
+        sleep "$WATCH_RETRY_SLEEP"
+        continue
+      elif (( tries < SMS_RETRY_COUNT ))
+      then
+        tries=$((tries + 1))
+        sleep "$WATCH_RETRY_SLEEP"
+        continue
+      fi
     fi
 
     # Determine recipient (SIM MSISDN) for the modem that received the SMS
@@ -11059,6 +11146,12 @@ main() {
   if [[ -n "$JSON_OUTPUT_FORCED" ]]
   then
     JSON_OUTPUT=1
+  fi
+
+  if [[ "$command" == "send" && -n "$CRITICAL_SEND" ]]
+  then
+    FALLBACK=1
+    SMS_RETRY_COUNT="infinite"
   fi
 
   if command_requires_modem_resolution "$command"
