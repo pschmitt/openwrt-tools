@@ -5285,7 +5285,7 @@ sms_daily_limit_lock_acquire() {
   local max_attempts=50
   while ! ( set -o noclobber; : >"$lock_path" ) 2>/dev/null
   do
-    sleep 0.1
+    sleep 1
     attempts=$((attempts + 1))
     if (( attempts >= max_attempts ))
     then
