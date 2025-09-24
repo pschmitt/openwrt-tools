@@ -13,8 +13,8 @@ MODEM="${MODEM:-any}"
 ALL_MODEMS="${ALL_MODEMS:-}"
 DEFAULT_MODEM="${DEFAULT_MODEM:-}"
 
-OWN_NUMBER="${OWN_NUMBER:-}"
-SMSC_NUMBER="${SMSC_NUMBER:-}"
+declare -A MODEM_OWN_NUMBER_CACHE=()
+declare -A MODEM_SMSC_NUMBER_CACHE=()
 
 SMS_SEND_TIMEOUT="${SMS_SEND_TIMEOUT:-30}"
 SMS_RETRY_COUNT="${SMS_RETRY_COUNT:-${SMS_SEND_RETRY_COUNT:-${MAX_RETRY:-3}}}"
@@ -2119,7 +2119,7 @@ country_to_cc() {
 # Determine the home country code for E.164 numbers
 # Priority:
 #  - HOME_CC if set (digits only, e.g., 49)
-#  - Derive from OWN_NUMBER (heuristic: +1 -> 1, otherwise first two digits)
+#  - Derive from the modem's own number (heuristic: +1 -> 1, otherwise first two digits)
 get_home_cc() {
   local target_mid="${1:-}"
   local cc
@@ -2130,23 +2130,19 @@ get_home_cc() {
     return 0
   fi
 
-  # Prefer using load_own_number to respect current MODEM context
-  local own
+  # Prefer using query_modem_number to respect current MODEM context
+  local own=""
   if [[ -n "$target_mid" ]]
   then
-    if MODEM="$target_mid" load_own_number
-    then
-      own="$OWN_NUMBER"
-    fi
-  elif load_own_number
-  then
-    own="$OWN_NUMBER"
+    own="$(query_modem_number "$target_mid")" || own=""
+  else
+    own="$(query_modem_number)" || own=""
   fi
 
   if [[ -z "$own" ]]
   then
     # Fallback to direct mmcli parsing
-    local j
+    local j=""
 
     if [[ -n "$target_mid" ]]
     then
@@ -2157,7 +2153,18 @@ get_home_cc() {
 
     if [[ -n "$j" ]]
     then
-      own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j")"
+      own="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$j" 2>/dev/null)"
+      own="$(ensure_plus "$own")"
+      if [[ -n "$own" ]]
+      then
+        local actual_id
+        actual_id="$(modem_json_extract_id "$j")"
+        remember_modem_own_number "$target_mid" "$own"
+        if [[ -n "$actual_id" && "$actual_id" != "$target_mid" ]]
+        then
+          remember_modem_own_number "$actual_id" "$own"
+        fi
+      fi
     fi
   fi
 
@@ -3629,9 +3636,11 @@ sms_read_details_json() {
   number="$(jq -r '.sms.content.number // ""' <<<"$js")"
   number="$(ensure_plus "$number")"
 
-  if load_own_number
+  if own="$(query_modem_number)"
   then
-    own="$OWN_NUMBER"
+    :
+  else
+    own=""
   fi
   own="$(ensure_plus "$own")"
 
@@ -4070,6 +4079,9 @@ sms_daily_limit_identity() {
   local label
   local modem_hint
   local info_json
+  local mmcli_number
+  local info_modem_id
+  local cached_number
 
   SMS_DAILY_LIMIT_MSISDN=""
   SMS_DAILY_LIMIT_KEY=""
@@ -4094,14 +4106,13 @@ sms_daily_limit_identity() {
     label="$SMS_DAILY_LIMIT_MSISDN"
   fi
 
+  local modem_own
   if [[ -z "$label" ]]
   then
-    if load_own_number
+    modem_own="$(query_modem_number)" || modem_own=""
+    if [[ -n "$modem_own" ]]
     then
-      if [[ -n "$OWN_NUMBER" ]]
-      then
-        label="$OWN_NUMBER"
-      fi
+      label="$modem_own"
     fi
   fi
 
@@ -4118,16 +4129,25 @@ sms_daily_limit_identity() {
   then
     if info_json="$(mmcli_cmd -J 2>/dev/null)"
     then
+      info_modem_id="$(modem_json_extract_id "$info_json")"
+      mmcli_number="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
       if [[ -z "$label" ]]
       then
-        label="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
+        label="$mmcli_number"
+      fi
+      cached_number="$(ensure_plus "$mmcli_number")"
+      if [[ -n "$cached_number" ]]
+      then
+        remember_modem_own_number "$MODEM" "$cached_number"
+        if [[ -n "$info_modem_id" && "$info_modem_id" != "$MODEM" ]]
+        then
+          remember_modem_own_number "$info_modem_id" "$cached_number"
+        fi
       fi
       if [[ -z "$SMS_DAILY_LIMIT_MSISDN" ]]
       then
         local normalized_from_mmcli
-        local raw_number
-        raw_number="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$info_json")"
-        if normalized_from_mmcli="$(sms_daily_limit_normalize_msisdn "$raw_number")"
+        if normalized_from_mmcli="$(sms_daily_limit_normalize_msisdn "$mmcli_number")"
         then
           SMS_DAILY_LIMIT_MSISDN="$normalized_from_mmcli"
         fi
@@ -6416,7 +6436,7 @@ sms_send_chunk_text() {
   local smsc_params
 
   local smsc_raw
-  smsc_raw="$(get_smsc_number)"
+  smsc_raw="$(get_smsc_number "$MODEM")"
 
   local smsc
   if [[ -n "$smsc_raw" ]]
@@ -7094,7 +7114,7 @@ sms_list_pretty() {
     if custom_json_requested
     then
       local -a json_items=()
-      local mid own info_json
+      local mid own info_json mid_from_info
 
       for mid in "${mids[@]}"
       do
@@ -7113,6 +7133,15 @@ sms_list_pretty() {
         then
           own="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$info_json")"
           own=$(ensure_plus "$own")
+          if [[ -n "$own" ]]
+          then
+            remember_modem_own_number "$mid" "$own"
+            mid_from_info="$(modem_json_extract_id "$info_json")"
+            if [[ -n "$mid_from_info" && "$mid_from_info" != "$mid" ]]
+            then
+              remember_modem_own_number "$mid_from_info" "$own"
+            fi
+          fi
         fi
 
         for id in "${ids[@]}"
@@ -7226,10 +7255,7 @@ sms_list_pretty() {
     # Emit one compact JSON object per SMS, then wrap into an array
     # Determine our own number for recipient mapping of received messages
     local own
-    if load_own_number
-    then
-      own="$OWN_NUMBER"
-    fi
+    own="$(query_modem_number)" || own=""
     {
       for id in "${ids[@]}"
       do
@@ -8160,16 +8186,84 @@ watch_run_command() {
     '{cmd:$cmd, rc:$rc, status:$status, date:$date, output:$output}'
 }
 
-# Query the modem's own number without caching it globally.
+# Determine the cache key for modem-specific values.
+modem_cache_key() {
+  local key="$1"
+
+  if [[ -z "$key" ]]
+  then
+    key="$MODEM"
+  fi
+
+  if [[ -z "$key" ]]
+  then
+    key="any"
+  fi
+
+  printf '%s' "$key"
+}
+
+# Remember a modem's own number for future lookups.
+remember_modem_own_number() {
+  local key
+  key="$(modem_cache_key "$1")"
+  local number="$2"
+
+  if [[ -z "$key" || -z "$number" ]]
+  then
+    return 0
+  fi
+
+  MODEM_OWN_NUMBER_CACHE["$key"]="$number"
+}
+
+# Remember a modem's SMSC number for future lookups.
+remember_modem_smsc_number() {
+  local key
+  key="$(modem_cache_key "$1")"
+  local smsc="$2"
+
+  if [[ -z "$key" || -z "$smsc" ]]
+  then
+    return 0
+  fi
+
+  MODEM_SMSC_NUMBER_CACHE["$key"]="$smsc"
+}
+
+# Extract the modem id from a blob of mmcli JSON output.
+modem_json_extract_id() {
+  local json="$1"
+
+  if [[ -z "$json" ]]
+  then
+    printf ''
+    return 1
+  fi
+
+  jq -r '.modem["dbus-path"] | split("/")[-1] // empty' <<<"$json" 2>/dev/null
+}
+
+# Query the modem's own number and cache it per modem.
 query_modem_number() {
+  local target="${1:-$MODEM}"
+  local key
+  key="$(modem_cache_key "$target")"
+
+  if [[ -v MODEM_OWN_NUMBER_CACHE["$key"] ]]
+  then
+    printf '%s' "${MODEM_OWN_NUMBER_CACHE[$key]}"
+    return 0
+  fi
+
   local json
-  if ! json="$(mmcli_cmd -J)"
+  if ! json="$(MODEM="$target" mmcli_cmd -J)"
   then
     return 1
   fi
 
   local number
-  number="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json")"
+  number="$(jq -r '(.modem.generic["own-numbers"][0] // empty)' <<<"$json" 2>/dev/null)"
   number="$(ensure_plus "$number")"
 
   if [[ -z "$number" ]]
@@ -8177,60 +8271,63 @@ query_modem_number() {
     return 2
   fi
 
+  local actual_id
+  actual_id="$(modem_json_extract_id "$json")"
+
+  remember_modem_own_number "$target" "$number"
+  if [[ -n "$actual_id" && "$actual_id" != "$target" ]]
+  then
+    remember_modem_own_number "$actual_id" "$number"
+  fi
+
   printf '%s' "$number"
-  return 0
-}
-
-# Load and cache the modem's own number via mmcli.
-load_own_number() {
-  if [[ -n "$OWN_NUMBER" ]]
-  then
-    return 0
-  fi
-
-  local number
-  if ! number="$(query_modem_number)"
-  then
-    return 1
-  fi
-
-  OWN_NUMBER="$number"
-
   return 0
 }
 
 # Retrieve and cache the SMSC number using AT+CSCA?.
 get_smsc_number() {
-  if [[ -n "$SMSC_NUMBER" ]]
+  local target="${1:-$MODEM}"
+  local key
+  key="$(modem_cache_key "$target")"
+
+  if [[ -v MODEM_SMSC_NUMBER_CACHE["$key"] ]]
   then
-    printf '%s' "$SMSC_NUMBER"
-    return 0
+    printf '%s' "${MODEM_SMSC_NUMBER_CACHE[$key]}"
+    if [[ -n "${MODEM_SMSC_NUMBER_CACHE[$key]}" ]]
+    then
+      return 0
+    fi
+    return 2
   fi
 
   # Try to retrieve the network-configured SMSC via AT+CSCA?
   # If unavailable or unsupported, return empty (do not force SMSC).
   local resp smsc
-  resp="$(at_command 'AT+CSCA?')"
+  if ! resp="$(MODEM="$target" at_command 'AT+CSCA?')"
+  then
+    return 1
+  fi
+
   if [[ -n "$resp" ]]
   then
     smsc="$(at_first_quoted_decoded "$resp")"
-    if [[ -n "$smsc" ]]
-    then
-      smsc="$(ensure_plus "$smsc")"
-      SMSC_NUMBER="$smsc"
-      printf '%s' "$SMSC_NUMBER"
-      return 0
-    fi
+    smsc="$(ensure_plus "$smsc")"
   fi
 
-  # No SMSC detected; leave empty so callers skip forcing one
-  SMSC_NUMBER=""
-  return 1
+  if [[ -z "$smsc" ]]
+  then
+    return 2
+  fi
+
+  remember_modem_smsc_number "$target" "$smsc"
+
+  printf '%s' "$smsc"
+  return 0
 }
 
 # Build a structured JSON object summarizing modem status details.
 modem_status_details_json() {
-  local js own smsc country_code country_label payload
+  local js own smsc country_code country_label payload modem_id_from_json
   local fallback_modem="$MODEM"
 
   if ! js="$(mmcli_cmd -J)"
@@ -8242,16 +8339,29 @@ modem_status_details_json() {
     return 1
   fi
 
+  modem_id_from_json="$(modem_json_extract_id "$js")"
+
   own="$(jq -r '.modem.generic["own-numbers"][0] // ""' <<<"$js")"
   own="$(ensure_plus "$own")"
   if [[ -n "$own" ]]
-
   then
-    OWN_NUMBER="$own"
+    remember_modem_own_number "$fallback_modem" "$own"
+    if [[ -n "$modem_id_from_json" && "$modem_id_from_json" != "$fallback_modem" ]]
+    then
+      remember_modem_own_number "$modem_id_from_json" "$own"
+    fi
   fi
 
-  smsc="$(get_smsc_number)" || smsc=""
+  smsc="$(get_smsc_number "$fallback_modem")" || smsc=""
   smsc="$(ensure_plus "$smsc")"
+  if [[ -n "$smsc" ]]
+  then
+    remember_modem_smsc_number "$fallback_modem" "$smsc"
+    if [[ -n "$modem_id_from_json" && "$modem_id_from_json" != "$fallback_modem" ]]
+    then
+      remember_modem_smsc_number "$modem_id_from_json" "$smsc"
+    fi
+  fi
 
   if [[ "$own" == +* ]]
   then
@@ -8698,7 +8808,6 @@ modem_number_single() {
   local number
   if number="$(query_modem_number)"
   then
-    OWN_NUMBER="$number"
     if custom_json_requested
     then
       modem_value_json_object "number" "$number" "" "$MODEM"
@@ -8753,7 +8862,6 @@ modem_number() {
 
   local prev_modem="$MODEM"
   local prev_all="$ALL_MODEMS"
-  local prev_own="$OWN_NUMBER"
   local overall_rc=0
   local mid
   local number
@@ -8767,7 +8875,6 @@ modem_number() {
     [[ -z "$mid" ]] && continue
     MODEM="$mid"
     ALL_MODEMS=""
-    OWN_NUMBER=""
     if number="$(query_modem_number)"
     then
       if custom_json_requested
@@ -8810,7 +8917,6 @@ modem_number() {
 
   MODEM="$prev_modem"
   ALL_MODEMS="$prev_all"
-  OWN_NUMBER="$prev_own"
 
   if custom_json_requested
   then
@@ -8828,7 +8934,7 @@ modem_number() {
 # Print the modem's configured SMSC number for the current modem.
 modem_smsc_single() {
   local smsc
-  smsc="$(get_smsc_number)" || smsc=""
+  smsc="$(get_smsc_number "$MODEM")" || smsc=""
 
   if custom_json_requested
   then
@@ -8867,7 +8973,6 @@ modem_smsc() {
 
   local prev_modem="$MODEM"
   local prev_all="$ALL_MODEMS"
-  local prev_smsc="$SMSC_NUMBER"
   local mid
   local smsc
   local json_item
@@ -8878,8 +8983,7 @@ modem_smsc() {
     [[ -z "$mid" ]] && continue
     MODEM="$mid"
     ALL_MODEMS=""
-    SMSC_NUMBER=""
-    if ! smsc="$(get_smsc_number)"
+    if ! smsc="$(get_smsc_number "$mid")"
     then
       smsc=""
     fi
@@ -8903,7 +9007,6 @@ modem_smsc() {
 
   MODEM="$prev_modem"
   ALL_MODEMS="$prev_all"
-  SMSC_NUMBER="$prev_smsc"
 
   if custom_json_requested
   then
@@ -9418,6 +9521,7 @@ watch_handle_sms() {
   local MODEM="$MODEM"
   local modem_hint_label
   local modem_effective
+  local self_number
   if [[ -n "$prefer_modem_id" ]]
   then
     MODEM="$prefer_modem_id"
@@ -9430,7 +9534,9 @@ watch_handle_sms() {
   modem_effective="$MODEM"
   echo_debug "watch: processing SMS $id (hint=$modem_hint_label effective=$modem_effective)"
   local tries=0
-  local js state pdu sender text payload
+  local js state pdu sender text payload modem_id_from_sms
+
+  self_number="$(query_modem_number "$MODEM")" || self_number=""
 
   while :
   do
@@ -9451,7 +9557,7 @@ watch_handle_sms() {
       return
     fi
 
-    if [[ -n "$OWN_NUMBER" && "$sender" == "$OWN_NUMBER" ]]
+    if [[ -n "$self_number" && "$sender" == "$self_number" ]]
     then
       echo_info "skip self-sent id=$id"
       return
@@ -9472,6 +9578,19 @@ watch_handle_sms() {
     then
       recipient="$(jq -r '.modem.generic["own-numbers"][0] // empty' <<<"$om_json")"
       recipient="$(ensure_plus "$recipient")"
+      if [[ -n "$recipient" ]]
+      then
+        remember_modem_own_number "$MODEM" "$recipient"
+        modem_id_from_sms="$(modem_json_extract_id "$om_json")"
+        if [[ -n "$modem_id_from_sms" && "$modem_id_from_sms" != "$MODEM" ]]
+        then
+          remember_modem_own_number "$modem_id_from_sms" "$recipient"
+        fi
+        if [[ -z "$self_number" ]]
+        then
+          self_number="$recipient"
+        fi
+      fi
     fi
 
     local log_text
@@ -9595,11 +9714,12 @@ watch_messages() {
   dbus-monitor --system "$filter" >"$WATCH_FIFO" &
   WATCH_DBUS_PID=$!
 
-  if load_own_number
+  local watch_own_number
+  if watch_own_number="$(query_modem_number)"
   then
-    if [[ -n "$OWN_NUMBER" ]]
+    if [[ -n "$watch_own_number" ]]
     then
-      echo_info "own number = $OWN_NUMBER"
+      echo_info "own number = $watch_own_number"
     fi
   else
     local load_rc=$?
