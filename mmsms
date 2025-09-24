@@ -786,134 +786,126 @@ is_command_token() {
 parse_common_option() {
   PARSE_SHIFT=0
   local opt="$1"
-  local value="${2:-}"
+  local provided_value="$2"
+  local flag_name="$opt"
+  local option_value="$provided_value"
+  local equals_used=0
 
-  case "$opt" in
+  if [[ "$opt" == --*=* || "$opt" == -*=* ]]
+  then
+    flag_name="${opt%%=*}"
+    option_value="${opt#*=}"
+    equals_used=1
+  fi
+
+  case "$flag_name" in
     -m|--modem)
-      if [[ -z "$value" ]]
-      then
-        echo_error "missing value for $opt"
-        return 2
-      fi
-      DEBUG_FLAGS+=("${opt}=$value")
-      MODEM="$value"
-      MODEM_EXPLICIT=1
-      PARSE_SHIFT=2
-      return 0
-      ;;
-    -m=*|--modem=*)
       local modem_value
-      modem_value="${opt#*=}"
+      local shift_amount
+      modem_value="$option_value"
+      if (( equals_used ))
+      then
+        shift_amount=1
+      else
+        shift_amount=2
+      fi
       if [[ -z "$modem_value" ]]
       then
-        echo_error "missing value for ${opt%%=*}"
+        echo_error "missing value for $flag_name"
         return 2
       fi
-      DEBUG_FLAGS+=("${opt%%=*}=$modem_value")
+      DEBUG_FLAGS+=("${flag_name}=$modem_value")
       MODEM="$modem_value"
       MODEM_EXPLICIT=1
-      PARSE_SHIFT=1
+      PARSE_SHIFT=$shift_amount
       return 0
       ;;
     -d|--debug)
-      DEBUG_FLAGS+=("$opt")
+      DEBUG_FLAGS+=("$flag_name")
       # shellcheck disable=SC2034
       DEBUG=1
       PARSE_SHIFT=1
       return 0
       ;;
     -q|--quiet|--silent)
-      DEBUG_FLAGS+=("$opt")
+      DEBUG_FLAGS+=("$flag_name")
       QUIET=1
       PARSE_SHIFT=1
       return 0
       ;;
     -x|--trace)
-      DEBUG_FLAGS+=("$opt")
+      DEBUG_FLAGS+=("$flag_name")
       PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
       set -x
       PARSE_SHIFT=1
       return 0
       ;;
     -s|--syslog)
-      DEBUG_FLAGS+=("$opt")
+      DEBUG_FLAGS+=("$flag_name")
       # shellcheck disable=SC2034
       ECHO_SYSLOG=1
       PARSE_SHIFT=1
       return 0
       ;;
     -c|--config)
-      if [[ -z "$value" ]]
-      then
-        echo_error "missing value for $opt"
-        return 2
-      fi
-      DEBUG_FLAGS+=("${opt}=$value")
-      CONFIG_FILE="$value"
-      PARSE_SHIFT=2
-      return 0
-      ;;
-    -c=*|--config=*)
       local config_value
-      config_value="${opt#*=}"
+      local shift_amount
+      config_value="$option_value"
+      if (( equals_used ))
+      then
+        shift_amount=1
+      else
+        shift_amount=2
+      fi
       if [[ -z "$config_value" ]]
       then
-        echo_error "missing value for ${opt%%=*}"
+        echo_error "missing value for $flag_name"
         return 2
       fi
-      DEBUG_FLAGS+=("${opt%%=*}=$config_value")
+      DEBUG_FLAGS+=("${flag_name}=$config_value")
       CONFIG_FILE="$config_value"
-      PARSE_SHIFT=1
+      PARSE_SHIFT=$shift_amount
       return 0
       ;;
     --data-dir)
-      if [[ -z "$value" ]]
-      then
-        echo_error "missing value for $opt"
-        return 2
-      fi
-      DEBUG_FLAGS+=("${opt}=$value")
-      MMMSMS_DATA_DIR="$value"
-      SMS_DAILY_LIMIT_DIR="$MMMSMS_DATA_DIR"
-      PARSE_SHIFT=2
-      return 0
-      ;;
-    --data-dir=*)
       local data_dir_value
-      data_dir_value="${opt#*=}"
+      local shift_amount
+      data_dir_value="$option_value"
+      if (( equals_used ))
+      then
+        shift_amount=1
+      else
+        shift_amount=2
+      fi
       if [[ -z "$data_dir_value" ]]
       then
-        echo_error "missing value for --data-dir"
+        echo_error "missing value for $flag_name"
         return 2
       fi
-      DEBUG_FLAGS+=("--data-dir=$data_dir_value")
+      DEBUG_FLAGS+=("${flag_name}=$data_dir_value")
       MMMSMS_DATA_DIR="$data_dir_value"
       SMS_DAILY_LIMIT_DIR="$MMMSMS_DATA_DIR"
-      PARSE_SHIFT=1
+      PARSE_SHIFT=$shift_amount
       return 0
       ;;
     --skip-modem-init)
-      if [[ -z "$value" ]]
-      then
-        echo_error "missing value for $opt"
-        return 2
-      fi
-      DEBUG_FLAGS+=("${opt}=$value")
-      add_skip_modem_init_pattern "$value"
-      PARSE_SHIFT=2
-      return 0
-      ;;
-    --skip-modem-init=*)
       local pattern
-      pattern="${opt#*=}"
+      local shift_amount
+      pattern="$option_value"
+      if (( equals_used ))
+      then
+        shift_amount=1
+      else
+        shift_amount=2
+      fi
       if [[ -z "$pattern" ]]
       then
-        echo_error "missing value for --skip-modem-init"
+        echo_error "missing value for $flag_name"
         return 2
       fi
-      DEBUG_FLAGS+=("--skip-modem-init=$pattern")
+      DEBUG_FLAGS+=("${flag_name}=$pattern")
       add_skip_modem_init_pattern "$pattern"
-      PARSE_SHIFT=1
+      PARSE_SHIFT=$shift_amount
       return 0
       ;;
   esac
@@ -976,7 +968,20 @@ parse_at_args() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -h|--help)
         print_subcommand_usage at
         PARSED_ARGS=()
@@ -984,6 +989,25 @@ parse_at_args() {
         ;;
       -w|--wait)
         AT_WAIT_MODEM=1
+        if (( equals_used ))
+        then
+          local wait_value
+          wait_value="$option_value"
+          if [[ -z "$wait_value" ]]
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
+          then
+            echo_error "invalid value for $flag_name: '$wait_value' (expected integer seconds)"
+            return 2
+          fi
+          AT_WAIT_TIMEOUT="$wait_value"
+          shift
+          continue
+        fi
+
         if [[ ! "$AT_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || (( AT_WAIT_TIMEOUT <= 0 ))
         then
           AT_WAIT_TIMEOUT="$AT_WAIT_TIMEOUT_DEFAULT"
@@ -996,24 +1020,6 @@ parse_at_args() {
         fi
         continue
         ;;
-      -w=*|--wait=*)
-        local wait_value
-        wait_value="${1#*=}"
-        if [[ -z "$wait_value" ]]
-        then
-          echo_error "missing value for --wait"
-          return 2
-        fi
-        if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
-        then
-          echo_error "invalid value for --wait: '$wait_value' (expected integer seconds)"
-          return 2
-        fi
-        AT_WAIT_MODEM=1
-        AT_WAIT_TIMEOUT="$wait_value"
-        shift
-        continue
-        ;;
       --)
         shift
         while (( $# > 0 ))
@@ -1024,17 +1030,21 @@ parse_at_args() {
         break
         ;;
       *)
-        parse_common_option "$1" "${2:-}"
-        local status=$?
+        parse_common_option "$arg" "$provided_value"
+        local status
+        status=$?
         if (( status == 0 ))
         then
-          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          if (( PARSE_SHIFT > 0 ))
+          then
+            shift "$PARSE_SHIFT"
+          fi
           continue
         elif (( status == 2 ))
         then
           return 2
         fi
-        out+=("$1")
+        out+=("$arg")
         shift
         ;;
     esac
@@ -1051,32 +1061,45 @@ parse_send_args() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -h|--help)
         print_subcommand_usage send
         PARSED_ARGS=()
         return 64
         ;;
       -A|--auto|--auto-recipient)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         AUTO_RECIPIENT=1
         shift
         continue
         ;;
       -F|--fallback)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         FALLBACK=1
         shift
         continue
         ;;
       -k|--dryrun|--dry-run)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         SMS_DRY_RUN=1
         shift
         continue
         ;;
       --critical)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         CRITICAL_SEND=1
         FALLBACK=1
         SMS_RETRY_COUNT="infinite"
@@ -1084,68 +1107,61 @@ parse_send_args() {
         continue
         ;;
       --chunk)
-        local chunk_value="160"
-        if (( $# > 1 )) && [[ "${2}" =~ ^[0-9]+$ ]]
-        then
-          chunk_value="$2"
-          shift 2
-        else
-          shift
-        fi
-        if [[ ! "$chunk_value" =~ ^[0-9]+$ ]] || (( chunk_value <= 0 ))
-        then
-          echo_error "--chunk requires a positive integer size"
-          return 2
-        fi
-        DEBUG_FLAGS+=("--chunk=$chunk_value")
-        SMS_CHUNK_SIZE="$chunk_value"
-        continue
-        ;;
-      --chunk=*)
         local chunk_value
-        chunk_value="${1#*=}"
-        if [[ -z "$chunk_value" ]]
+        if (( equals_used ))
         then
+          chunk_value="$option_value"
+          shift
+          if [[ -z "$chunk_value" ]]
+          then
+            chunk_value="160"
+          fi
+        else
           chunk_value="160"
+          shift
+          if (( $# > 0 )) && [[ "$1" =~ ^[0-9]+$ ]]
+          then
+            chunk_value="$1"
+            shift
+          fi
         fi
         if [[ ! "$chunk_value" =~ ^[0-9]+$ ]] || (( chunk_value <= 0 ))
         then
           echo_error "--chunk requires a positive integer size"
           return 2
         fi
-        DEBUG_FLAGS+=("--chunk=$chunk_value")
+        DEBUG_FLAGS+=("${flag_name}=$chunk_value")
         SMS_CHUNK_SIZE="$chunk_value"
-        shift
         continue
         ;;
       -f|--allow-foreign)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         ALLOW_FOREIGN=1
         shift
         continue
         ;;
       -R|--retry)
-        if (( $# < 2 ))
+        local flag_value
+        local debug_value
+        if (( equals_used ))
         then
-          echo_error "missing value for $1"
+          flag_value="$option_value"
+          debug_value="$arg"
+          shift
+        else
+          if (( $# < 2 ))
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          flag_value="$2"
+          debug_value="${flag_name}=$2"
+          shift 2
+        fi
+        if ! apply_retry_option "$flag_name" "$flag_value" "$debug_value"
+        then
           return 2
         fi
-        if ! apply_retry_option "$1" "$2" "${1}=$2"
-        then
-          return 2
-        fi
-        shift 2
-        continue
-        ;;
-      -R=*|--retry=*)
-        local flag="$1"
-        local flag_name="${flag%%=*}"
-        local flag_value="${flag#*=}"
-        if ! apply_retry_option "$flag_name" "$flag_value" "$flag"
-        then
-          return 2
-        fi
-        shift
         continue
         ;;
       --)
@@ -1158,17 +1174,21 @@ parse_send_args() {
         break
         ;;
       *)
-        parse_common_option "$1" "${2:-}"
-        local status=$?
+        parse_common_option "$arg" "$provided_value"
+        local status
+        status=$?
         if (( status == 0 ))
         then
-          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          if (( PARSE_SHIFT > 0 ))
+          then
+            shift "$PARSE_SHIFT"
+          fi
           continue
         elif (( status == 2 ))
         then
           return 2
         fi
-        out+=("$1")
+        out+=("$arg")
         shift
         ;;
     esac
@@ -1403,21 +1423,56 @@ parse_enable_args() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -h|--help)
         print_subcommand_usage enable
         PARSED_ARGS=()
         return 64
         ;;
       -a|--all)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         ALL_MODEMS=1
         shift
         continue
         ;;
       -w|--wait)
-        DEBUG_FLAGS+=("$1")
+        local debug_entry
+        debug_entry="$flag_name"
         ENABLE_WAIT_MODEM=1
+        if (( equals_used ))
+        then
+          local wait_value
+          wait_value="$option_value"
+          if [[ -z "$wait_value" ]]
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
+          then
+            echo_error "invalid value for $flag_name: '$wait_value' (expected integer seconds)"
+            return 2
+          fi
+          DEBUG_FLAGS+=("$arg")
+          ENABLE_WAIT_TIMEOUT="$wait_value"
+          shift
+          continue
+        fi
+
+        DEBUG_FLAGS+=("$debug_entry")
         if [[ ! "$ENABLE_WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || (( ENABLE_WAIT_TIMEOUT <= 0 ))
         then
           ENABLE_WAIT_TIMEOUT="$ENABLE_WAIT_TIMEOUT_DEFAULT"
@@ -1430,25 +1485,6 @@ parse_enable_args() {
         fi
         continue
         ;;
-      -w=*|--wait=*)
-        local wait_value
-        wait_value="${1#*=}"
-        if [[ -z "$wait_value" ]]
-        then
-          echo_error "missing value for --wait"
-          return 2
-        fi
-        if [[ ! "$wait_value" =~ ^[0-9]+$ ]]
-        then
-          echo_error "invalid value for --wait: '$wait_value' (expected integer seconds)"
-          return 2
-        fi
-        DEBUG_FLAGS+=("$1")
-        ENABLE_WAIT_MODEM=1
-        ENABLE_WAIT_TIMEOUT="$wait_value"
-        shift
-        continue
-        ;;
       --)
         shift
         while (( $# > 0 ))
@@ -1459,17 +1495,21 @@ parse_enable_args() {
         break
         ;;
       *)
-        parse_common_option "$1" "${2:-}"
-        local status=$?
+        parse_common_option "$arg" "$provided_value"
+        local status
+        status=$?
         if (( status == 0 ))
         then
-          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          if (( PARSE_SHIFT > 0 ))
+          then
+            shift "$PARSE_SHIFT"
+          fi
           continue
         elif (( status == 2 ))
         then
           return 2
         fi
-        out+=("$1")
+        out+=("$arg")
         shift
         ;;
     esac
@@ -1708,80 +1748,93 @@ parse_watch_args() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -h|--help)
         print_subcommand_usage watch
         PARSED_ARGS=()
         return 64
         ;;
       -A|--auto|--auto-recipient)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         AUTO_RECIPIENT=1
         shift
         continue
         ;;
       -a|--all)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         ALL_MODEMS=1
         shift
         continue
         ;;
       -E|--enable)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         WATCH_ENABLE=1
         shift
         continue
         ;;
       -F|--fallback)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         FALLBACK=1
         shift
         continue
         ;;
       -k|--dryrun|--dry-run)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         SMS_DRY_RUN=1
         shift
         continue
         ;;
       -f|--allow-foreign)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         ALLOW_FOREIGN=1
         shift
         continue
         ;;
       -P|--prune)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         WATCH_PRUNE=1
         shift
         continue
         ;;
       -R|--retry)
-        if (( $# < 2 ))
+        local flag_value
+        local debug_value
+        if (( equals_used ))
         then
-          echo_error "missing value for $1"
+          flag_value="$option_value"
+          debug_value="$arg"
+          shift
+        else
+          if (( $# < 2 ))
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          flag_value="$2"
+          debug_value="${flag_name}=$2"
+          shift 2
+        fi
+        if ! apply_retry_option "$flag_name" "$flag_value" "$debug_value"
+        then
           return 2
         fi
-        if ! apply_retry_option "$1" "$2" "${1}=$2"
-        then
-          return 2
-        fi
-        shift 2
-        continue
-        ;;
-      -R=*|--retry=*)
-        local flag="$1"
-        local flag_name="${flag%%=*}"
-        local flag_value="${flag#*=}"
-        if ! apply_retry_option "$flag_name" "$flag_value" "$flag"
-        then
-          return 2
-        fi
-        shift
         continue
         ;;
       --delete-sent)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         WATCH_DELETE_AFTER=1
         WATCH_DELETE_AFTER_CLI_OVERRIDE=1
         shift
@@ -1797,17 +1850,21 @@ parse_watch_args() {
         break
         ;;
       *)
-        parse_common_option "$1" "${2:-}"
-        local status=$?
+        parse_common_option "$arg" "$provided_value"
+        local status
+        status=$?
         if (( status == 0 ))
         then
-          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          if (( PARSE_SHIFT > 0 ))
+          then
+            shift "$PARSE_SHIFT"
+          fi
           continue
         elif (( status == 2 ))
         then
           return 2
         fi
-        out+=("$1")
+        out+=("$arg")
         shift
         ;;
     esac
@@ -1939,70 +1996,76 @@ parse_stats_args() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -h|--help)
         print_subcommand_usage stats
         PARSED_ARGS=()
         return 64
         ;;
       -a|--all)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         ALL_MODEMS=1
         shift
         continue
         ;;
       -j|--json)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         JSON_OUTPUT=1
         JSON_OUTPUT_FORCED=1
         shift
         continue
         ;;
       --day)
-        shift
-        if (( $# == 0 ))
-        then
-          echo_error "stats: missing argument for --day"
-          return 2
-        fi
         local day_value
-        day_value="$1"
-        if [[ ! "$day_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+        if (( equals_used ))
         then
-          echo_error "stats: --day expects YYYY-MM-DD"
-          return 2
+          day_value="$option_value"
+          shift
+        else
+          shift
+          if (( $# == 0 ))
+          then
+            echo_error "stats: missing argument for $flag_name"
+            return 2
+          fi
+          day_value="$1"
+          shift
         fi
-        DEBUG_FLAGS+=("--day=$day_value")
-        STATS_DAY="$day_value"
-        shift
-        continue
-        ;;
-      --day=*)
-        local day_value
-        day_value="${1#*=}"
         if [[ -z "$day_value" ]]
         then
-          echo_error "stats: missing argument for --day"
+          echo_error "stats: missing argument for $flag_name"
           return 2
         fi
         if [[ ! "$day_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
         then
-          echo_error "stats: --day expects YYYY-MM-DD"
+          echo_error "stats: $flag_name expects YYYY-MM-DD"
           return 2
         fi
-        DEBUG_FLAGS+=("--day=$day_value")
+        DEBUG_FLAGS+=("${flag_name}=$day_value")
         STATS_DAY="$day_value"
-        shift
         continue
         ;;
       --dump)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         STATS_DUMP=1
         shift
         continue
         ;;
       --reset)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         STATS_RESET=1
         shift
         continue
@@ -2017,17 +2080,21 @@ parse_stats_args() {
         break
         ;;
       *)
-        parse_common_option "$1" "${2:-}"
-        local status=$?
+        parse_common_option "$arg" "$provided_value"
+        local status
+        status=$?
         if (( status == 0 ))
         then
-          (( PARSE_SHIFT > 0 )) && shift "$PARSE_SHIFT"
+          if (( PARSE_SHIFT > 0 ))
+          then
+            shift "$PARSE_SHIFT"
+          fi
           continue
         elif (( status == 2 ))
         then
           return 2
         fi
-        out+=("$1")
+        out+=("$arg")
         shift
         ;;
     esac
@@ -2076,7 +2143,18 @@ parse_mmcli_args() {
 
     if [[ -z "$seen_separator" ]]
     then
-      case "$arg" in
+      local flag_name="$arg"
+      local option_value
+      local equals_used=0
+
+      if [[ "$arg" == --*=* ]]
+      then
+        flag_name="${arg%%=*}"
+        option_value="${arg#*=}"
+        equals_used=1
+      fi
+
+      case "$flag_name" in
         -m)
           if (( $# == 0 ))
           then
@@ -2098,23 +2176,33 @@ parse_mmcli_args() {
           continue
           ;;
         --modem)
-          if (( $# == 0 ))
+          if (( equals_used ))
           then
-            echo_error "mmcli: missing value for --modem"
-            return 2
-          fi
+            value="$option_value"
+          else
+            if (( $# == 0 ))
+            then
+              echo_error "mmcli: missing value for $flag_name"
+              return 2
+            fi
 
-          value="$1"
+            value="$1"
+            shift
+          fi
           if [[ -z "$value" || "$value" == "--" ]]
           then
-            echo_error "mmcli: missing value for --modem"
+            echo_error "mmcli: missing value for $flag_name"
             return 2
           fi
 
           MODEM="$value"
           MODEM_EXPLICIT=1
-          DEBUG_FLAGS+=("--modem=$value")
-          shift
+          if (( equals_used ))
+          then
+            DEBUG_FLAGS+=("$arg")
+          else
+            DEBUG_FLAGS+=("${flag_name}=$value")
+          fi
           continue
           ;;
         -m?*)
@@ -2130,21 +2218,8 @@ parse_mmcli_args() {
           DEBUG_FLAGS+=("-m=$value")
           continue
           ;;
-        --modem=*)
-          value="${arg#--modem=}"
-          if [[ -z "$value" ]]
-          then
-            echo_error "mmcli: missing value for --modem"
-            return 2
-          fi
-
-          MODEM="$value"
-          MODEM_EXPLICIT=1
-          DEBUG_FLAGS+=("--modem=$value")
-          continue
-          ;;
         -a|--all)
-          DEBUG_FLAGS+=("$arg")
+          DEBUG_FLAGS+=("$flag_name")
           ALL_MODEMS=1
           continue
           ;;
@@ -7982,43 +8057,54 @@ sms_list_print_entry() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       --include-modem-id)
         include_mid=1
         shift
         ;;
       --max-length)
-        if (( $# < 2 ))
-        then
-          echo_error "sms_list_print_entry: missing value for --max-length"
-          return 2
-        fi
-        if [[ ! "$2" =~ ^[0-9]+$ ]]
-        then
-          echo_error "sms_list_print_entry: --max-length requires a non-negative integer"
-          return 2
-        fi
-        maxlen="$2"
-        shift 2
-        ;;
-      --max-length=*)
         local value
-        value="${1#*=}"
+        if (( equals_used ))
+        then
+          value="$option_value"
+          shift
+        else
+          shift
+          if (( $# == 0 ))
+          then
+            echo_error "sms_list_print_entry: missing value for $flag_name"
+            return 2
+          fi
+          value="$1"
+          shift
+        fi
         if [[ -z "$value" ]]
         then
-          echo_error "sms_list_print_entry: missing value for --max-length"
+          echo_error "sms_list_print_entry: missing value for $flag_name"
           return 2
         fi
         if [[ ! "$value" =~ ^[0-9]+$ ]]
         then
-          echo_error "sms_list_print_entry: --max-length requires a non-negative integer"
+          echo_error "sms_list_print_entry: $flag_name requires a non-negative integer"
           return 2
         fi
         maxlen="$value"
-        shift
         ;;
       *)
-        echo_error "sms_list_print_entry: unknown option '$1'"
+        echo_error "sms_list_print_entry: unknown option '$arg'"
         return 2
         ;;
     esac
@@ -11047,106 +11133,133 @@ main() {
 
   while (( $# > 0 ))
   do
-    case "$1" in
+    local arg="$1"
+    local provided_value="$2"
+    local flag_name="$arg"
+    local option_value="$provided_value"
+    local equals_used=0
+
+    if [[ "$arg" == --*=* || "$arg" == -*=* ]]
+    then
+      flag_name="${arg%%=*}"
+      option_value="${arg#*=}"
+      equals_used=1
+    fi
+
+    case "$flag_name" in
       -m|--modem)
-        if (( $# < 2 ))
-        then
-          echo_error "missing value for $1"
-          return 2
-        fi
-        DEBUG_FLAGS+=("$1=$2")
-        MODEM="$2"
-        MODEM_EXPLICIT=1
-        shift 2
-        continue
-        ;;
-      -m=*|--modem=*)
         local modem_value
-        modem_value="${1#*=}"
+        if (( equals_used ))
+        then
+          modem_value="$option_value"
+          shift
+        else
+          if (( $# < 2 ))
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          modem_value="$2"
+          shift 2
+        fi
         if [[ -z "$modem_value" ]]
         then
-          echo_error "missing value for ${1%%=*}"
+          echo_error "missing value for $flag_name"
           return 2
         fi
-        DEBUG_FLAGS+=("${1%%=*}=$modem_value")
+        if (( equals_used ))
+        then
+          DEBUG_FLAGS+=("$arg")
+        else
+          DEBUG_FLAGS+=("${flag_name}=$modem_value")
+        fi
         MODEM="$modem_value"
         MODEM_EXPLICIT=1
-        shift
         continue
         ;;
       -d|--debug)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         # shellcheck disable=SC2034
         DEBUG=1
         shift
         continue
         ;;
       -q|--quiet|--silent)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         QUIET=1
         shift
         continue
         ;;
       -x|--trace)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         PS4='+ [${BASH_SOURCE##*/}:${LINENO}] ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
         set -x
         shift
         continue
         ;;
       -s|--syslog)
-        DEBUG_FLAGS+=("$1")
+        DEBUG_FLAGS+=("$flag_name")
         # shellcheck disable=SC2034
         ECHO_SYSLOG=1
         shift
         continue
         ;;
       -c|--config)
-        if (( $# < 2 ))
-        then
-          echo_error "missing value for $1"
-          return 2
-        fi
-        DEBUG_FLAGS+=("$1=$2")
-        CONFIG_FILE="$2"
-        shift 2
-        continue
-        ;;
-      -c=*|--config=*)
         local config_value
-        config_value="${1#*=}"
+        if (( equals_used ))
+        then
+          config_value="$option_value"
+          shift
+        else
+          if (( $# < 2 ))
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          config_value="$2"
+          shift 2
+        fi
         if [[ -z "$config_value" ]]
         then
-          echo_error "missing value for ${1%%=*}"
+          echo_error "missing value for $flag_name"
           return 2
         fi
-        DEBUG_FLAGS+=("${1%%=*}=$config_value")
+        if (( equals_used ))
+        then
+          DEBUG_FLAGS+=("$arg")
+        else
+          DEBUG_FLAGS+=("${flag_name}=$config_value")
+        fi
         CONFIG_FILE="$config_value"
-        shift
         continue
         ;;
       --skip-modem-init)
-        if (( $# < 2 ))
-        then
-          echo_error "missing value for $1"
-          return 2
-        fi
-        DEBUG_FLAGS+=("$1=$2")
-        add_skip_modem_init_pattern "$2"
-        shift 2
-        continue
-        ;;
-      --skip-modem-init=*)
         local pattern
-        pattern="${1#*=}"
+        if (( equals_used ))
+        then
+          pattern="$option_value"
+          shift
+        else
+          if (( $# < 2 ))
+          then
+            echo_error "missing value for $flag_name"
+            return 2
+          fi
+          pattern="$2"
+          shift 2
+        fi
         if [[ -z "$pattern" ]]
         then
-          echo_error "missing value for --skip-modem-init"
+          echo_error "missing value for $flag_name"
           return 2
         fi
-        DEBUG_FLAGS+=("--skip-modem-init=$pattern")
+        if (( equals_used ))
+        then
+          DEBUG_FLAGS+=("$arg")
+        else
+          DEBUG_FLAGS+=("${flag_name}=$pattern")
+        fi
         add_skip_modem_init_pattern "$pattern"
-        shift
         continue
         ;;
       -h|--help)
@@ -11158,13 +11271,13 @@ main() {
         break
         ;;
       *)
-        if [[ -z "$command" ]] && is_command_token "$1"
+        if [[ -z "$command" ]] && is_command_token "$arg"
         then
-          command="$1"
+          command="$arg"
           shift
           break
         fi
-        PRE_ARGS+=("$1")
+        PRE_ARGS+=("$arg")
         shift
         ;;
     esac
