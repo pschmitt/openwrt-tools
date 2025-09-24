@@ -4802,18 +4802,18 @@ sms_daily_state_write_locked() {
      def trim_history($hist; $limit):
        if $limit <= 0 then [] else $hist[:$limit] end;
      . as $existing
-     | $orig_date := ($existing.date // "")
-     | $orig_label := ($existing.label // "")
-     | $orig_msisdn := ($existing.msisdn // "")
-     | $orig_sent := ($existing.outgoing.sent // 0)
-     | $orig_failed := ($existing.outgoing.failed // 0)
-     | $orig_incoming := ($existing.incoming.received // 0)
-     | $hist := ensure_history($existing.history)
-     | $hist := (if $orig_date != "" and $orig_date != $date then
-                  trim_history([mkentry($orig_date; $orig_label; $orig_msisdn; $orig_sent; $orig_failed; $orig_incoming)] + $hist; $history_limit)
-                else
-                  trim_history($hist; $history_limit)
-                end)
+     | ($existing.date // "") as $orig_date
+     | ($existing.label // "") as $orig_label
+     | ($existing.msisdn // "") as $orig_msisdn
+     | ($existing.outgoing.sent // 0) as $orig_sent
+     | ($existing.outgoing.failed // 0) as $orig_failed
+     | ($existing.incoming.received // 0) as $orig_incoming
+     | ensure_history($existing.history) as $existing_hist
+     | (if $orig_date != "" and $orig_date != $date then
+          trim_history([mkentry($orig_date; $orig_label; $orig_msisdn; $orig_sent; $orig_failed; $orig_incoming)] + $existing_hist; $history_limit)
+        else
+          trim_history($existing_hist; $history_limit)
+        end) as $hist
      | mkentry($date; $label; $msisdn; $sent; $failed; $incoming)
        + (if ($hist | length) > 0 then {history:$hist} else {} end)' <<<"$base" 2>/dev/null)"
   then
