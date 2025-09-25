@@ -54,7 +54,44 @@ usb_replug() {
   fi
 
   local usb_path
-  usb_path=$(find /sys/bus/usb/devices -name idVendor -exec grep -l "$vnd" {} \; | xargs -I{} dirname {} | xargs -I{} grep -l "$pid" {}/idProduct | xargs -I{} dirname {})
+  local vendor_file
+  local device_dir
+  local vendor_value
+  local product_file
+  local product_value
+
+  while IFS= read -r -d '' vendor_file
+  do
+    device_dir=${vendor_file%/*}
+
+    if ! read -r vendor_value < "$vendor_file"
+    then
+      continue
+    fi
+
+    if [[ "$vendor_value" != "$vnd" ]]
+    then
+      continue
+    fi
+
+    product_file="$device_dir/idProduct"
+
+    if [[ ! -r "$product_file" ]]
+    then
+      continue
+    fi
+
+    if ! read -r product_value < "$product_file"
+    then
+      continue
+    fi
+
+    if [[ "$product_value" == "$pid" ]]
+    then
+      usb_path="$device_dir"
+      break
+    fi
+  done < <(find /sys/bus/usb/devices -type f -name idVendor -print0)
   if [[ -z "$usb_path" ]]
   then
     echo "ERROR: Could not find USB device with VID:PID $vnd:$pid" >&2
