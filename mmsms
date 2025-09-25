@@ -459,35 +459,21 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS] COMMAND [ARGS]
 
 Options:
-  -A, --auto            Fallback: if foreign blocked, use modem's default recipient
-  -a, --all             List/Prune/Enable/Status/Reset/Number/SMSC/Stats: operate on all modems
-  -c, --config PATH     Use alternate config file for watch
+  -c, --config PATH     Use alternate config file
       --data-dir PATH   Override SMS data directory (MMMSMS_DATA_DIR)
   -d, --debug           Enable debug output
-  -F, --fallback        Send/Watch: on failure, try other modem(s)
-      --critical        Send: retry across modem(s) until success (implies --fallback and --retry=infinite)
-  -k, --dry-run         Send/Watch: log SMS details without sending
-      --chunk[=SIZE]    Send: split SMS text into SIZE-character chunks (default: 160)
-  -f, --allow-foreign   Send: allow sending to foreign country codes
-  -H, --hard            Reset: also stop/start modemmanager (hard reset)
-      --replug          Reset: temporarily deauthorize the modem's USB device via sysfs
-  -j, --json            Output JSON (for list/status/read/number/smsc/stats)
+  -h, --help            Show this help and exit
   -m, --modem MODEM     Modem selector or id (default: $MODEM)
                         Accepts id (e.g. 2), dbus path, 'any', or
                         a string matching manufacturer/plugin/ttyUSB/phone-number
                         or country (fr/de/us) or country name (france/germany/us)
   -q, --quiet           Suppress info output (warnings/errors only) and status output (exit code only)
       --silent          Same as --quiet
-  -r, --raw             Use mmcli output format; combine with --json for raw mmcli JSON
-  -R, --retry COUNT|infinite
-                        Set SMS send retry attempts (default: ${SMS_RETRY_COUNT})
   -s, --syslog          Mirror logs to syslog (in addition to stderr)
-  -S, --sent            Prune: delete only sent outgoing messages
       --skip-modem-init PATTERN
-                        Enable: skip vendor-specific modem initialization when
+                        Skip vendor-specific modem initialization when
                         modem details match PATTERN (repeatable)
   -x, --trace           Enable shell tracing (set -x)
-  -h, --help            Show this help and exit
 
 Commands:
   at [AT_COMMAND]            Issue AT command to modem (interactive if no COMMAND)
@@ -541,12 +527,12 @@ Relevant flags:
   -A, --auto           During fallback, use modem default recipient if original blocked (cc restriction)
   -c, --config PATH    Load config for defaults (only needed outside 'watch')
   -F, --fallback       Try other modems on failure (sorted by id)
-      --critical       Retry across modem(s) until success (implies --fallback and --retry=infinite)
-  -k, --dry-run        Log SMS details without sending (prints DRY preview)
-      --chunk[=SIZE]   Split message into SIZE-character chunks (default: 160 when omitted)
   -f, --allow-foreign  Allow sending outside the modem's home country code
+  -k, --dry-run        Log SMS details without sending (prints DRY preview)
   -R, --retry COUNT|infinite
                         Override SMS resend attempts
+      --chunk[=SIZE]   Split message into SIZE-character chunks (default: 160 when omitted)
+      --critical       Retry across modem(s) until success (implies --fallback and --retry=infinite)
 USAGE
 }
 
@@ -686,12 +672,12 @@ Relevant flags:
   -E, --enable          Enable selected modem(s) when starting watch; keep enabling new modems with --all
   -F, --fallback        When replying, try other modems on failure (sorted by id)
   -f, --allow-foreign   Allow replies to recipients outside the modem's home CC
+  -k, --dry-run         Log reply details without sending
   -P, --prune           Delete existing SMS on startup before watching
   -R, --retry COUNT     Override SMS resend attempts
-  -k, --dry-run         Log reply details without sending
-      --delete-sent     Delete sent SMS before sending replies (default: keep)
-      --delete-received Delete processed incoming SMS (default: keep)
       --delete          Enable both --delete-sent and --delete-received
+      --delete-received Delete processed incoming SMS (default: keep)
+      --delete-sent     Delete sent SMS before sending replies (default: keep)
 USAGE
 }
 
