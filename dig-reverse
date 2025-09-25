@@ -19,11 +19,19 @@ reverse_resolve() {
   wait
 }
 
-# for the right port see:
-# $ jq -er .CustomDNSAddress /etc/netbird/config.json
 resolve_nb() {
   local target_ip="$1"
-  dig +short @127.0.0.1 -p 11053 -x "$target_ip"
+
+  local nb_dns_port
+  nb_dns_port=$(jq -er '
+    .CustomDNSAddress // "127.0.0.1:11053" | split(":")[-1]
+  ' /etc/netbird/config.json)
+
+  # alternative:
+  # ss -ulp | awk '/netbird/ && !/3128/ { print $4 }'
+  # 127.0.0.1:11053
+
+  dig +short @127.0.0.1 -p "$nb_dns_port" -x "$target_ip"
 }
 
 # Tailcale MagicDNS
