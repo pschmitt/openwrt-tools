@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 usage() {
-  echo "Usage: $(basename "$0") IP"
+  echo "Usage: $(basename "$0") IP_ADDRESS"
 }
 
 reverse_resolve() {
