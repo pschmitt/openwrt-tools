@@ -162,7 +162,7 @@ poe_port_toggle() {
 
 poe_port_flip_on() {
   local port="$1"
-  local sleep_time="${2:-0.5}" # 0.5 seconds by default
+  local sleep_time="${2:-1}" # 1 seconds by default
 
   poe_off "$port"
   sleep "$sleep_time"
