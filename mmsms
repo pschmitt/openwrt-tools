@@ -94,6 +94,13 @@ WATCH_MAX_PENDING_PER_MODEM="${WATCH_MAX_PENDING_PER_MODEM:-10}"
 WATCH_WORKER_LOCK_SLEEP="${WATCH_WORKER_LOCK_SLEEP:-1}"
 declare -A WATCH_WORKER_PIDS=()
 WATCH_ASYNC_DIR=""
+WATCH_PROCESSED_SMS_MAX="${WATCH_PROCESSED_SMS_MAX:-1000}"
+if [[ -z "${WATCH_PROCESSED_SMS_CACHE_FILE:-}" ]]
+then
+  WATCH_PROCESSED_SMS_CACHE_FILE="$MMMSMS_DATA_DIR/watch-processed-sms.cache"
+fi
+declare -A WATCH_PROCESSED_SMS=()
+declare -a WATCH_PROCESSED_SMS_ORDER=()
 
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
@@ -9085,6 +9092,17 @@ watch_enqueue_sms() {
   local modem_key
   modem_key="$(watch_queue_key "$modem_hint")"
 
+  if watch_sms_already_processed "$modem_key" "$id"
+  then
+    echo_debug "watch: ignoring duplicate SMS $id for modem $modem_key"
+    return
+  fi
+
+  if ! watch_sms_mark_processed "$modem_key" "$id"
+  then
+    echo_warning "watch: failed to update processed cache for SMS $id (modem $modem_key)"
+  fi
+
   watch_worker_prune_for_modem "$modem_key"
 
   local pending
@@ -9152,6 +9170,285 @@ watch_stop_workers() {
     fi
     WATCH_ASYNC_DIR=""
   fi
+}
+
+# Escape a string for inclusion in JSON output.
+watch_processed_json_escape() {
+  local input="$1"
+  local output
+
+  output="$input"
+  output="${output//\\/\\\\}"
+  output="${output//\"/\\\"}"
+  output="${output//$'\b'/\\b}"
+  output="${output//$'\f'/\\f}"
+  output="${output//$'\n'/\\n}"
+  output="${output//$'\r'/\\r}"
+  output="${output//$'\t'/\\t}"
+
+  printf '%s' "$output"
+}
+
+# Write the processed SMS cache contents to a JSON file.
+watch_processed_cache_write_json() {
+  local output_path="$1"
+  local count
+  local index
+  local key
+  local escaped
+
+  if ! printf '[\n' >"$output_path"
+  then
+    return 1
+  fi
+
+  count="${#WATCH_PROCESSED_SMS_ORDER[@]}"
+  index=0
+
+  while (( index < count ))
+  do
+    key="${WATCH_PROCESSED_SMS_ORDER[$index]}"
+    escaped="$(watch_processed_json_escape "$key")" || return 1
+
+    if (( index > 0 ))
+    then
+      if ! printf ',\n' >>"$output_path"
+      then
+        return 1
+      fi
+    fi
+
+    if ! printf '  "%s"' "$escaped" >>"$output_path"
+    then
+      return 1
+    fi
+
+    index=$(( index + 1 ))
+  done
+
+  if (( count > 0 ))
+  then
+    if ! printf '\n' >>"$output_path"
+    then
+      return 1
+    fi
+  fi
+
+  if ! printf ']\n' >>"$output_path"
+  then
+    return 1
+  fi
+
+  return 0
+}
+
+# Generate the associative-array key for tracking processed SMS ids.
+watch_processed_key() {
+  local modem_key="$1"
+  local sms_id="$2"
+
+  if [[ -z "$modem_key" ]]
+  then
+    modem_key="any"
+  fi
+
+  printf '%s:%s' "$modem_key" "$sms_id"
+}
+
+# Remove the oldest processed SMS ids when exceeding the configured cap.
+watch_processed_prune() {
+  if (( WATCH_PROCESSED_SMS_MAX <= 0 ))
+  then
+    return 0
+  fi
+
+  local pruned=0
+
+  while (( ${#WATCH_PROCESSED_SMS_ORDER[@]} > WATCH_PROCESSED_SMS_MAX ))
+  do
+    local oldest_key
+    oldest_key="${WATCH_PROCESSED_SMS_ORDER[0]}"
+
+    if (( ${#WATCH_PROCESSED_SMS_ORDER[@]} > 1 ))
+    then
+      WATCH_PROCESSED_SMS_ORDER=("${WATCH_PROCESSED_SMS_ORDER[@]:1}")
+    else
+      WATCH_PROCESSED_SMS_ORDER=()
+    fi
+
+    unset "WATCH_PROCESSED_SMS[$oldest_key]"
+    pruned=1
+  done
+
+  return "$pruned"
+}
+
+# Persist the processed SMS cache to disk.
+watch_processed_cache_save() {
+  if [[ -z "$WATCH_PROCESSED_SMS_CACHE_FILE" ]]
+  then
+    return 0
+  fi
+
+  local cache_dir
+  cache_dir="$(dirname "$WATCH_PROCESSED_SMS_CACHE_FILE")"
+
+  if [[ -n "$cache_dir" && "$cache_dir" != "." ]]
+  then
+    if ! mkdir -p "$cache_dir"
+    then
+      echo_warning "watch: could not create cache directory $cache_dir"
+      return 1
+    fi
+  fi
+
+  local tmp_file
+  tmp_file="$WATCH_PROCESSED_SMS_CACHE_FILE.$$"
+
+  if ! watch_processed_cache_write_json "$tmp_file"
+  then
+    echo_warning "watch: failed to write processed SMS cache"
+    rm -f "$tmp_file" 2>/dev/null
+    return 1
+  fi
+
+  if ! mv "$tmp_file" "$WATCH_PROCESSED_SMS_CACHE_FILE"
+  then
+    echo_warning "watch: failed to update processed SMS cache"
+    rm -f "$tmp_file" 2>/dev/null
+    return 1
+  fi
+
+  return 0
+}
+
+# Load the processed SMS cache from disk.
+watch_processed_cache_load() {
+  if [[ -z "$WATCH_PROCESSED_SMS_CACHE_FILE" || ! -f "$WATCH_PROCESSED_SMS_CACHE_FILE" ]]
+  then
+    return 0
+  fi
+
+  local python_bin
+  if command -v python3 >/dev/null 2>&1
+  then
+    python_bin="python3"
+  elif command -v python >/dev/null 2>&1
+  then
+    python_bin="python"
+  fi
+
+  local -a loaded_keys
+  local load_mode
+
+  load_mode="json"
+
+  if [[ -n "$python_bin" ]]
+  then
+    if ! mapfile -t loaded_keys < <(WATCH_PROCESSED_SMS_CACHE_FILE="$WATCH_PROCESSED_SMS_CACHE_FILE" "$python_bin" <<'PY'
+import json
+import os
+import sys
+
+path = os.environ.get("WATCH_PROCESSED_SMS_CACHE_FILE")
+if not path:
+    sys.exit(1)
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, list):
+    sys.exit(1)
+for item in data:
+    if isinstance(item, str) and item:
+        print(item)
+PY
+)
+    then
+      loaded_keys=()
+      load_mode="legacy"
+    fi
+  else
+    load_mode="legacy"
+  fi
+
+  if [[ "$load_mode" == "legacy" ]]
+  then
+    local line
+    while IFS= read -r line
+    do
+      if [[ -z "$line" ]]
+      then
+        continue
+      fi
+
+      loaded_keys+=("$line")
+    done <"$WATCH_PROCESSED_SMS_CACHE_FILE"
+  fi
+
+  local key
+  for key in "${loaded_keys[@]}"
+  do
+    if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+    then
+      continue
+    fi
+
+    WATCH_PROCESSED_SMS["$key"]=1
+    WATCH_PROCESSED_SMS_ORDER+=("$key")
+  done
+
+  watch_processed_prune
+  local prune_rc=$?
+  if (( prune_rc != 0 ))
+  then
+    watch_processed_cache_save || return 1
+  fi
+
+  return 0
+}
+
+# Check if an SMS id was already processed.
+watch_sms_already_processed() {
+  local modem_key="$1"
+  local sms_id="$2"
+  local key
+
+  key="$(watch_processed_key "$modem_key" "$sms_id")"
+
+  if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+  then
+    return 0
+  fi
+
+  return 1
+}
+
+# Remember an SMS id as processed to avoid duplicate handling.
+watch_sms_mark_processed() {
+  local modem_key="$1"
+  local sms_id="$2"
+  local key
+
+  key="$(watch_processed_key "$modem_key" "$sms_id")"
+
+  if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+  then
+    return 1
+  fi
+
+  WATCH_PROCESSED_SMS["$key"]=1
+  WATCH_PROCESSED_SMS_ORDER+=("$key")
+
+  watch_processed_prune
+
+  if ! watch_processed_cache_save
+  then
+    return 1
+  fi
+
+  return 0
 }
 
 # Continuously auto-enable modems while watch mode is active.
@@ -10923,6 +11220,12 @@ watch_messages() {
   trap watch_cleanup EXIT INT TERM
   trap watch_worker_prune_all CHLD
 
+  WATCH_PROCESSED_SMS=()
+  WATCH_PROCESSED_SMS_ORDER=()
+  if ! watch_processed_cache_load
+  then
+    echo_warning "watch: failed to load processed SMS cache"
+  fi
   WATCH_FIFO="${TMPDIR:-/tmp}/smsbus.$$"
   mkfifo "$WATCH_FIFO"
 
