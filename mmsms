@@ -101,6 +101,7 @@ then
 fi
 declare -A WATCH_PROCESSED_SMS=()
 declare -a WATCH_PROCESSED_SMS_ORDER=()
+SMS_LIST_PROCESSED_CACHE_WARMED=""
 
 QUIET="${QUIET:-}"
 JSON_OUTPUT="${JSON_OUTPUT:-}"
@@ -8039,9 +8040,9 @@ sms_list_print_header() {
 
   if [[ -n "$include_mid" ]]
   then
-    header="$(printf '%-4s %-4s %-10s %-18s %s' 'MID' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
+    header="$(printf '%-4s %-4s %-10s %-9s %-18s %-18s %s' 'MID' 'ID' 'TYPE' 'PROCESSED' 'SENDER' 'RECIPIENT' 'MSG')"
   else
-    header="$(printf '%-4s %-10s %-18s %s' 'ID' 'TYPE' 'RECIPIENT' 'MSG')"
+    header="$(printf '%-4s %-10s %-9s %-18s %-18s %s' 'ID' 'TYPE' 'PROCESSED' 'SENDER' 'RECIPIENT' 'MSG')"
   fi
 
   if [[ -n "$NO_COLOR" || -n "$CRON" ]]
@@ -8061,7 +8062,7 @@ sms_list_print_entry() {
 
   local include_mid
   local maxlen=80
-  local sender text msg_type pdu
+  local text msg_type pdu
 
   while (( $# > 0 ))
   do
@@ -8118,8 +8119,9 @@ sms_list_print_entry() {
     esac
   done
 
-  sender="$(jq -r '.sms.content.number // "--"' <<<"$js")"
-  sender="$(ensure_plus "$sender")"
+  local counterpart
+  counterpart="$(jq -r '.sms.content.number // ""' <<<"$js")"
+  counterpart="$(ensure_plus "$counterpart")"
   pdu="$(jq -r '.sms.properties["pdu-type"] // ""' <<<"$js")"
   msg_type="$(pdu_to_type "$pdu")"
   text="$(jq -r '.sms.content.text // ""' <<<"$js")"
@@ -8136,8 +8138,111 @@ sms_list_print_entry() {
   local type_display
   printf -v type_display '%-10s' "$msg_type"
 
+  local modem_key
+  modem_key="$mid"
+  if [[ -z "$modem_key" ]]
+  then
+    modem_key="$(jq -r '(.sms.properties.modem // .sms.properties["modem-path"] // empty) | split("/")[-1] // empty' <<<"$js" 2>/dev/null)"
+  fi
+  if [[ -z "$modem_key" ]]
+  then
+    modem_key="$MODEM"
+  fi
+
+  local own_number
+  if [[ -n "$modem_key" ]]
+  then
+    own_number="$(query_modem_number "$modem_key")" || own_number=""
+  fi
+  own_number="$(ensure_plus "$own_number")"
+
+  local sender_value
+  local recipient_value
+
+  if [[ -z "$counterpart" ]]
+  then
+    case "$msg_type" in
+      received)
+        sender_value="--"
+        if [[ -n "$own_number" ]]
+        then
+          recipient_value="$own_number"
+        fi
+        ;;
+      sent)
+        recipient_value="--"
+        if [[ -n "$own_number" ]]
+        then
+          sender_value="$own_number"
+        fi
+        ;;
+    esac
+  else
+    case "$msg_type" in
+      received)
+        sender_value="$counterpart"
+        if [[ -n "$own_number" ]]
+        then
+          recipient_value="$own_number"
+        else
+          recipient_value="--"
+        fi
+        ;;
+      sent)
+        recipient_value="$counterpart"
+        if [[ -n "$own_number" ]]
+        then
+          sender_value="$own_number"
+        else
+          sender_value="--"
+        fi
+        ;;
+      *)
+        recipient_value="$counterpart"
+        if [[ -n "$own_number" ]]
+        then
+          sender_value="$own_number"
+        fi
+        ;;
+    esac
+  fi
+
+  if [[ -z "$sender_value" ]]
+  then
+    sender_value="--"
+  fi
+
+  if [[ -z "$recipient_value" ]]
+  then
+    recipient_value="--"
+  fi
+
+  local sender_display
+  printf -v sender_display '%-18s' "$sender_value"
+
   local recipient_display
-  printf -v recipient_display '%-18s' "$sender"
+  printf -v recipient_display '%-18s' "$recipient_value"
+
+  local processed_symbol
+  processed_symbol=' '
+  if watch_sms_already_processed "$modem_key" "$id"
+  then
+    processed_symbol='✓'
+  fi
+
+  local processed_column_width
+  processed_column_width=9
+  local processed_symbol_length
+  processed_symbol_length=${#processed_symbol}
+  local processed_padding_length
+  processed_padding_length=$(( processed_column_width - processed_symbol_length ))
+  if (( processed_padding_length < 0 ))
+  then
+    processed_padding_length=0
+  fi
+
+  local processed_display
+  printf -v processed_display '%s%*s' "$processed_symbol" "$processed_padding_length" ''
 
   local message_display="$text"
 
@@ -8167,6 +8272,13 @@ sms_list_print_entry() {
         fi
       fi
 
+      local sender_color_seq
+      sender_color_seq="$(ansi_escape "$COLOR_BOLD_CYAN")"
+      if [[ -n "$sender_color_seq" ]]
+      then
+        sender_display="${sender_color_seq}${sender_display}${color_reset}"
+      fi
+
       local recipient_color_seq
       recipient_color_seq="$(ansi_escape "$COLOR_BOLD_MAGENTA")"
       if [[ -n "$recipient_color_seq" ]]
@@ -8179,6 +8291,16 @@ sms_list_print_entry() {
       if [[ -n "$message_color_seq" ]]
       then
         message_display="${message_color_seq}${message_display}${color_reset}"
+      fi
+
+      if [[ "$processed_symbol" == '✓' ]]
+      then
+        local processed_color_seq
+        processed_color_seq="$(ansi_escape "$COLOR_BOLD_GREEN")"
+        if [[ -n "$processed_color_seq" ]]
+        then
+          processed_display="${processed_color_seq}${processed_display}${color_reset}"
+        fi
       fi
 
       if [[ -n "$include_mid" ]]
@@ -8202,9 +8324,9 @@ sms_list_print_entry() {
 
   if [[ -n "$include_mid" ]]
   then
-    printf '%s %s %s %s %s\n' "$mid_display" "$id_display" "$type_display" "$recipient_display" "$message_display"
+    printf '%s %s %s %s %s %s %s\n' "$mid_display" "$id_display" "$type_display" "$processed_display" "$sender_display" "$recipient_display" "$message_display"
   else
-    printf '%s %s %s %s\n' "$id_display" "$type_display" "$recipient_display" "$message_display"
+    printf '%s %s %s %s %s %s\n' "$id_display" "$type_display" "$processed_display" "$sender_display" "$recipient_display" "$message_display"
   fi
 }
 
@@ -8212,6 +8334,15 @@ sms_list_print_entry() {
 sms_list_pretty() {
   local list_json ids id js sender text msg_type pdu line maxlen=80
   local empty_msg="*no messages*"
+  if [[ -z "$SMS_LIST_PROCESSED_CACHE_WARMED" ]]
+  then
+    if watch_processed_cache_load
+    then
+      SMS_LIST_PROCESSED_CACHE_WARMED=1
+    else
+      SMS_LIST_PROCESSED_CACHE_WARMED=0
+    fi
+  fi
   if [[ -z $NO_COLOR && -z $CRON ]]
   then
     empty_msg="$(ansi_escape "$COLOR_BOLD_YELLOW")${empty_msg}$(ansi_escape "$COLOR_RESET")"
