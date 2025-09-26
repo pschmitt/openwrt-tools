@@ -3156,7 +3156,7 @@ configure_modem_vendor() {
 
 # Issue the Quectel power-down command as part of reset handling.
 reset_quectel_modem() {
-  reset_log "quectel: sending AT+QPOWD=0"
+  echo_info "quectel: sending AT+QPOWD=0"
 
   local resp
   if ! resp="$(at_command 'AT+QPOWD=0')"
@@ -3166,7 +3166,7 @@ reset_quectel_modem() {
 
   local formatted_resp
   formatted_resp="$(format_at_response "$resp")"
-  reset_log "quectel: AT+QPOWD=0 -> $formatted_resp"
+  echo_info "quectel: AT+QPOWD=0 -> $formatted_resp"
 
   return 0
 }
@@ -3338,7 +3338,7 @@ modem_usb_replug() {
     local authorized_path="$device_dir/authorized"
     if [[ -w "$authorized_path" ]]
     then
-      reset_log "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??})"
+      echo_info "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??})"
       if ! printf '0\n' >"$authorized_path"
       then
         echo_warning "failed to deauthorize USB device $dev_name"
@@ -3360,7 +3360,7 @@ modem_usb_replug() {
 
     if [[ -w "$unbind_path" && -w "$bind_path" ]]
     then
-      reset_log "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??}) via unbind/bind"
+      echo_info "USB replugging device $dev_name (ports: ${port_list:-unknown}, vid:pid ${vendor:-??}:${product:-??}) via unbind/bind"
       if ! printf '%s\n' "$dev_name" >"$unbind_path"
       then
         echo_warning "failed to unbind USB device $dev_name"
@@ -8869,17 +8869,58 @@ enable_all_modems() {
   fi
 }
 
+# Run a bulk start, stop, or restart action across init services, logging failures.
+init_svc_bulk() {
+  local action="$1"
+  shift
+  local -a services=("$@")
+  local verb
+
+  case "$action"
+  in
+    start)
+      verb="starting"
+      ;;
+    stop)
+      verb="stopping"
+      ;;
+    restart)
+      verb="restarting"
+      ;;
+    *)
+      echo_error "unsupported init service action '$action'"
+      return 1
+      ;;
+  esac
+
+  local service
+  local init_script
+  local failed
+
+  for service in "${services[@]}"
+  do
+    init_script="/etc/init.d/$service"
+    echo_info "$verb $service"
+    if ! "$init_script" "$action"
+    then
+      echo_error "failed to $action $service"
+      failed=1
+      continue
+    fi
+  done
+
+  if [[ -n "$failed" ]]
+  then
+    return 1
+  fi
+
+  return 0
+}
+
 # Reset the current modem with optional service restarts and USB replugging.
 modem_reset() {
-  local service="/etc/init.d/modemmanager"
-  local has_service
-
-  if [[ -x "$service" ]]
-  then
-    has_service=1
-  else
-    echo_warning "modemmanager init script not found or not executable at $service"
-  fi
+  local -a services=("modemmanager" "dbus" "$SCRIPT_NAME")
+  local start_failed
 
   local info_json vendor
   if info_json="$(mmcli_cmd -J)"
@@ -8893,12 +8934,18 @@ modem_reset() {
     echo_warning "could not query modem to determine vendor; proceeding with generic reset"
   fi
 
-  if [[ -n "$HARD_RESET" && -n "$has_service" ]]
+  if [[ -n "$HARD_RESET" ]]
   then
-    reset_log "stopping ModemManager"
-    if ! "$service" stop
+    local idx
+    local -a service_list=()
+
+    for (( idx=${#services[@]} - 1; idx >= 0; idx-- ))
+    do
+      service_list+=("${services[$idx]}")
+    done
+
+    if ! init_svc_bulk stop "${service_list[@]}"
     then
-      echo_error "failed to stop ModemManager service"
       return 1
     fi
   fi
@@ -8914,17 +8961,15 @@ modem_reset() {
     fi
   fi
 
-  if [[ -n "$HARD_RESET" && -n "$has_service" ]]
+  if [[ -n "$HARD_RESET" ]]
   then
-    reset_log "starting ModemManager"
-    if ! "$service" start
+    if ! init_svc_bulk start "${services[@]}"
     then
-      echo_error "failed to start ModemManager service"
-      return 1
+      start_failed=1
     fi
   fi
 
-  reset_log "enabling modem"
+  echo_info "enabling modem"
   local prev_wait_mode="${ENABLE_WAIT_MODEM:-}"
   local prev_wait_timeout="${ENABLE_WAIT_TIMEOUT:-}"
   ENABLE_WAIT_MODEM=1
@@ -8946,6 +8991,11 @@ modem_reset() {
   fi
   ENABLE_WAIT_MODEM="$prev_wait_mode"
   ENABLE_WAIT_TIMEOUT="$prev_wait_timeout"
+
+  if [[ -n "$start_failed" ]]
+  then
+    return 1
+  fi
 
   return 0
 }
@@ -8969,14 +9019,6 @@ modem_reset_all() {
     echo_info "resetting modem $mid"
     MODEM="$mid" modem_reset || echo_error "failed to reset modem $mid"
   done
-}
-
-# Log reset operations when not running in quiet mode.
-reset_log() {
-  if [[ -z $QUIET ]]
-  then
-    echo_info "$*"
-  fi
 }
 
 # Clean up watcher resources and background processes.
