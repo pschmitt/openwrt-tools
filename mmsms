@@ -3894,9 +3894,10 @@ sms_read_details_json() {
       | ($modem_path | split("/")[-1]) as $modem_id_str
       | ($sms_path | split("/")[-1]) as $sms_id_str
       | $fallback_modem as $fallback
+      | (.sms.properties.class // "") as $class_raw
       | {
-          id: ($sms_id_str | tonumber?),
-          modem_id: ($modem_id_str | tonumber?),
+          id: (if ($sms_id_str // "") == "" then null else (try ($sms_id_str | tonumber) catch null) end),
+          modem_id: (if ($modem_id_str // "") == "" then null else (try ($modem_id_str | tonumber) catch null) end),
           modem_label: (
             if ($modem_id_str // "") != "" then $modem_id_str
             elif ($fallback | test("^[0-9]+$")) then $fallback
@@ -3907,7 +3908,7 @@ sms_read_details_json() {
           direction: ($direction | blank_to_null),
           state: (.sms.properties.state // null),
           storage: ((.sms.properties.storage // "") | blank_to_null),
-          class: ((.sms.properties.class // "") | if . == "" then null else (. | tonumber? // .) end),
+          class: (if $class_raw == "" then null else (try ($class_raw | tonumber) catch $class_raw) end),
           pdu: ($pdu | blank_to_null),
           timestamp: (.sms.properties.timestamp // null),
           discharge_timestamp: (.sms.properties["discharge-timestamp"] // null),
