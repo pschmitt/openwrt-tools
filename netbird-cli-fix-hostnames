@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+cd "$(dirname "$(readlink -f -- "$0")")" || return 9
+# shellcheck source=lib/echo.sh
+source lib/echo.sh || exit 2
+
+# Display the script usage.
+usage() {
+  echo "Usage: $(basename "$0") [--dry-run|--dryrun|-k]"
+}
+
+# Parse command line arguments.
+parse_args() {
+  local arg
+
+  for arg in "$@"
+  do
+    case "$arg" in
+      --dry-run|--dryrun|-k)
+        DRY_RUN=1
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo_error "Unknown argument: $arg"
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+# Normalise the peer name by replacing underscores and converting to lowercase.
+normalize_peer_name() {
+  local name="$1"
+  name=${name//_/-}
+  echo "${name,,}"
+}
+
+# Extract the DNS label prefix from the peer data and lowercase it.
+normalize_dns_label() {
+  local label="$1"
+
+  if [[ -z "$label" ]]
+  then
+    echo ""
+    return 0
+  fi
+
+  label=${label%%.*}
+  echo "${label,,}"
+}
+
+# Update a peer name, honouring dry run mode.
+update_peer_name() {
+  local peer_id="$1"
+  local new_name="$2"
+  local cli_bin
+  cli_bin="${NB_CLI_BIN:-netbird-cli}"
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    echo_info "Dry run: $cli_bin peer update --name \"$new_name\" \"$peer_id\""
+    return 0
+  fi
+
+  if ! "$cli_bin" peer update --name "$new_name" "$peer_id"
+  then
+    echo_error "Failed to update peer $peer_id to name $new_name"
+    return 1
+  fi
+
+  return 0
+}
+
+# Fetch peers from netbird-cli and fix mismatched hostnames.
+process_peers() {
+  local cli_bin peers_json peer_entries_json peer peer_id peer_name peer_dns_label
+  local normalized_peer_name normalized_dns_name timestamp
+
+  cli_bin="${NB_CLI_BIN:-netbird-cli}"
+
+  if ! peers_json="$("$cli_bin" peers --json)"
+  then
+    echo_error "Failed to fetch netbird peer data"
+    return 1
+  fi
+
+  if ! mapfile -t peer_entries_json < <(jq -cer '.[]' <<< "$peers_json")
+  then
+    echo_error "Failed to parse peer JSON"
+    return 1
+  fi
+
+  for peer in "${peer_entries_json[@]}"
+  do
+    echo_debug -d "Peer data: $peer"
+
+    if ! read -r peer_id peer_name peer_dns_label <<< "$(jq -er '[.id, (.name // ""), (.dns_label // "")] | @tsv' <<< "$peer")"
+    then
+      echo_warning "Skipping peer due to missing fields: $peer"
+      continue
+    fi
+
+    if [[ $peer_name == github-runner* ]]
+    then
+      echo_info "Skipping GitHub runner peer: $peer_name"
+      continue
+    fi
+
+    normalized_peer_name="$(normalize_peer_name "$peer_name")"
+    normalized_dns_name="$(normalize_dns_label "$peer_dns_label")"
+
+    if [[ -z "$normalized_peer_name" ]]
+    then
+      echo_warning "Skipping peer with empty name: $peer"
+      continue
+    fi
+
+    echo_info "Processing peer: $normalized_peer_name - DNS hostname: ${normalized_dns_name:-none} (${peer_dns_label:-none})"
+
+    if [[ "$normalized_peer_name" == "$normalized_dns_name" ]]
+    then
+      echo_success "Peer $normalized_peer_name has valid DNS label: ${peer_dns_label:-none}"
+      continue
+    fi
+
+    echo_warning "Peer $normalized_peer_name has mismatched DNS label: ${peer_dns_label:-none}"
+
+    timestamp="$(date '+%s')"
+    if ! update_peer_name "$peer_id" "${normalized_peer_name}_${timestamp}"
+    then
+      echo_error "Failed to set temporary name for peer $peer_id"
+      continue
+    fi
+
+    if ! update_peer_name "$peer_id" "$normalized_peer_name"
+    then
+      echo_error "Failed to restore name for peer $peer_id"
+      continue
+    fi
+
+    echo_success "Updated peer $peer_id name to $normalized_peer_name"
+  done
+
+  return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  DRY_RUN=
+
+  parse_args "$@"
+
+  if ! process_peers
+  then
+    exit 1
+  fi
+fi
