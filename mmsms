@@ -9266,6 +9266,11 @@ watch_enqueue_sms() {
   local modem_key
   modem_key="$(watch_queue_key "$modem_hint")"
 
+  if ! watch_processed_cleanup "$modem_hint"
+  then
+    echo_debug "watch: processed cache cleanup skipped for modem $modem_hint"
+  fi
+
   if watch_sms_already_processed "$modem_key" "$id"
   then
     echo_debug "watch: ignoring duplicate SMS $id for modem $modem_key"
@@ -9418,15 +9423,11 @@ watch_processed_cache_write_json() {
 
 # Generate the associative-array key for tracking processed SMS ids.
 watch_processed_key() {
-  local modem_key="$1"
   local sms_id="$2"
 
-  if [[ -z "$modem_key" ]]
-  then
-    modem_key="any"
-  fi
+  : "$1"
 
-  printf '%s:%s' "$modem_key" "$sms_id"
+  printf '%s' "$sms_id"
 }
 
 # Remove the oldest processed SMS ids when exceeding the configured cap.
@@ -9503,67 +9504,21 @@ watch_processed_cache_load() {
     return 0
   fi
 
-  local python_bin
-  if command -v python3 >/dev/null 2>&1
-  then
-    python_bin="python3"
-  elif command -v python >/dev/null 2>&1
-  then
-    python_bin="python"
-  fi
-
   local -a loaded_keys
-  local load_mode
-
-  load_mode="json"
-
-  if [[ -n "$python_bin" ]]
+  if ! mapfile -t loaded_keys < <(jq -r '.[] | select(type == "string" and length > 0)' <"$WATCH_PROCESSED_SMS_CACHE_FILE" 2>/dev/null)
   then
-    if ! mapfile -t loaded_keys < <(WATCH_PROCESSED_SMS_CACHE_FILE="$WATCH_PROCESSED_SMS_CACHE_FILE" "$python_bin" <<'PY'
-import json
-import os
-import sys
-
-path = os.environ.get("WATCH_PROCESSED_SMS_CACHE_FILE")
-if not path:
-    sys.exit(1)
-try:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-except Exception:
-    sys.exit(1)
-if not isinstance(data, list):
-    sys.exit(1)
-for item in data:
-    if isinstance(item, str) and item:
-        print(item)
-PY
-)
-    then
-      loaded_keys=()
-      load_mode="legacy"
-    fi
-  else
-    load_mode="legacy"
-  fi
-
-  if [[ "$load_mode" == "legacy" ]]
-  then
-    local line
-    while IFS= read -r line
-    do
-      if [[ -z "$line" ]]
-      then
-        continue
-      fi
-
-      loaded_keys+=("$line")
-    done <"$WATCH_PROCESSED_SMS_CACHE_FILE"
+    echo_warning "watch: failed to parse processed SMS cache; ignoring stale data"
+    return 0
   fi
 
   local key
   for key in "${loaded_keys[@]}"
   do
+    if [[ ! "$key" =~ ^[0-9]+$ ]]
+    then
+      continue
+    fi
+
     if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
     then
       continue
@@ -9578,6 +9533,115 @@ PY
   if (( prune_rc != 0 ))
   then
     watch_processed_cache_save || return 1
+  fi
+
+  return 0
+}
+
+# Remove processed cache entries that no longer exist on the modem(s).
+watch_processed_cleanup() {
+  local modem_hint="$1"
+
+  local -a modem_ids=()
+  local fetch_all
+
+  if [[ -n "$ALL_MODEMS" ]]
+  then
+    fetch_all=1
+  elif [[ -n "$modem_hint" && "$modem_hint" != "any" ]]
+  then
+    modem_ids=("$modem_hint")
+  elif [[ -n "$MODEM" && "$MODEM" != "any" ]]
+  then
+    modem_ids=("$MODEM")
+  else
+    fetch_all=1
+  fi
+
+  if [[ -n "$fetch_all" ]]
+  then
+    if ! mapfile -t modem_ids < <(list_modem_ids_sorted)
+    then
+      echo_warning "watch: failed to enumerate modems for processed cache cleanup"
+      return 1
+    fi
+  fi
+
+  if (( ${#modem_ids[@]} == 0 ))
+  then
+    return 0
+  fi
+
+  local -A existing_ids=()
+  local modem_id
+  local list_json
+  local -a ids=()
+  local sms_id
+
+  for modem_id in "${modem_ids[@]}"
+  do
+    if [[ -z "$modem_id" ]]
+    then
+      continue
+    fi
+
+    if ! list_json="$(mmcli --modem "$modem_id" --messaging-list-sms -J 2>/dev/null)"
+    then
+      echo_warning "watch: failed to list SMS messages on modem $modem_id for cache cleanup"
+      return 1
+    fi
+
+    if ! mapfile -t ids < <(jq -r '."modem.messaging.sms"[]? | split("/")[-1] | select(length > 0)' <<<"$list_json")
+    then
+      continue
+    fi
+
+    for sms_id in "${ids[@]}"
+    do
+      if [[ -z "$sms_id" ]]
+      then
+        continue
+      fi
+
+      existing_ids["$sms_id"]=1
+    done
+  done
+
+  local key
+  local -a keep_order=()
+  local removed
+
+  for key in "${WATCH_PROCESSED_SMS_ORDER[@]}"
+  do
+    if [[ -z "$key" ]]
+    then
+      continue
+    fi
+
+    if [[ -v existing_ids["$key"] ]]
+    then
+      keep_order+=("$key")
+      continue
+    fi
+
+    if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+    then
+      unset 'WATCH_PROCESSED_SMS[$key]'
+      removed=1
+    fi
+  done
+
+  if [[ -z "$removed" ]]
+  then
+    return 0
+  fi
+
+  WATCH_PROCESSED_SMS_ORDER=("${keep_order[@]}")
+
+  if ! watch_processed_cache_save
+  then
+    echo_warning "watch: failed to persist processed cache cleanup"
+    return 1
   fi
 
   return 0
@@ -11399,6 +11463,11 @@ watch_messages() {
   if ! watch_processed_cache_load
   then
     echo_warning "watch: failed to load processed SMS cache"
+  fi
+
+  if ! watch_processed_cleanup
+  then
+    echo_debug "watch: processed cache cleanup skipped during startup"
   fi
   WATCH_FIFO="${TMPDIR:-/tmp}/smsbus.$$"
   mkfifo "$WATCH_FIFO"
