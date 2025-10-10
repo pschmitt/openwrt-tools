@@ -7394,7 +7394,7 @@ sms_send() {
     local home_cc
     # shellcheck disable=SC2031
     home_cc="$(get_home_cc "$MODEM")"
-    if [[ -n "$home_cc" && "$recipient" == +([0-9]) ]]
+    if [[ -n "$home_cc" && "$recipient" =~ ^\+[0-9]+$ ]]
     then
       if [[ "$recipient" != +"$home_cc"* ]]
       then
