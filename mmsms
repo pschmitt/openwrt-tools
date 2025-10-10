@@ -9271,13 +9271,20 @@ watch_enqueue_sms() {
     echo_debug "watch: processed cache cleanup skipped for modem $modem_hint"
   fi
 
-  if watch_sms_already_processed "$modem_key" "$id"
+  local fingerprint
+  if ! fingerprint="$(watch_sms_fingerprint "$modem_hint" "$id")"
+  then
+    echo_error "watch: failed to fingerprint SMS $id for modem $modem_key"
+    return 1
+  fi
+
+  if watch_sms_already_processed "$modem_key" "$id" "$fingerprint"
   then
     echo_debug "watch: ignoring duplicate SMS $id for modem $modem_key"
     return
   fi
 
-  if ! watch_sms_mark_processed "$modem_key" "$id"
+  if ! watch_sms_mark_processed "$modem_key" "$id" "$fingerprint"
   then
     echo_warning "watch: failed to update processed cache for SMS $id (modem $modem_key)"
   fi
@@ -9421,13 +9428,117 @@ watch_processed_cache_write_json() {
   return 0
 }
 
+# Generate a stable fingerprint for an SMS when possible.
+watch_sms_fingerprint() {
+  local modem_hint="$1"
+  local sms_id="$2"
+  local json
+  local fingerprint_source
+  local fingerprint_hash
+
+  if [[ -z "$sms_id" ]]
+  then
+    return 1
+  fi
+
+  if [[ -n "$modem_hint" && "$modem_hint" != "any" ]]
+  then
+    if ! json="$(MODEM="$modem_hint" mmcli_cmd --sms "$sms_id" -J 2>/dev/null)"
+    then
+      if ! json="$(mmcli --modem "$modem_hint" --sms "$sms_id" -J 2>/dev/null)"
+      then
+        json=""
+      fi
+    fi
+  fi
+
+  if [[ -z "$json" ]]
+  then
+    if ! json="$(mmcli_cmd --sms "$sms_id" -J 2>/dev/null)"
+    then
+      return 1
+    fi
+  fi
+
+  fingerprint_source="$(jq -cS '
+    def scrub:
+      if type == "object"
+      then
+        with_entries(
+          if .value == null
+          then empty
+          else .value |= scrub
+          end
+        )
+      elif type == "array"
+      then
+        map(scrub)
+      else
+        .
+      end;
+
+    {
+      properties: (.sms.properties // null),
+      content: (.sms.content // null)
+    }
+    | scrub
+    | if (keys | length) == 0
+      then empty
+      else .
+      end
+  ' <<<"$json" 2>/dev/null)"
+
+  if [[ -z "$fingerprint_source" || "$fingerprint_source" == "null" ]]
+  then
+    return 1
+  fi
+
+  fingerprint_hash="$(printf '%s' "$fingerprint_source" | sha256sum 2>/dev/null)"
+  if [[ -z "$fingerprint_hash" ]]
+  then
+    return 1
+  fi
+
+  read -r fingerprint_hash _ <<<"$fingerprint_hash"
+  if [[ -z "$fingerprint_hash" ]]
+  then
+    return 1
+  fi
+
+  printf '%s' "$fingerprint_hash"
+}
+
 # Generate the associative-array key for tracking processed SMS ids.
 watch_processed_key() {
-  local sms_id="$2"
+  local fingerprint="$1"
 
-  : "$1"
+  if [[ -z "$fingerprint" ]]
+  then
+    return 1
+  fi
 
-  printf '%s' "$sms_id"
+  printf 'fp:%s' "$fingerprint"
+  return 0
+}
+
+# Add a processed SMS key to the tracking structures if missing.
+watch_processed_cache_add_key() {
+  local key="$1"
+
+  if [[ -z "$key" ]]
+  then
+    return 1
+  fi
+
+  if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+  then
+    return 1
+  fi
+
+  WATCH_PROCESSED_SMS["$key"]=1
+  WATCH_PROCESSED_SMS_ORDER+=("$key")
+
+  return 0
 }
 
 # Remove the oldest processed SMS ids when exceeding the configured cap.
@@ -9514,18 +9625,17 @@ watch_processed_cache_load() {
   local key
   for key in "${loaded_keys[@]}"
   do
-    if [[ ! "$key" =~ ^[0-9]+$ ]]
+    if [[ -z "$key" ]]
     then
       continue
     fi
 
-    if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+    if [[ "$key" != fp:* ]]
     then
       continue
     fi
 
-    WATCH_PROCESSED_SMS["$key"]=1
-    WATCH_PROCESSED_SMS_ORDER+=("$key")
+    watch_processed_cache_add_key "$key"
   done
 
   watch_processed_prune
@@ -9572,11 +9682,13 @@ watch_processed_cleanup() {
     return 0
   fi
 
-  local -A existing_ids=()
+  local -A existing_keys=()
   local modem_id
   local list_json
   local -a ids=()
   local sms_id
+  local fingerprint
+  local key
 
   for modem_id in "${modem_ids[@]}"
   do
@@ -9603,11 +9715,17 @@ watch_processed_cleanup() {
         continue
       fi
 
-      existing_ids["$sms_id"]=1
+      fingerprint=
+      if fingerprint="$(watch_sms_fingerprint "$modem_id" "$sms_id")"
+      then
+        if key="$(watch_processed_key "$fingerprint")"
+        then
+          existing_keys["$key"]=1
+        fi
+      fi
     done
   done
 
-  local key
   local -a keep_order=()
   local removed
 
@@ -9618,7 +9736,7 @@ watch_processed_cleanup() {
       continue
     fi
 
-    if [[ -v existing_ids["$key"] ]]
+    if [[ -v existing_keys["$key"] ]]
     then
       keep_order+=("$key")
       continue
@@ -9651,13 +9769,28 @@ watch_processed_cleanup() {
 watch_sms_already_processed() {
   local modem_key="$1"
   local sms_id="$2"
+  local fingerprint="$3"
   local key
 
-  key="$(watch_processed_key "$modem_key" "$sms_id")"
-
-  if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+  if [[ -z "$fingerprint" ]]
   then
-    return 0
+    if [[ -n "$modem_key" ]]
+    then
+      if ! fingerprint="$(watch_sms_fingerprint "$modem_key" "$sms_id")"
+      then
+        return 1
+      fi
+    else
+      return 1
+    fi
+  fi
+
+  if key="$(watch_processed_key "$fingerprint")"
+  then
+    if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+    then
+      return 0
+    fi
   fi
 
   return 1
@@ -9667,17 +9800,25 @@ watch_sms_already_processed() {
 watch_sms_mark_processed() {
   local modem_key="$1"
   local sms_id="$2"
+  local fingerprint="$3"
   local key
 
-  key="$(watch_processed_key "$modem_key" "$sms_id")"
-
-  if [[ -v WATCH_PROCESSED_SMS["$key"] ]]
+  if [[ -z "$fingerprint" ]]
   then
+    echo_error "watch: missing fingerprint for SMS $sms_id (modem $modem_key)"
     return 1
   fi
 
-  WATCH_PROCESSED_SMS["$key"]=1
-  WATCH_PROCESSED_SMS_ORDER+=("$key")
+  if ! key="$(watch_processed_key "$fingerprint")"
+  then
+    echo_error "watch: failed to build processed cache key for SMS $sms_id (modem $modem_key)"
+    return 1
+  fi
+
+  if ! watch_processed_cache_add_key "$key"
+  then
+    return 1
+  fi
 
   watch_processed_prune
 
