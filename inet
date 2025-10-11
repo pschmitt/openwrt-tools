@@ -8,9 +8,10 @@ export PATH="/srv/bin:$PATH"
 
 WAN_IPV4="${WAN_IPV4:-wan}"
 WAN_IPV6="${WAN_IPV6:-wan6}"
-LTE_IPV4="${LTE_IPV4:-wwan}"
-LTE_IPV6="${LTE_IPV6:-wwan6}"
-WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$LTE_IPV4" "$LTE_IPV6" quectel mullvad)
+WWAN_IPV4="${WWAN_IPV4:-wwan}"
+WWAN_IPV6="${WWAN_IPV6:-wwan6}"
+WAN_INTERFACES=("$WAN_IPV4" "$WAN_IPV6" "$WWAN_IPV4" "$WWAN_IPV6" quectel)
+WWAN_INTERFACES=("$WWAN_IPV4" "$WWAN_IPV6" quectel)
 
 VPN_SERVICES=(netbird tailscale zerotier)
 DNS_SERVICES=(adguardhome dnsmasq unbound)
@@ -47,7 +48,7 @@ usage() {
   echo "  lte [--permanent]    Failover to LTE"
   echo "  ping [-- ARGS]       Connectivity debug (ping)"
   echo "  public-ip            Determine public IP of every WAN interface"
-  echo "  reset [--force]      Reset wan connection (to $WAN_IPV4/$WAN_IPV6)"
+  echo "  reset [--force]      Reset wan connection (to ${WAN_IPV4}/${WAN_IPV6})"
   echo "  status               Show wan connection status"
   echo "  speedtest            Perform a librespeed speedtest for every WAN interface"
   echo "  reboot               Reboot vodafone station, and the OpenWRT router"
@@ -94,6 +95,7 @@ Flags:
 Examples:
   inet curl --wan
   inet curl -- --head https://example.com
+
 EOF
   usage_interface_selection
 }
@@ -114,6 +116,7 @@ Flags:
 Examples:
   inet dig --wan4
   inet dig -- +trace example.com
+
 EOF
   usage_interface_selection
 }
@@ -169,6 +172,7 @@ Flags:
 
 Examples:
   inet exec --wan echo INTF
+
 EOF
   usage_interface_selection
 }
@@ -205,6 +209,7 @@ Flags:
 Examples:
   inet ip
   inet ip route --iface wan6
+
 EOF
   usage_interface_selection
 }
@@ -242,6 +247,7 @@ Flags:
 Examples:
   inet ping --lte
   inet ping -- --count 5
+
 EOF
   usage_interface_selection
 }
@@ -260,6 +266,7 @@ Flags:
 Examples:
   inet public-ip
   inet public-ip --lte
+
 EOF
   usage_interface_selection
 }
@@ -297,6 +304,7 @@ Flags:
 Examples:
   inet status
   inet status --wan6
+
 EOF
   usage_interface_selection
 }
@@ -316,6 +324,7 @@ Flags:
 Examples:
   inet speedtest
   inet speedtest --lte
+
 EOF
   usage_interface_selection
 }
@@ -535,12 +544,12 @@ ifup_or_down_multi() {
     lte|wwan)
       if [[ -n "$IPV4_ONLY" ]]
       then
-        target_interfaces=("$LTE_IPV4")
+        target_interfaces=("$WWAN_IPV4")
       elif [[ -n "$IPV6_ONLY" ]]
       then
-        target_interfaces=("$LTE_IPV6")
+        target_interfaces=("$WWAN_IPV6")
       else
-        target_interfaces=("$LTE_IPV4" "$LTE_IPV6")
+        target_interfaces=("$WWAN_IPV4" "$WWAN_IPV6")
       fi
       ;;
     lte4|wwan4)
@@ -549,7 +558,7 @@ ifup_or_down_multi() {
         echo_error "Invalid combination: -6 $2"
         return 1
       fi
-      target_interfaces=("$LTE_IPV4")
+      target_interfaces=("$WWAN_IPV4")
       ;;
     lte6|wwan6)
       if [[ -n "$IPV4_ONLY" ]]
@@ -557,7 +566,7 @@ ifup_or_down_multi() {
         echo_error "Invalid combination: -4 $2"
         return 1
       fi
-      target_interfaces=("$LTE_IPV6")
+      target_interfaces=("$WWAN_IPV6")
       ;;
     all)
       target_interfaces=("${WAN_INTERFACES[@]}")
@@ -660,12 +669,12 @@ iface_enable_or_disable_multi() {
     lte|wwan)
       if [[ -n "$IPV4_ONLY" ]]
       then
-        target_interfaces=("$LTE_IPV4")
+        target_interfaces=("$WWAN_IPV4")
       elif [[ -n "$IPV6_ONLY" ]]
       then
-        target_interfaces=("$LTE_IPV6")
+        target_interfaces=("$WWAN_IPV6")
       else
-        target_interfaces=("$LTE_IPV4" "$LTE_IPV6")
+        target_interfaces=("${WWAN_INTERFACES[@]}")
       fi
       ;;
     lte4|wwan4)
@@ -674,7 +683,7 @@ iface_enable_or_disable_multi() {
         echo_error "Invalid combination: -6 $2"
         return 1
       fi
-      target_interfaces=("$LTE_IPV4")
+      target_interfaces=("$WWAN_IPV4")
       ;;
     lte6|wwan6)
       if [[ -n "$IPV4_ONLY" ]]
@@ -682,7 +691,7 @@ iface_enable_or_disable_multi() {
         echo_error "Invalid combination: -4 $2"
         return 1
       fi
-      target_interfaces=("$LTE_IPV6")
+      target_interfaces=("$WWAN_IPV6")
       ;;
     all)
       target_interfaces=("${WAN_INTERFACES[@]}")
