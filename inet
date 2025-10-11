@@ -35,6 +35,8 @@ usage() {
   echo "  -y, --yes         Disable confirmation"
   echo "  -k, --dry-run     Dry run"
   echo
+  echo "Run 'inet ACTION --help' for details about a specific action."
+  echo
   echo "ACTIONS:"
   echo "  curl [-- ARGS]       Check connectivity (generate_204 by default)"
   echo "  dig [-- ARGS]        Check DNS resolution (google.com by default)"
@@ -56,6 +58,400 @@ usage() {
   echo "              vpn      VPN services: ${VPN_SERVICES[*]}"
   echo "  upstream-dns         Query upstream DNS server"
   echo "  vodafone [-y]        Restart Vodafone Station"
+}
+
+# Print a shared description of interface selection helpers.
+usage_interface_selection() {
+  cat <<'EOF'
+Interface selection:
+  -4                   Limit actions to IPv4 interfaces (wan, wwan)
+  -6                   Limit actions to IPv6 interfaces (wan6, wwan6)
+  -f, --filter REGEX   Only target interfaces whose name matches REGEX
+  --iface IFACE        Only operate on the specified interface (repeatable)
+  --wan, --vodafone    Prefer wired WAN interfaces (exclude LTE)
+  --wan4               Only use the IPv4 WAN interface (wan)
+  --wan6               Only use the IPv6 WAN interface (wan6)
+  --lte, --wwan        Prefer LTE interfaces (exclude wired WAN)
+  --lte4, --wwan4      Only use the IPv4 LTE interface (wwan)
+  --lte6, --wwan6      Only use the IPv6 LTE interface (wwan6)
+EOF
+}
+
+# Print help for the curl action.
+usage_curl_action() {
+  cat <<'EOF'
+Usage: inet curl [INTERFACE FLAGS...] [-- CURL_ARGS]
+
+Description:
+  Run an HTTP connectivity check against
+  http://www.gstatic.com/generate_204 on each selected interface. Without
+  additional arguments the command prints the HTTP status code per interface.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+  --               Forward the remaining arguments directly to curl
+
+Examples:
+  inet curl --wan
+  inet curl -- --head https://example.com
+EOF
+  usage_interface_selection
+}
+
+# Print help for the dig action.
+usage_dig_action() {
+  cat <<'EOF'
+Usage: inet dig [INTERFACE FLAGS...] [-- DIG_ARGS]
+
+Description:
+  Query DNS on the selected interfaces. By default the command resolves
+  google.com. Use "--" to pass custom dig arguments.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+  --               Forward the remaining arguments directly to dig
+
+Examples:
+  inet dig --wan4
+  inet dig -- +trace example.com
+EOF
+  usage_interface_selection
+}
+
+# Print help for enabling interfaces.
+usage_enable_action() {
+  cat <<'EOF'
+Usage: inet enable [wan|wan4|wan6|lte|lte4|lte6]
+
+Description:
+  Soft enable the specified interface(s). The command toggles the OpenWrt
+  configuration flag so the interface comes back after a reboot and calls
+  ifup.
+
+Flags:
+  (none)
+
+Examples:
+  inet enable wan
+  inet enable lte4
+EOF
+}
+
+# Print help for disabling interfaces.
+usage_disable_action() {
+  cat <<'EOF'
+Usage: inet disable [wan|wan4|wan6|lte|lte4|lte6]
+
+Description:
+  Soft disable the specified interface(s). This mirrors "inet enable" but marks
+  the interface as disabled and brings it down.
+
+Flags:
+  (none)
+
+Examples:
+  inet disable wan
+  inet disable lte6
+EOF
+}
+
+# Print help for the exec action.
+usage_exec_action() {
+  cat <<'EOF'
+Usage: inet exec [INTERFACE FLAGS...] COMMAND [ARGS...]
+
+Description:
+  Execute COMMAND once for every selected interface. The placeholder INTF is
+  replaced with the OpenWrt interface name in the environment.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet exec --wan echo INTF
+EOF
+  usage_interface_selection
+}
+
+# Print help for ifup/ifdown.
+usage_ifupdown_action() {
+  cat <<'EOF'
+Usage: inet ifup|ifdown [wan|wan4|wan6|lte|lte4|lte6|all]
+
+Description:
+  Bring interfaces up or down. When "all" is provided the command loops
+  through every WAN/LTE interface.
+
+Flags:
+  (none)
+
+Examples:
+  inet ifup wan
+  inet ifdown all
+EOF
+}
+
+# Print help for the ip action.
+usage_ip_action() {
+  cat <<'EOF'
+Usage: inet ip [addr|route] [INTERFACE FLAGS...]
+
+Description:
+  Show IP address or routing information for the selected interfaces.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet ip
+  inet ip route --iface wan6
+EOF
+  usage_interface_selection
+}
+
+# Print help for the LTE failover action.
+usage_lte_action() {
+  cat <<'EOF'
+Usage: inet lte [--permanent]
+
+Description:
+  Fail over from the wired WAN interfaces to LTE. When --permanent is supplied
+  the wired WAN interfaces are disabled until re-enabled manually.
+
+Flags:
+  --permanent  Keep LTE as the preferred uplink until interfaces are re-enabled
+
+Examples:
+  inet lte
+  inet lte --permanent
+EOF
+}
+
+# Print help for the ping action.
+usage_ping_action() {
+  cat <<'EOF'
+Usage: inet ping [INTERFACE FLAGS...] [ping options]
+
+Description:
+  Run ICMP reachability tests against 8.8.8.8 (IPv4) and 2001:4860:4860::8888
+  (IPv6) on the selected interfaces.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet ping --lte
+  inet ping -- --count 5
+EOF
+  usage_interface_selection
+}
+
+# Print help for the public IP action.
+usage_public_ip_action() {
+  cat <<'EOF'
+Usage: inet public-ip [INTERFACE FLAGS...]
+
+Description:
+  Print the public IP address detected on each selected interface.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet public-ip
+  inet public-ip --lte
+EOF
+  usage_interface_selection
+}
+
+# Print help for resetting WAN.
+usage_reset_action() {
+  cat <<'EOF'
+Usage: inet reset [--force]
+
+Description:
+  Reset the wired WAN interfaces. With --force the command brings WAN down
+  before reenabling it. LTE is brought online during the reset.
+
+Flags:
+  --force  Bring the wired interfaces down before reenabling them
+
+Examples:
+  inet reset
+  inet reset --force
+EOF
+}
+
+# Print help for the status action.
+usage_status_action() {
+  cat <<'EOF'
+Usage: inet status [INTERFACE FLAGS...]
+
+Description:
+  Print the status of the selected interfaces including signal and connectivity
+  checks.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet status
+  inet status --wan6
+EOF
+  usage_interface_selection
+}
+
+# Print help for the speedtest action.
+usage_speedtest_action() {
+  cat <<'EOF'
+Usage: inet speedtest [INTERFACE FLAGS...]
+
+Description:
+  Run the librespeed client for every selected interface to measure download
+  and upload throughput.
+
+Flags:
+  INTERFACE FLAGS  Any selectors documented under "Interface selection"
+
+Examples:
+  inet speedtest
+  inet speedtest --lte
+EOF
+  usage_interface_selection
+}
+
+# Print help for the reboot action.
+usage_reboot_action() {
+  cat <<'EOF'
+Usage: inet reboot
+
+Description:
+  Reboot the Vodafone station first and then reboot the OpenWrt router.
+
+Flags:
+  (none)
+
+Examples:
+  inet reboot
+EOF
+}
+
+# Print help for the service restart action.
+usage_svc_action() {
+  cat <<'EOF'
+Usage: inet svc-restart (dns|vpn|core|all)
+
+Description:
+  Restart init.d services grouped by category. The "all" group restarts
+  everything, "core" restarts odhcpd and the configured DNS services, and the
+  other groups target DNS or VPN services.
+
+Flags:
+  (none)
+
+Examples:
+  inet svc-restart dns
+  inet svc-restart all
+EOF
+}
+
+# Print help for the upstream DNS check.
+usage_upstream_dns_action() {
+  cat <<'EOF'
+Usage: inet upstream-dns
+
+Description:
+  Query the upstream DNS resolver configured on the router and print its
+  response.
+
+Flags:
+  (none)
+
+Examples:
+  inet upstream-dns
+EOF
+}
+
+# Print help for Vodafone restarts.
+usage_vodafone_action() {
+  cat <<'EOF'
+Usage: inet vodafone [-y]
+
+Description:
+  Restart the Vodafone Station using PoE toggling or a Home Assistant webhook.
+  The -y/--yes global flag skips the interactive confirmation prompt.
+
+Flags:
+  -y, --yes  Skip the confirmation prompt (also available as a global flag)
+
+Examples:
+  inet vodafone
+  inet vodafone -y
+EOF
+}
+
+# Dispatch help for subcommands.
+usage_action() {
+  case "$1" in
+    curl)
+      usage_curl_action
+      ;;
+    dig)
+      usage_dig_action
+      ;;
+    enable)
+      usage_enable_action
+      ;;
+    disable)
+      usage_disable_action
+      ;;
+    exec)
+      usage_exec_action
+      ;;
+    ifup|ifdown)
+      usage_ifupdown_action
+      ;;
+    ip|i)
+      usage_ip_action
+      ;;
+    lte|ltefailover|failover)
+      usage_lte_action
+      ;;
+    ping|d|pi|p|check|debug)
+      usage_ping_action
+      ;;
+    public-ip|pub*)
+      usage_public_ip_action
+      ;;
+    reset|rst)
+      usage_reset_action
+      ;;
+    status|st*|ifstatus)
+      usage_status_action
+      ;;
+    speedtest|speed)
+      usage_speedtest_action
+      ;;
+    reboot)
+      usage_reboot_action
+      ;;
+    svc|svc-restart|restart)
+      usage_svc_action
+      ;;
+    upstream-dns|dhcp-dns)
+      usage_upstream_dns_action
+      ;;
+    vodafone|voda*|vdf*)
+      usage_vodafone_action
+      ;;
+    "")
+      usage
+      ;;
+    *)
+      echo "Unknown action: $1"
+      return 2
+      ;;
+  esac
 }
 
 ip() {
@@ -548,18 +944,21 @@ full_reboot() {
 
 intf_loop() {
   local rc=0
-  local owrt_intf l3_intf args=()
+  local owrt_intf l3_intf
+  local -a args=()
   local res
 
   local cmd_name
-  local intf_include=()
-  local intf_exclude=()
-  local args_v4=(-4)
-  local args_v6=(-6)
-  local pipe4_cmd
-  local pipe6_cmd
+  local -a intf_include=()
+  local -a intf_exact_include=()
+  local -a intf_exclude=()
+  local -a args_v4=(-4)
+  local -a args_v6=(-6)
+  local -a pipe4_cmd=()
+  local -a pipe6_cmd=()
   local quiet
   local stream
+  local matched
 
   while [[ -n "$*" ]]
   do
@@ -578,7 +977,7 @@ intf_loop() {
         ;;
       --wan6)
         intf_include+=("wan6")
-        intf_exlude+=("wwan")
+        intf_exclude+=("wwan")
         shift
         ;;
       --wan4)
@@ -595,6 +994,10 @@ intf_loop() {
         intf_include+=("wwan")
         intf_exclude+=("6")
         shift
+        ;;
+      --iface)
+        intf_exact_include+=("$2")
+        shift 2
         ;;
       -4)
         intf_exclude+=("6")
@@ -647,7 +1050,9 @@ intf_loop() {
     intf_include+=("6")
   fi
 
-  local cmd=("$@") icmd pipe_cmd
+  local -a cmd=("$@")
+  local icmd
+  local -a pipe_cmd=()
   local filter
   cmd_name="${cmd_name:-${cmd[0]}}"
   local upstream_dns intf_ipv4 intf_ipv6 intf_ip
@@ -655,6 +1060,25 @@ intf_loop() {
   for owrt_intf in "${WAN_INTERFACES[@]}"
   do
     echo_debug "Processing OpenWRT interface $owrt_intf"
+
+    if ((${#intf_exact_include[@]} > 0))
+    then
+      matched=
+      for filter in "${intf_exact_include[@]}"
+      do
+        if [[ "$owrt_intf" == "$filter" ]]
+        then
+          matched=1
+          break
+        fi
+      done
+
+      if [[ -z "$matched" ]]
+      then
+        echo_debug "Skipping interface $owrt_intf (not explicitly selected)"
+        continue
+      fi
+    fi
 
     for filter in "${intf_include[@]}"
     do
@@ -962,12 +1386,20 @@ __devel_test() {
 }
 
 main() {
+  local action_help
+
   while [[ -n $* ]]
   do
     case "$1" in
       --help|-h)
-        usage
-        exit 0
+        if [[ ${#ARGS[@]} -eq 0 ]]
+        then
+          usage
+          exit 0
+        fi
+
+        action_help=1
+        shift
         ;;
       --debug|-d)
         set -x
@@ -1018,6 +1450,18 @@ main() {
   done
 
   set -- "${ARGS[@]}"
+
+  if [[ -z "$1" ]]
+  then
+    usage
+    exit 1
+  fi
+
+  if [[ -n "$action_help" || "$2" == "--help" || "$2" == "-h" ]]
+  then
+    usage_action "$1"
+    exit "$?"
+  fi
 
   if [[ -n "$DRY_RUN" ]]
   then
