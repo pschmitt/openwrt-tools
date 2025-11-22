@@ -699,6 +699,22 @@ cf_record_update() {
 
   if [[ -z "$record_id" ]]
   then
+    local other_record_id
+    other_record_id="$(cf_get_record_id_by_name "$fqdn")"
+
+    if [[ -n "$other_record_id" ]]
+    then
+      local other_type
+      other_type="$(cf_get_record_type "$other_record_id")"
+      echo_warning "☠️ Deleting existing ${other_type} record to replace with $type: $fqdn"
+      if ! cf_delete_record "$other_record_id"
+      then
+        echo_error "Failed to delete existing record $fqdn ($other_type)"
+        return 1
+      fi
+      RECORDS="$(cf_get_records "$ZONE_NAME")"
+    fi
+
     echo_info "🆕 Create record: $type $fqdn $content"
     cf dns create "${args[@]}"
     local rc="$?"
@@ -751,6 +767,22 @@ cf_get_record_id() {
   <<< "$RECORDS" jq -r --arg type "${type}" --arg name "${name}" '
     .[] | select(.Type == $type and .Name == $name) |
     .ID'
+}
+
+cf_get_record_id_by_name() {
+  local name="$1"
+
+  <<< "$RECORDS" jq -r --arg name "${name}" '
+    .[] | select(.Name == $name) |
+    .ID' | head -n1
+}
+
+cf_get_record_type() {
+  local record_id="$1"
+
+  <<< "$RECORDS" jq -r --arg record_id "${record_id}" '
+    .[] | select(.ID == $record_id) |
+    .Type'
 }
 
 cf_get_record_content() {
