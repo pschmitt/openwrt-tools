@@ -269,6 +269,7 @@ cf() {
 
 cf_record_update() {
   local zone="${ZONE_NAME:-brkn.lol}"
+  local ttl="${TTL}"
 
   local name="$1"
   local type="$2"
@@ -278,14 +279,14 @@ cf_record_update() {
 
   if [[ -n "$DRY_RUN" ]]
   then
-    echo_dryrun "Create/update record: $type $fqdn $content"
+    echo_dryrun "Create/update record: $type $fqdn $content (TTL $ttl)"
     return 0
   fi
 
-  echo_info "Set record: $type $fqdn $content"
+  echo_info "Set record: $type $fqdn $content (TTL $ttl)"
 
   local -a args=(
-    --zone "$zone" --type "$type" --content "$content" --name "$name"
+    --zone "$zone" --type "$type" --content "$content" --name "$name" --ttl "$ttl"
   )
 
   # local fqdn="$name"
@@ -311,9 +312,11 @@ cf_record_update() {
   # Update record
   local record_content
   record_content="$(cf_get_record_content "$record_id")"
-  if [[ "$record_content" == "$content" ]]
+  local record_ttl
+  record_ttl="$(cf_get_record_ttl "$record_id")"
+  if [[ "$record_content" == "$content" && "$record_ttl" == "$ttl" ]]
   then
-    echo_success "✅ DNS record already up to date: $fqdn $type $content"
+    echo_success "✅ DNS record already up to date: $fqdn $type $content (TTL $ttl)"
     return 0
   fi
 
@@ -350,6 +353,14 @@ cf_get_record_content() {
     .Content'
 }
 
+cf_get_record_ttl() {
+  local record_id="$1"
+
+  <<< "$RECORDS" jq -er --arg record_id "${record_id}" '
+    .[] | select(.ID == $record_id) |
+    .TTL'
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
   set -u -o pipefail
@@ -373,6 +384,7 @@ then
   ZONE_NAME="${ZONE_NAME:-brkn.lol}"
   HOST_SUFFIX="${HOST_SUFFIX:-}"
   HOST_WILDCARD="${HOST_WILDCARD:-}"
+  TTL="${TTL:-60}"
 
   while [[ -n "$*" ]]
   do
