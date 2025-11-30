@@ -22,7 +22,7 @@ SMS_CHUNK_SIZE="${SMS_CHUNK_SIZE:-}"
 CMD_OUTPUT_MAX_LEN="${CMD_OUTPUT_MAX_LEN:-200}"
 MAX_MESSAGES_PER_DAY="${MAX_MESSAGES_PER_DAY:-}"
 SMS_DRY_RUN="${SMS_DRY_RUN:-}"
-MMMSMS_DATA_DIR_DEFAULT="/var/lib/mmsms"
+MMMSMS_DATA_DIR_DEFAULT="/srv/mmsms"
 if [[ -n "${MMMSMS_DATA_DIR:-}" ]]
 then
   :
@@ -4281,7 +4281,7 @@ sms_daily_limit_state_dir() {
 
   if [[ -z "$dir" ]]
   then
-    dir="/var/lib/mmsms"
+    dir="/srv/mmsms"
   fi
 
   if [[ ! -d "$dir" ]]
