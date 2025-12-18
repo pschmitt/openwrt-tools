@@ -430,6 +430,7 @@ record_target() {
     return 0
   fi
 
+  echo_warning "⚠️ No VPN IPs pingable for ${host}; using --fallback-default=${FALLBACK_DEFAULT:-none}"
   record_target_fallback "$host" "$nb_ip" "$ts_ip" "$zt_ip"
 }
 
