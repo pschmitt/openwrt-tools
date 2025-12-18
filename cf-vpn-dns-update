@@ -52,6 +52,7 @@ Zerotier options:
 
 Failover options:
   --failover-zone SUBZONE   Failover subzone (default: vpn)
+  --fallback-default MODE   Fallback when none responds: netbird|tailscale|zerotier|none (default: none)
   --nb-zone SUBZONE         Netbird CNAME target subzone (default: nb)
   --ts-zone SUBZONE         Tailscale CNAME target subzone (default: ts)
   --zt-zone SUBZONE         Zerotier CNAME target subzone (default: zt)
@@ -429,16 +430,94 @@ record_target() {
     return 0
   fi
 
-  record_value="${host}.${ZONE_NAME}"
-  if ping_any "$record_value"
+  record_target_fallback "$host" "$nb_ip" "$ts_ip" "$zt_ip"
+}
+
+# Output one or more "<TYPE> <VALUE>" lines for the selected fallback.
+record_target_fallback() {
+  local host="$1"
+  local nb_ip="$2"
+  local ts_ip="$3"
+  local zt_ip="$4"
+
+  local fallback="${FALLBACK_DEFAULT:-none}"
+  local ipv4 ipv6
+
+  case "$fallback" in
+    none)
+      echo "CNAME ${host}.${ZONE_NAME}"
+      return 0
+      ;;
+    netbird)
+      ipv4="$(first_ipv4_from_tokens "$nb_ip")"
+      ipv6="$(first_ipv6_from_tokens "$nb_ip")"
+      ;;
+    tailscale)
+      ipv4="$(first_ipv4_from_tokens "$ts_ip")"
+      ipv6="$(first_ipv6_from_tokens "$ts_ip")"
+      ;;
+    zerotier)
+      ipv4="$(first_ipv4_from_tokens "$zt_ip")"
+      ipv6="$(first_ipv6_from_tokens "$zt_ip")"
+      ;;
+    *)
+      echo_error "Unsupported --fallback-default: $fallback" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -n "$ipv4" ]]
   then
-    echo "$record_type $record_value"
-    return 0
+    echo "A $ipv4"
   fi
 
-  # fallback: disaster!
-  record_value="0.0.0.0"
-  echo "$record_type $record_value"
+  if [[ -n "$ipv6" ]]
+  then
+    echo "AAAA $ipv6"
+  fi
+
+  if [[ -z "$ipv4" && -z "$ipv6" ]]
+  then
+    echo "CNAME ${host}.${ZONE_NAME}"
+  fi
+}
+
+# Extract the first IPv4 address from a whitespace/tab/comma-separated string.
+first_ipv4_from_tokens() {
+  local tokens="$1"
+  tokens="${tokens//,/ }"
+  tokens="${tokens//$'\t'/ }"
+
+  local token
+  for token in $tokens
+  do
+    if [[ "$token" == *.* && "$token" != *:* ]]
+    then
+      echo "$token"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Extract the first IPv6 address from a whitespace/tab/comma-separated string.
+first_ipv6_from_tokens() {
+  local tokens="$1"
+  tokens="${tokens//,/ }"
+  tokens="${tokens//$'\t'/ }"
+
+  local token
+  for token in $tokens
+  do
+    if [[ "$token" == *:* ]]
+    then
+      echo "$token"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 record_suffix_for_type() {
@@ -922,7 +1001,10 @@ run_failover() {
   done < <(printf '%s\n' "${!HOSTS_SEEN[@]}" | sort)
 
   ERRORS=0
-  local local_nb_ip local_ts_ip local_zt_ip record_type target cname
+  local local_nb_ip local_ts_ip local_zt_ip cname
+  local record_type target
+  local -a actions
+  local action
   for host in "${HOST_LIST[@]}"
   do
     local_nb_ip="${NB_HOSTS[$host]:-}"
@@ -931,22 +1013,38 @@ run_failover() {
 
     echo_info "🖥️ Host: $host - netbird: ${local_nb_ip:-N/A} - tailscale: ${local_ts_ip:-N/A} - zerotier: ${local_zt_ip:-N/A}"
 
-    read -r record_type target <<< "$(record_target "$host" "$local_nb_ip" "$local_ts_ip" "$local_zt_ip")"
     cname="${host}.${FAILOVER_ZONE}"
     VPN_RECORDS+=("${cname}.${ZONE_NAME}")
 
-    if ! cf_record_update "$cname" "$record_type" "$target"
+    actions=()
+    mapfile -t actions < <(record_target "$host" "$local_nb_ip" "$local_ts_ip" "$local_zt_ip")
+    if [[ "${#actions[@]}" -eq 0 ]]
     then
+      echo_error "Failed to determine failover record target for host: $host"
       ERRORS=$((ERRORS + 1))
+      continue
     fi
+
+    for action in "${actions[@]}"
+    do
+      read -r record_type target <<< "$action"
+      if ! cf_record_update "$cname" "$record_type" "$target"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
+    done
 
     if [[ -n "$HOST_WILDCARD" ]]
     then
       VPN_RECORDS+=("*.${cname}.${ZONE_NAME}")
-      if ! cf_record_update "*.${cname}" "$record_type" "$target"
-      then
-        ERRORS=$((ERRORS + 1))
-      fi
+      for action in "${actions[@]}"
+      do
+        read -r record_type target <<< "$action"
+        if ! cf_record_update "*.${cname}" "$record_type" "$target"
+        then
+          ERRORS=$((ERRORS + 1))
+        fi
+      done
     fi
   done
 
@@ -959,6 +1057,7 @@ run_failover() {
   if [[ "$ERRORS" -ne 0 ]]
   then
     echo_error "There were $ERRORS errors updating the records."
+    RC=1
   fi
 
   if [[ -n "$CLEAN" ]]
@@ -1000,6 +1099,7 @@ then
   ZT_SUBZONE="${ZT_SUBZONE:-zt}"
   FAILOVER="${FAILOVER:-}"
   AUTO="${AUTO:-}"
+  FALLBACK_DEFAULT="${FALLBACK_DEFAULT:-none}"
   TTL="${TTL:-60}"
 
   while [[ -n "$*" ]]
@@ -1097,6 +1197,10 @@ then
         FAILOVER_ZONE="$2"
         shift 2
         ;;
+      --fallback-default)
+        FALLBACK_DEFAULT="$2"
+        shift 2
+        ;;
       -z|-zn|--zn|--zone*)
         ZONE_NAME="$2"
         shift 2
@@ -1114,6 +1218,18 @@ then
         ;;
     esac
   done
+
+  case "$FALLBACK_DEFAULT" in
+    none|netbird|tailscale|zerotier)
+      ;;
+    *)
+      {
+        echo_error "Unsupported --fallback-default: $FALLBACK_DEFAULT"
+        usage
+      } >&2
+      exit 2
+      ;;
+  esac
 
   if [[ -z "$CF_API_KEY" && -z "$CF_API_TOKEN" ]]
   then
