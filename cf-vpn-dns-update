@@ -436,7 +436,7 @@ record_target() {
     return 0
   fi
 
-  record_type="A"
+  # fallback: disaster!
   record_value="0.0.0.0"
   echo "$record_type $record_value"
 }
