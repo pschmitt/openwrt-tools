@@ -699,19 +699,30 @@ cf_record_update() {
 
   if [[ -z "$record_id" ]]
   then
-    local other_record_id
-    other_record_id="$(cf_get_record_id_by_name "$fqdn")"
+    local -a existing_ids
+    mapfile -t existing_ids < <(cf_get_record_ids_by_name "$fqdn")
 
-    if [[ -n "$other_record_id" ]]
-    then
-      local other_type
-      other_type="$(cf_get_record_type "$other_record_id")"
-      echo_warning "☠️ Deleting existing ${other_type} record to replace with $type: $fqdn"
-      if ! cf_delete_record "$other_record_id"
+    local existing_id existing_type deleted_any
+    for existing_id in "${existing_ids[@]}"
+    do
+      existing_type="$(cf_get_record_type "$existing_id")"
+
+      if cf_record_types_compatible "$type" "$existing_type"
       then
-        echo_error "Failed to delete existing record $fqdn ($other_type)"
+        continue
+      fi
+
+      echo_warning "☠️ Deleting existing ${existing_type} record to create $type: $fqdn"
+      if ! cf_delete_record "$existing_id"
+      then
+        echo_error "Failed to delete existing record $fqdn ($existing_type)"
         return 1
       fi
+      deleted_any=1
+    done
+
+    if [[ -n "${deleted_any:-}" ]]
+    then
       RECORDS="$(cf_get_records "$ZONE_NAME")"
     fi
 
@@ -755,6 +766,34 @@ cf_delete_record() {
   cf dns delete --zone "$ZONE_NAME" --id "$record_id"
 }
 
+# Check whether two DNS record types can coexist on the same name.
+cf_record_types_compatible() {
+  local new_type="$1"
+  local existing_type="$2"
+
+  if [[ "$new_type" == "$existing_type" ]]
+  then
+    return 0
+  fi
+
+  if [[ "$new_type" == "A" && "$existing_type" == "AAAA" ]]
+  then
+    return 0
+  fi
+
+  if [[ "$new_type" == "AAAA" && "$existing_type" == "A" ]]
+  then
+    return 0
+  fi
+
+  if [[ "$new_type" == "CNAME" || "$existing_type" == "CNAME" ]]
+  then
+    return 1
+  fi
+
+  return 0
+}
+
 cf_get_records() {
   local zone="${1:-${ZONE_NAME:-brkn.lol}}"
   cf --json dns list --zone="${zone}"
@@ -769,12 +808,12 @@ cf_get_record_id() {
     .ID'
 }
 
-cf_get_record_id_by_name() {
+cf_get_record_ids_by_name() {
   local name="$1"
 
   <<< "$RECORDS" jq -r --arg name "${name}" '
     .[] | select(.Name == $name) |
-    .ID' | head -n1
+    .ID'
 }
 
 cf_get_record_type() {
