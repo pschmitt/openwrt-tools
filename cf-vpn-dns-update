@@ -433,7 +433,7 @@ record_target() {
   record_target_fallback "$host" "$nb_ip" "$ts_ip" "$zt_ip"
 }
 
-# Output one or more "<TYPE> <VALUE>" lines for the selected fallback.
+# Output one "<TYPE> <VALUE>" line for the selected fallback.
 record_target_fallback() {
   local host="$1"
   local nb_ip="$2"
@@ -441,7 +441,6 @@ record_target_fallback() {
   local zt_ip="$4"
 
   local fallback="${FALLBACK_DEFAULT:-none}"
-  local ipv4 ipv6
 
   case "$fallback" in
     none)
@@ -449,16 +448,25 @@ record_target_fallback() {
       return 0
       ;;
     netbird)
-      ipv4="$(first_ipv4_from_tokens "$nb_ip")"
-      ipv6="$(first_ipv6_from_tokens "$nb_ip")"
+      if [[ -n "$nb_ip" ]]
+      then
+        echo "CNAME ${host}.${NB_SUBZONE}.${ZONE_NAME}"
+        return 0
+      fi
       ;;
     tailscale)
-      ipv4="$(first_ipv4_from_tokens "$ts_ip")"
-      ipv6="$(first_ipv6_from_tokens "$ts_ip")"
+      if [[ -n "$ts_ip" ]]
+      then
+        echo "CNAME ${host}.${TS_SUBZONE}.${ZONE_NAME}"
+        return 0
+      fi
       ;;
     zerotier)
-      ipv4="$(first_ipv4_from_tokens "$zt_ip")"
-      ipv6="$(first_ipv6_from_tokens "$zt_ip")"
+      if [[ -n "$zt_ip" ]]
+      then
+        echo "CNAME ${host}.${ZT_SUBZONE}.${ZONE_NAME}"
+        return 0
+      fi
       ;;
     *)
       echo_error "Unsupported --fallback-default: $fallback" >&2
@@ -466,58 +474,7 @@ record_target_fallback() {
       ;;
   esac
 
-  if [[ -n "$ipv4" ]]
-  then
-    echo "A $ipv4"
-  fi
-
-  if [[ -n "$ipv6" ]]
-  then
-    echo "AAAA $ipv6"
-  fi
-
-  if [[ -z "$ipv4" && -z "$ipv6" ]]
-  then
-    echo "CNAME ${host}.${ZONE_NAME}"
-  fi
-}
-
-# Extract the first IPv4 address from a whitespace/tab/comma-separated string.
-first_ipv4_from_tokens() {
-  local tokens="$1"
-  tokens="${tokens//,/ }"
-  tokens="${tokens//$'\t'/ }"
-
-  local token
-  for token in $tokens
-  do
-    if [[ "$token" == *.* && "$token" != *:* ]]
-    then
-      echo "$token"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-# Extract the first IPv6 address from a whitespace/tab/comma-separated string.
-first_ipv6_from_tokens() {
-  local tokens="$1"
-  tokens="${tokens//,/ }"
-  tokens="${tokens//$'\t'/ }"
-
-  local token
-  for token in $tokens
-  do
-    if [[ "$token" == *:* ]]
-    then
-      echo "$token"
-      return 0
-    fi
-  done
-
-  return 1
+  echo "CNAME ${host}.${ZONE_NAME}"
 }
 
 record_suffix_for_type() {
@@ -1001,10 +958,7 @@ run_failover() {
   done < <(printf '%s\n' "${!HOSTS_SEEN[@]}" | sort)
 
   ERRORS=0
-  local local_nb_ip local_ts_ip local_zt_ip cname
-  local record_type target
-  local -a actions
-  local action
+  local local_nb_ip local_ts_ip local_zt_ip record_type target cname
   for host in "${HOST_LIST[@]}"
   do
     local_nb_ip="${NB_HOSTS[$host]:-}"
@@ -1013,38 +967,22 @@ run_failover() {
 
     echo_info "🖥️ Host: $host - netbird: ${local_nb_ip:-N/A} - tailscale: ${local_ts_ip:-N/A} - zerotier: ${local_zt_ip:-N/A}"
 
+    read -r record_type target <<< "$(record_target "$host" "$local_nb_ip" "$local_ts_ip" "$local_zt_ip")"
     cname="${host}.${FAILOVER_ZONE}"
     VPN_RECORDS+=("${cname}.${ZONE_NAME}")
 
-    actions=()
-    mapfile -t actions < <(record_target "$host" "$local_nb_ip" "$local_ts_ip" "$local_zt_ip")
-    if [[ "${#actions[@]}" -eq 0 ]]
+    if ! cf_record_update "$cname" "$record_type" "$target"
     then
-      echo_error "Failed to determine failover record target for host: $host"
       ERRORS=$((ERRORS + 1))
-      continue
     fi
-
-    for action in "${actions[@]}"
-    do
-      read -r record_type target <<< "$action"
-      if ! cf_record_update "$cname" "$record_type" "$target"
-      then
-        ERRORS=$((ERRORS + 1))
-      fi
-    done
 
     if [[ -n "$HOST_WILDCARD" ]]
     then
       VPN_RECORDS+=("*.${cname}.${ZONE_NAME}")
-      for action in "${actions[@]}"
-      do
-        read -r record_type target <<< "$action"
-        if ! cf_record_update "*.${cname}" "$record_type" "$target"
-        then
-          ERRORS=$((ERRORS + 1))
-        fi
-      done
+      if ! cf_record_update "*.${cname}" "$record_type" "$target"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
     fi
   done
 
