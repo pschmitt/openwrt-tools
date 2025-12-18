@@ -900,6 +900,15 @@ run_failover() {
     then
       ERRORS=$((ERRORS + 1))
     fi
+
+    if [[ -n "$HOST_WILDCARD" ]]
+    then
+      VPN_RECORDS+=("*.${cname}.${ZONE_NAME}")
+      if ! cf_record_update "*.${cname}" "$record_type" "$target"
+      then
+        ERRORS=$((ERRORS + 1))
+      fi
+    fi
   done
 
   if [[ "$ERRORS" -eq 0 ]]
