@@ -30,15 +30,30 @@ get_modem_device() {
 
 get_own_phone_number() {
   local modem_device
-
   modem_device="$(get_modem_device || true)"
+
   if [[ -z "$modem_device" ]]
   then
     return 0
   fi
 
-  echo 'AT+CNUM' | socat - "${modem_device},crnl" \
-    | sed -nr 's/.*"(\\+[0-9]+)".*/\\1/p'
+  local attempt response number
+  for (( attempt=1; attempt<=3; attempt++ ))
+  do
+    response=$(printf 'AT+CNUM\r\n' | socat -t 1 - "${modem_device},crnl")
+
+    number=$(grep -E '^\+CNUM' <<< "$response" | \
+      sed -nr 's/.*"(\+\d+)".*/\1/p'
+    )
+
+    if [[ -n "$number" ]]
+    then
+      printf '%s\n' "$number"
+      return 0
+    fi
+
+    sleep 1
+  done
 }
 
 read_sms_text_from_id() {
