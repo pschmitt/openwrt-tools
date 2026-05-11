@@ -19,6 +19,7 @@ POE_PORT_COUNT="${POE_PORT_COUNT:-12}"
 OID_POE_POWER="1.3.6.1.4.1.171.11.170.1000.11.1.2.1.1.1" # append .PORT
 OID_POE_POWER_CONSUMPTION="1.3.6.1.4.1.171.11.170.1000.11.1.2.2.2.1.1"
 OID_PORT_ALIAS="1.3.6.1.2.1.31.1.1.1.18" # append .PORT
+OID_PORT_LINK_STATUS="1.3.6.1.2.1.2.2.1.8" # append .PORT (ifOperStatus)
 SNMP_COMMUNITY="${SNMP_COMMUNITY:-private}"
 SNMP_RETRIES="${SNMP_RETRIES:-3}"
 SNMP_TIMEOUT="${SNMP_TIMEOUT:-5}"
@@ -260,6 +261,47 @@ poe_port_power_consumption() {
 
 }
 
+# Read the operational Ethernet link status for a switch port.
+poe_port_link_status() {
+  local port="$1"
+  local community="${SNMP_COMMUNITY:-public}"
+
+  local oid="${OID_PORT_LINK_STATUS}.${port}"
+  local cmd=(
+    snmpget -v2c -r "$SNMP_RETRIES" -t "$SNMP_TIMEOUT" -c "$community"
+    "$POE_SWITCH_HOSTNAME" "$oid"
+  )
+
+  if [[ "$DRY_RUN" ]]
+  then
+    echo_dryrun "${cmd[*]}"
+    return 0
+  fi
+
+  local res
+  if [[ -n "${VERBOSE}${DEBUG}" ]]
+  then
+    res=$("${cmd[@]}" | awk '{ print $NF }')
+  else
+    res=$("${cmd[@]}" 2>/dev/null | awk '{ print $NF }')
+  fi
+
+  case "$res" in
+    1|up\(1\))
+      echo "UP"
+      ;;
+    2|down\(2\))
+      echo "DOWN"
+      ;;
+    *)
+      echo_warning "UNKNOWN LINK: $res"
+      return 3
+      ;;
+  esac
+
+  return 0
+}
+
 poe_status() {
   local port="$1"
   local port_status
@@ -302,14 +344,15 @@ poe_status() {
   local magenta=$'\e[35m'
   local reset_color=$'\e[0m'
 
-  local port_alias port_zf color port_power_consumption
-  echo -e "${bold}PORT\tSTATUS\tPOWER\tNAME${reset_color}"
+  local port_alias port_zf color port_power_consumption port_link_status link_color
+  echo -e "${bold}PORT\tSTATUS\tLINK\tPOWER\tNAME${reset_color}"
   for (( port = 1; port <= POE_PORT_COUNT; port += 1 ))
   do
     port_zf=$(printf "%02d" "$port")
     port_alias=$(poe_port_alias "$port") || port_alias="$port"
     port_power_consumption=$(poe_port_power_consumption "$port")
     port_status=$(poe_port_status "$port" | tr -d '\n')
+    port_link_status=$(poe_port_link_status "$port" | tr -d '\n')
     case "$port_status" in
       on)
         color="$green"
@@ -323,9 +366,23 @@ poe_status() {
         ;;
     esac
 
+    case "$port_link_status" in
+      UP)
+        link_color="$green"
+        ;;
+      DOWN)
+        link_color="$red"
+        ;;
+      *)
+        link_color="$magenta"
+        ;;
+    esac
+
     echo -en "${port_zf}"
     echo -en "\t"
     echo -en "${bold}${color}${port_status}${reset_color}"
+    echo -en "\t"
+    echo -en "${bold}${link_color}${port_link_status}${reset_color}"
     echo -en "\t"
     echo -en "${port_power_consumption}"
     echo -en "\t"
