@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+
+cd "$(dirname "$(readlink -f "$0")")" || return 9
+# shellcheck source=lib/echo.sh
+source lib/echo.sh || exit 2
+
+usage() {
+  echo "Usage: $(basename "$0") <IP or MAC>"
+}
+
+# Normalize MAC address to uppercase without separators
+normalize_mac() {
+  echo "${1//[:.-]/}" | tr '[:lower:]' '[:upper:]'
+}
+
+# Lookup vendor by MAC prefix (OUI) using local databases
+lookup_vendor_by_mac() {
+  local mac
+  mac="$(normalize_mac "$1")"
+
+  # Try longest matches first in ieee-oui.txt (handles MA-S/MA-M/MA-L)
+  # The database has prefixes of length 6, 7, 9 etc.
+  local len
+  local oui
+  local vendor
+  for len in 12 9 7 6
+  do
+    oui="${mac:0:len}"
+    [[ ${#oui} -lt len ]] && continue
+
+    vendor="$(grep "^$oui" /usr/share/arp-scan/ieee-oui.txt | cut -f2- | sed 's/^[[:space:]]*//')"
+    if [[ -n "$vendor" ]]
+    then
+      echo "$vendor"
+      return 0
+    fi
+  done
+
+  # Fallback to nmap-mac-prefixes (standard 6-char OUIs)
+  local oui6
+  oui6="${mac:0:6}"
+  if [[ ${#oui6} -eq 6 ]]
+  then
+    local vendor6
+    vendor6="$(grep -i "^$oui6" /usr/share/nmap/nmap-mac-prefixes | cut -d' ' -f2-)"
+    if [[ -n "$vendor6" ]]
+    then
+      echo "$vendor6"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Main execution
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  if [[ "$#" -eq 0 ]]
+  then
+    usage >&2
+    exit 2
+  fi
+
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+
+  INPUT="$1"
+
+  # Check if it looks like a MAC address
+  if [[ "$INPUT" =~ ^([0-9a-fA-F]{2}[:.-]?){2,5}[0-9a-fA-F]{2}$ ]]
+  then
+    lookup_vendor_by_mac "$INPUT"
+    exit $?
+  fi
+
+  # Treat as IP/Hostname
+  TARGET_IP="$(./resolve "$INPUT")"
+  if [[ -z "$TARGET_IP" ]]
+  then
+    # If resolve fails, maybe it's just a raw IP that normalize_mac would mangle
+    TARGET_IP="$INPUT"
+  fi
+
+  # Try nmap first as it's efficient for online hosts
+  VENDOR="$(nmap -sn "$TARGET_IP" 2>/dev/null | awk -F'[()]' '/MAC Address:/ { print $2 }')"
+  if [[ -n "$VENDOR" ]]
+  then
+    echo "$VENDOR"
+    exit 0
+  fi
+
+  # Fallback: get MAC from ARP/Neighbor table and lookup manually
+  MAC="$(./mac-addr "$TARGET_IP" 2>/dev/null)"
+  if [[ -n "$MAC" ]]
+  then
+    lookup_vendor_by_mac "$MAC"
+    exit $?
+  fi
+
+  exit 1
+fi
