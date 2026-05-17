@@ -79,18 +79,17 @@ reverse_ipv6_record() {
   echo "${reversed%?}"
 }
 
-# Output format: <HOSTNAME> <IPV4> <IPV6>
+# Output format: <HOSTNAME> <IPV4> [<IPV6>]
 get_nb_hosts() {
-  # FIXME The .netbirdIp field for the current host includes the network cidr
-  # eg: 100.54.232.1/16
   netbird status --json | \
     jq -er '
-      [{fqdn: .fqdn, netbirdIp: .netbirdIp}, .peers.details[]] |
+      [{fqdn: .fqdn, netbirdIp: .netbirdIp, netbirdIpv6: .netbirdIpv6}, .peers.details[]] |
       sort_by(.fqdn)[] |
         (.fqdn | split(".")[0])
         + "\t" +
-        .netbirdIp
-    ' | sed -E 's#(.+)/(.+)#\1#g' # strip the CIDR suffix
+        (.netbirdIp | split("/")[0])
+        + (if (.netbirdIpv6 // "") != "" then "\t" + (.netbirdIpv6 | split("/")[0]) else "" end)
+    '
 }
 
 # Output format: <HOSTNAME> <IPV4> <IPV6>
