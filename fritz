@@ -246,6 +246,53 @@ def cmd_wlan(args, fc):
 
 
 ###############################################################################
+# reconnect / restart
+###############################################################################
+
+def _getch():
+    import termios
+    import tty
+    with open("/dev/tty", "rb", buffering=0) as t:
+        fd = t.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            return t.read(1).decode(errors="replace")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def confirm(prompt, yes=False):
+    if yes:
+        return True
+    console_err.print(f"[yellow]{prompt}[/yellow] [bright_black]\\[y/N][/bright_black] ", end="")
+    try:
+        ch = _getch()
+        accepted = ch.lower() == "y"
+        console_err.print("y" if accepted else "n")
+        return accepted
+    except (EOFError, KeyboardInterrupt, OSError):
+        console_err.print("")
+        return False
+
+
+def cmd_reconnect(args, fc):
+    if not confirm("Reconnect FritzBox (get new external IP)?", args.yes):
+        console_err.print("[bright_black]Aborted.[/bright_black]")
+        return
+    fc.reconnect()
+    console_err.print("[green]RECONNECTING[/green]")
+
+
+def cmd_restart(args, fc):
+    if not confirm("Reboot FritzBox?", args.yes):
+        console_err.print("[bright_black]Aborted.[/bright_black]")
+        return
+    fc.reboot()
+    console_err.print("[green]REBOOTING[/green]")
+
+
+###############################################################################
 # devices
 ###############################################################################
 
@@ -298,7 +345,8 @@ def parse_args():
         help="Password ($FRITZ_PASSWORD)",
     )
     parser.add_argument("-j", "--json", action="store_true", default=False, help="JSON output")
-    parser.add_argument("-D", "--debug", action="store_true", default=False)
+    parser.add_argument("-y", "--yes", action="store_true", default=False, help="Skip confirmation prompts")
+    parser.add_argument("-d", "-D", "--debug", action="store_true", default=False, help="Enable debug logging")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -335,6 +383,17 @@ def parse_args():
         help="Include inactive/offline devices",
     )
 
+    sub.add_parser(
+        "reconnect",
+        help="Reconnect WAN (get a new external IP)",
+        formatter_class=RichHelpFormatter,
+    )
+    sub.add_parser(
+        "restart", aliases=["reboot"],
+        help="Reboot the FritzBox",
+        formatter_class=RichHelpFormatter,
+    )
+
     return parser.parse_args()
 
 
@@ -342,7 +401,22 @@ def main():
     args = parse_args()
 
     if args.debug:
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+    cmd = args.command
+
+    # Confirm destructive commands before paying the connection cost
+    if cmd == "reconnect" and not confirm("Reconnect FritzBox (get new external IP)?", args.yes):
+        console_err.print("[bright_black]Aborted.[/bright_black]")
+        return
+    if cmd in ("restart", "reboot") and not confirm("Reboot FritzBox?", args.yes):
+        console_err.print("[bright_black]Aborted.[/bright_black]")
+        return
+    args.yes = True  # already confirmed above, don't ask again inside the cmd functions
 
     try:
         fc = make_connection(args)
@@ -353,7 +427,6 @@ def main():
         console_err.print(f"[red]Connection failed: {exc}[/red]")
         sys.exit(1)
 
-    cmd = args.command
     try:
         if cmd in (None, "info"):
             cmd_info(args, fc)
@@ -361,6 +434,10 @@ def main():
             cmd_wlan(args, fc)
         elif cmd in ("devices", "dev", "sta", "station", "device"):
             cmd_devices(args, fc)
+        elif cmd == "reconnect":
+            cmd_reconnect(args, fc)
+        elif cmd in ("restart", "reboot"):
+            cmd_restart(args, fc)
     except FritzAuthorizationError:
         console_err.print("[red]Authorization failed — check username and password[/red]")
         sys.exit(1)
