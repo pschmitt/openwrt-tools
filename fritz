@@ -1,0 +1,373 @@
+#!/bin/sh
+"exec" "uv" "run" "--script" "--quiet" "$0" "$@"
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#   "fritzconnection",
+#   "rich",
+#   "rich-argparse",
+# ]
+# ///
+
+import argparse
+import json
+import logging
+import os
+import sys
+
+from fritzconnection.core.exceptions import (
+    FritzAuthorizationError,
+    FritzConnectionException,
+    FritzServiceError,
+)
+from fritzconnection.core.fritzconnection import FritzConnection
+from fritzconnection.lib.fritzhosts import FritzHosts
+from fritzconnection.lib.fritzstatus import FritzStatus
+from fritzconnection.lib.fritzwlan import FritzWLAN
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+from rich_argparse import RichHelpFormatter
+
+console = Console()
+console_err = Console(file=sys.stderr)
+
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_HOST = os.environ.get("FRITZ_HOST", "10.178.0.1")
+DEFAULT_USER = os.environ.get("FRITZ_USERNAME", "")
+DEFAULT_PASSWORD = os.environ.get("FRITZ_PASSWORD", "")
+
+NA_TEXT = Text("N/A", style="bright_black italic")
+
+_COLUMN_STYLES = (
+    "cyan",
+    "green",
+    "magenta",
+    "white",
+    "yellow",
+    "blue",
+    "bright_black",
+    "red",
+)
+
+WLAN_BAND_LABELS = {1: "2.4 GHz", 2: "5 GHz", 3: "Guest"}
+
+FREQ_TO_SERVICE = {
+    "2.4": 1, "2.4ghz": 1,
+    "5": 2, "5ghz": 2, "5.0": 2,
+}
+
+
+###############################################################################
+# Helpers
+###############################################################################
+
+def make_table(*headers):
+    table = Table(
+        box=None,
+        show_edge=False,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+        header_style="bold",
+    )
+    for i, header in enumerate(headers):
+        table.add_column(header.upper(), style=_COLUMN_STYLES[i % len(_COLUMN_STYLES)])
+    return table
+
+
+def na_or(value):
+    if value is None:
+        return NA_TEXT.copy()
+    if isinstance(value, Text):
+        return value
+    return str(value)
+
+
+def bool_text(value, true_str="yes", false_str="no"):
+    if value is None:
+        return NA_TEXT.copy()
+    return Text(true_str, style="green") if value else Text(false_str, style="red")
+
+
+def format_rate(bps):
+    if bps is None:
+        return NA_TEXT.copy()
+    for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if abs(bps) < 1024.0:
+            return f"{bps:.1f} {unit}"
+        bps /= 1024.0
+    return f"{bps:.1f} TB/s"
+
+
+def seconds_to_hms(s):
+    if s is None:
+        return None
+    h, rem = divmod(int(s), 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def make_connection(args):
+    return FritzConnection(
+        address=args.host,
+        user=args.username,
+        password=args.password,
+    )
+
+
+###############################################################################
+# info
+###############################################################################
+
+def cmd_info(args, fc):
+    fs = FritzStatus(fc=fc)
+    info = fs.get_device_info()
+    up, down = _safe(lambda: fs.transmission_rate, (None, None))
+
+    if args.json:
+        data = {
+            "model": _safe(lambda: info.model_name),
+            "firmware": _safe(lambda: info.software_version),
+            "hardware": _safe(lambda: info.hardware_version),
+            "serial": _safe(lambda: info.serial_number),
+            "device_uptime": _safe(fs.device_uptime.__get__, None),
+            "connection_uptime": _safe(fs.connection_uptime.__get__, None),
+            "linked": _safe(lambda: fs.is_linked),
+            "connected": _safe(lambda: fs.is_connected),
+            "external_ip": _safe(lambda: fs.external_ip),
+            "external_ipv6": _safe(lambda: fs.external_ipv6),
+            "up_bps": up,
+            "down_bps": down,
+        }
+        console.print_json(json.dumps(data))
+        return
+
+    table = Table(
+        box=None,
+        show_edge=False,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+        show_header=False,
+    )
+    table.add_column("key", style="bright_black")
+    table.add_column("value")
+
+    rows = [
+        ("Model", na_or(_safe(lambda: info.model_name))),
+        ("Firmware", na_or(_safe(lambda: info.software_version))),
+        ("Hardware", na_or(_safe(lambda: info.hardware_version))),
+        ("Serial", na_or(_safe(lambda: info.serial_number))),
+        ("Device uptime", na_or(seconds_to_hms(_safe(lambda: fs.device_uptime)))),
+        ("WAN uptime", na_or(_safe(lambda: fs.str_uptime))),
+        ("Linked", bool_text(_safe(lambda: fs.is_linked))),
+        ("Connected", bool_text(_safe(lambda: fs.is_connected))),
+        ("External IP", na_or(_safe(lambda: fs.external_ip))),
+        ("External IPv6", na_or(_safe(lambda: fs.external_ipv6))),
+        ("Up", na_or(format_rate(up))),
+        ("Down", na_or(format_rate(down))),
+    ]
+    for key, val in rows:
+        table.add_row(key, val)
+    console.print(table)
+
+
+###############################################################################
+# wlan
+###############################################################################
+
+def cmd_wlan(args, fc):
+    action = getattr(args, "wlan_action", None)
+    enable = action in ("on", "enable") if action else None
+    ssid_filter = (getattr(args, "wlan_ssid", None) or "").lower() or None
+    freq_svc = FREQ_TO_SERVICE.get((getattr(args, "freq", None) or "").lower().replace(" ", ""))
+
+    wlans = []
+    for svc in range(1, 5):
+        wlan = FritzWLAN(fc=fc, service=svc)
+        try:
+            _ = wlan.is_enabled  # probe whether the service exists
+        except (FritzServiceError, IndexError):
+            break
+        if freq_svc is not None and svc != freq_svc:
+            continue
+        if ssid_filter and (_safe(lambda w=wlan: w.ssid) or "").lower() != ssid_filter:
+            continue
+        wlans.append((svc, wlan))
+
+    if enable is not None:
+        for svc, wlan in wlans:
+            try:
+                ssid = _safe(lambda w=wlan: w.ssid, "")
+                wlan.enable() if enable else wlan.disable()
+                label = WLAN_BAND_LABELS.get(svc, f"WLAN {svc}")
+                state = "ENABLED" if enable else "DISABLED"
+                state_style = "bold green" if enable else "bold red"
+                console_err.print(f"[green]{ssid}[/green] [bright_black]({label})[/bright_black] [{state_style}]{state}[/{state_style}]")
+            except FritzServiceError as exc:
+                console_err.print(f"[red]Failed to toggle WLAN {svc}: {exc}[/red]")
+        return
+
+    if args.json:
+        data = []
+        for svc, wlan in wlans:
+            data.append({
+                "service": svc,
+                "band": WLAN_BAND_LABELS.get(svc, str(svc)),
+                "enabled": _safe(lambda w=wlan: w.is_enabled),
+                "ssid": _safe(lambda w=wlan: w.ssid),
+                "channel": _safe(lambda w=wlan: w.channel),
+                "psk": _safe(lambda w=wlan: w.get_password()),
+                "security": _safe(lambda w=wlan: w.beacontype),
+            })
+        console.print_json(json.dumps(data))
+        return
+
+    table = make_table("net", "enabled", "ssid", "band", "ch", "psk", "security")
+    for svc, wlan in wlans:
+        enabled = _safe(lambda w=wlan: w.is_enabled)
+        table.add_row(
+            str(svc),
+            bool_text(enabled),
+            na_or(_safe(lambda w=wlan: w.ssid)),
+            na_or(WLAN_BAND_LABELS.get(svc)),
+            na_or(str(_safe(lambda w=wlan: w.channel, ""))),
+            na_or(_safe(lambda w=wlan: w.get_password())),
+            na_or(_safe(lambda w=wlan: w.beacontype)),
+        )
+    console.print(table)
+
+
+###############################################################################
+# devices
+###############################################################################
+
+def cmd_devices(args, fc):
+    fh = FritzHosts(fc=fc)
+    hosts = fh.get_hosts_info() if getattr(args, "all", False) else fh.get_active_hosts()
+
+    if args.json:
+        console.print_json(json.dumps(hosts))
+        return
+
+    table = make_table("ip", "name", "mac", "interface", "source")
+    for h in sorted(hosts, key=lambda x: x.get("ip") or ""):
+        table.add_row(
+            na_or(h.get("ip")),
+            na_or(h.get("name")),
+            na_or(h.get("mac")),
+            na_or(h.get("interface_type")),
+            na_or(h.get("address_source")),
+        )
+    console.print(table)
+
+
+###############################################################################
+# CLI
+###############################################################################
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="fritz",
+        description="FritzBox CLI — powered by fritzconnection",
+        formatter_class=RichHelpFormatter,
+    )
+    parser.add_argument(
+        "-H", "--host",
+        default=DEFAULT_HOST,
+        metavar="HOST",
+        help=f"FritzBox address (default: {DEFAULT_HOST!r}, $FRITZ_HOST)",
+    )
+    parser.add_argument(
+        "-u", "--username",
+        default=DEFAULT_USER,
+        metavar="USER",
+        help="Username ($FRITZ_USERNAME)",
+    )
+    parser.add_argument(
+        "-p", "--password",
+        default=DEFAULT_PASSWORD,
+        metavar="PASS",
+        help="Password ($FRITZ_PASSWORD)",
+    )
+    parser.add_argument("-j", "--json", action="store_true", default=False, help="JSON output")
+    parser.add_argument("-D", "--debug", action="store_true", default=False)
+
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("info", help="Show FritzBox info (default)", formatter_class=RichHelpFormatter)
+
+    wlan_p = sub.add_parser(
+        "wlan", aliases=["wifi"],
+        help="Show or control WiFi networks",
+        formatter_class=RichHelpFormatter,
+    )
+    wlan_p.add_argument(
+        "wlan_action", nargs="?",
+        choices=["on", "enable", "off", "disable"],
+        help="Enable or disable WiFi networks",
+    )
+    wlan_p.add_argument(
+        "wlan_ssid", nargs="?",
+        metavar="SSID",
+        help="Limit to networks matching this SSID (case-insensitive)",
+    )
+    wlan_p.add_argument(
+        "--freq",
+        metavar="2.4|5",
+        help="Limit to the 2.4 GHz or 5 GHz band",
+    )
+
+    dev_p = sub.add_parser(
+        "devices", aliases=["dev", "sta", "station", "device"],
+        help="List connected devices",
+        formatter_class=RichHelpFormatter,
+    )
+    dev_p.add_argument(
+        "-a", "--all", action="store_true", default=False,
+        help="Include inactive/offline devices",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+
+    try:
+        fc = make_connection(args)
+    except FritzAuthorizationError:
+        console_err.print("[red]Authorization failed — check username and password[/red]")
+        sys.exit(1)
+    except FritzConnectionException as exc:
+        console_err.print(f"[red]Connection failed: {exc}[/red]")
+        sys.exit(1)
+
+    cmd = args.command
+    try:
+        if cmd in (None, "info"):
+            cmd_info(args, fc)
+        elif cmd in ("wlan", "wifi"):
+            cmd_wlan(args, fc)
+        elif cmd in ("devices", "dev", "sta", "station", "device"):
+            cmd_devices(args, fc)
+    except FritzAuthorizationError:
+        console_err.print("[red]Authorization failed — check username and password[/red]")
+        sys.exit(1)
+    except FritzConnectionException as exc:
+        console_err.print(f"[red]Error: {exc}[/red]")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
