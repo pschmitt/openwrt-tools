@@ -1,2 +1,2 @@
 #!/bin/sh
-exec uvx pywax "$@"
+exec uv run --with pywax python3 -m pywax "$@"
