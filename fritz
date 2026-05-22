@@ -34,9 +34,29 @@ console_err = Console(file=sys.stderr)
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_HOST = os.environ.get("FRITZ_HOST", "10.178.0.1")
-DEFAULT_USER = os.environ.get("FRITZ_USERNAME", "")
-DEFAULT_PASSWORD = os.environ.get("FRITZ_PASSWORD", "")
+CREDENTIALS_FILE = "/etc/fritz/credentials"
+
+
+def _load_credentials_file(path=CREDENTIALS_FILE):
+    creds = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                creds[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return creds
+
+
+_creds = _load_credentials_file()
+
+DEFAULT_HOST = os.environ.get("FRITZ_HOST", _creds.get("FRITZ_HOST", "10.178.0.1"))
+DEFAULT_USER = os.environ.get("FRITZ_USERNAME", _creds.get("FRITZ_USERNAME", ""))
+DEFAULT_PASSWORD = os.environ.get("FRITZ_PASSWORD", _creds.get("FRITZ_PASSWORD", ""))
 
 NA_TEXT = Text("N/A", style="bright_black italic")
 
