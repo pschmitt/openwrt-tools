@@ -235,18 +235,21 @@ EOF
 # Print help for the ping action.
 usage_ping_action() {
   cat <<'EOF'
-Usage: inet ping [INTERFACE FLAGS...] [ping options]
+Usage: inet ping [INTERFACE FLAGS...] [-- PING_ARGS]
 
 Description:
   Run ICMP reachability tests against 8.8.8.8 (IPv4) and 2001:4860:4860::8888
-  (IPv6) on the selected interfaces.
+  (IPv6) on the selected interfaces. Use "--" to supply a custom destination or
+  extra flags; "-I INTF" is always injected automatically.
 
 Flags:
   INTERFACE FLAGS  Any selectors documented under "Interface selection"
+  --               Forward the remaining arguments directly to ping (replaces
+                   the default destination)
 
 Examples:
   inet ping --lte
-  inet ping -- --count 5
+  inet ping -- -c 5 1.1.1.1
 
 EOF
   usage_interface_selection
@@ -1267,12 +1270,36 @@ wan_ping() {
   local args=()
   [[ -z "${VERBOSE}${DEBUG}" ]] && args=(--quiet)
 
+  local name="ping"
+  local -a cmd=(ping -c 3 -W 2 -w 3 -I INTF)
+  local -a loop_extra_args=(
+    --arg4 "-4 8.8.8.8"
+    --arg6 "-6 2001:4860:4860::8888"
+  )
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      --)
+        shift
+        name="custom ping"
+        cmd=(ping -I INTF "$@")
+        loop_extra_args=()
+        set --
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
   intf_loop \
     "$@" \
     "${args[@]}" \
-    --arg4 "-4 8.8.8.8" \
-    --arg6 "-6 2001:4860:4860::8888" \
-    ping -c 3 -W 2 -w 3 -I INTF
+    "${loop_extra_args[@]}" \
+    --name "$name" \
+    "${cmd[@]}"
 }
 
 wan_curl() {
