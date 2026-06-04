@@ -9727,28 +9727,30 @@ watch_sms_fingerprint() {
   fi
 
   fingerprint_source="$(jq -cS '
-    def scrub:
-      if type == "object"
-      then
-        with_entries(
-          if .value == null
-          then empty
-          else .value |= scrub
-          end
-        )
-      elif type == "array"
-      then
-        map(scrub)
-      else
-        .
+    def blank_to_null:
+      if . == null or . == "" or . == "--"
+      then null
+      else .
       end;
 
+    def normalize_number:
+      blank_to_null
+      | if . == null
+        then null
+        else tostring | gsub("[^0-9]"; "")
+        end
+      | blank_to_null;
+
     {
-      properties: (.sms.properties // null),
-      content: (.sms.content // null)
+      version: 2,
+      pdu: (.sms.properties["pdu-type"] | blank_to_null),
+      timestamp: (.sms.properties.timestamp | blank_to_null),
+      sender: (.sms.content.number | normalize_number),
+      smsc: (.sms.properties.smsc | normalize_number),
+      text: (.sms.content.text | blank_to_null)
     }
-    | scrub
-    | if (keys | length) == 0
+    | with_entries(select(.value != null))
+    | if (.text // "") == "" and (.timestamp // "") == "" and (.sender // "") == ""
       then empty
       else .
       end
@@ -9783,7 +9785,7 @@ watch_processed_key() {
     return 1
   fi
 
-  printf 'fp:%s' "$fingerprint"
+  printf 'fp2:%s' "$fingerprint"
   return 0
 }
 
@@ -9882,6 +9884,7 @@ watch_processed_cache_load() {
   fi
 
   local -a loaded_keys
+  local ignored
   if ! mapfile -t loaded_keys < <(jq -r '.[] | select(type == "string" and length > 0)' <"$WATCH_PROCESSED_SMS_CACHE_FILE" 2>/dev/null)
   then
     echo_warning "watch: failed to parse processed SMS cache; ignoring stale data"
@@ -9896,8 +9899,9 @@ watch_processed_cache_load() {
       continue
     fi
 
-    if [[ "$key" != fp:* ]]
+    if [[ "$key" != fp2:* ]]
     then
+      ignored=1
       continue
     fi
 
@@ -9906,7 +9910,7 @@ watch_processed_cache_load() {
 
   watch_processed_prune
   local prune_rc=$?
-  if (( prune_rc != 0 ))
+  if (( prune_rc != 0 )) || [[ -n "$ignored" ]]
   then
     watch_processed_cache_save || return 1
   fi
@@ -9987,7 +9991,13 @@ watch_processed_cleanup() {
         if key="$(watch_processed_key "$fingerprint")"
         then
           existing_keys["$key"]=1
+        else
+          echo_warning "watch: failed to build processed cache key for SMS $sms_id on modem $modem_id"
+          return 1
         fi
+      else
+        echo_warning "watch: failed to fingerprint SMS $sms_id on modem $modem_id for cache cleanup"
+        return 1
       fi
     done
   done
