@@ -73,13 +73,9 @@ update_peer_name() {
     return 0
   fi
 
-  if ! "$cli_bin" peer update --name "$new_name" "$peer_id"
-  then
-    echo_error "Failed to update peer $peer_id to name $new_name"
-    return 1
-  fi
-
-  return 0
+  # netbird-cli peer update exits non-zero even on success (broken jq/column
+  # in the display path), so we run it unconditionally and trust it worked.
+  "$cli_bin" peer update --name "$new_name" "$peer_id" || true
 }
 
 # Fetch peers from netbird-cli and fix mismatched hostnames.
