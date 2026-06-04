@@ -39,6 +39,13 @@ normalize_peer_name() {
   echo "${name,,}"
 }
 
+# Strip a trailing Unix-timestamp suffix added by a previous temp-rename
+# (e.g. rofl-12-1780310160 -> rofl-12).
+strip_timestamp_suffix() {
+  local name="$1"
+  echo "${name%-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]}"
+}
+
 # Extract the DNS label prefix from the peer data and lowercase it.
 normalize_dns_label() {
   local label="$1"
@@ -111,38 +118,39 @@ process_peers() {
     fi
 
     normalized_peer_name="$(normalize_peer_name "$peer_name")"
+    canonical_peer_name="$(strip_timestamp_suffix "$normalized_peer_name")"
     normalized_dns_name="$(normalize_dns_label "$peer_dns_label")"
 
-    if [[ -z "$normalized_peer_name" ]]
+    if [[ -z "$canonical_peer_name" ]]
     then
       echo_warning "Skipping peer with empty name: $peer"
       continue
     fi
 
-    echo_info "Processing peer: $normalized_peer_name - DNS hostname: ${normalized_dns_name:-none} (${peer_dns_label:-none})"
+    echo_info "Processing peer: $canonical_peer_name - DNS hostname: ${normalized_dns_name:-none} (${peer_dns_label:-none})"
 
-    if [[ "$normalized_peer_name" == "$normalized_dns_name" ]]
+    if [[ "$canonical_peer_name" == "$normalized_dns_name" ]]
     then
-      echo_success "Peer $normalized_peer_name has valid DNS label: ${peer_dns_label:-none}"
+      echo_success "Peer $canonical_peer_name has valid DNS label: ${peer_dns_label:-none}"
       continue
     fi
 
-    echo_warning "Peer $normalized_peer_name has mismatched DNS label: ${peer_dns_label:-none}"
+    echo_warning "Peer $canonical_peer_name has mismatched DNS label: ${peer_dns_label:-none}"
 
     timestamp="$(date '+%s')"
-    if ! update_peer_name "$peer_id" "${normalized_peer_name}_${timestamp}"
+    if ! update_peer_name "$peer_id" "${canonical_peer_name}_${timestamp}"
     then
       echo_error "Failed to set temporary name for peer $peer_id"
       continue
     fi
 
-    if ! update_peer_name "$peer_id" "$normalized_peer_name"
+    if ! update_peer_name "$peer_id" "$canonical_peer_name"
     then
       echo_error "Failed to restore name for peer $peer_id"
       continue
     fi
 
-    echo_success "Updated peer $peer_id name to $normalized_peer_name"
+    echo_success "Updated peer $peer_id name to $canonical_peer_name"
   done
 
   return 0
