@@ -19,9 +19,18 @@ usage() {
 
 git_latest_version() {
   local gh_repo="$1"
+  local exclude="${2:-}"
   git ls-remote --tags "https://github.com/${gh_repo}" | \
     sed -rn 's|.*refs/tags/v?([^\^]+)(\^\{\})?|\1|p' | \
     grep -E '^v?[0-9]+' | \
+    {
+      if [[ -n "$exclude" ]]
+      then
+        grep -vEi -- "$exclude"
+      else
+        cat
+      fi
+    } | \
     sort -V | \
     busybox tail -1
 }
@@ -57,7 +66,7 @@ fzf_latest_version() {
 }
 
 netbird_latest_version() {
-  git_latest_version "$NETBIRD_REPO"
+  git_latest_version "$NETBIRD_REPO" '-(rc|beta|alpha|pre|dev)[0-9.]*$'
 }
 
 tailscale_latest_href() {
