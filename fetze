@@ -173,15 +173,24 @@ fetze_netbird() {
   local dest="${NETBIRD_DEST:-$DEST}"
   mkdir -p "$dest"
   local url="https://github.com/${NETBIRD_REPO}/releases/download/v${latest_version}/netbird_${latest_version}_linux_${NETBIRD_ARCH}.tar.gz"
-  wget -qO- "$url" | tar -xzvf - -C "$dest" netbird
-  local rc="$?"
+  if ! curl -fsIL "$url" >/dev/null
+  then
+    echo "Netbird release v${latest_version} does not provide linux_${NETBIRD_ARCH} tarball: ${url}" >&2
+    return 1
+  fi
+
+  if ! wget -qO- "$url" | tar -xzvf - -C "$dest" netbird
+  then
+    echo "Failed to download or extract netbird from ${url}" >&2
+    return 1
+  fi
 
   if ! /etc/init.d/netbird restart
   then
     echo "Failed to restart netbird service (new install?)" >&2
   fi
 
-  return "$rc"
+  return 0
 }
 
 fetze_tailscale() {
