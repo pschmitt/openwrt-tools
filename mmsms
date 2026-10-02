@@ -9694,7 +9694,7 @@ watch_processed_cache_write_json() {
   return 0
 }
 
-# Generate a stable fingerprint for an SMS when possible.
+# Generate a content-based fingerprint so carrier retries are deduplicated.
 watch_sms_fingerprint() {
   local modem_hint="$1"
   local sms_id="$2"
@@ -9742,15 +9742,14 @@ watch_sms_fingerprint() {
       | blank_to_null;
 
     {
-      version: 2,
+      version: 3,
       pdu: (.sms.properties["pdu-type"] | blank_to_null),
-      timestamp: (.sms.properties.timestamp | blank_to_null),
       sender: (.sms.content.number | normalize_number),
       smsc: (.sms.properties.smsc | normalize_number),
       text: (.sms.content.text | blank_to_null)
     }
     | with_entries(select(.value != null))
-    | if (.text // "") == "" and (.timestamp // "") == "" and (.sender // "") == ""
+    | if (.text // "") == "" and (.sender // "") == ""
       then empty
       else .
       end
@@ -9785,7 +9784,7 @@ watch_processed_key() {
     return 1
   fi
 
-  printf 'fp2:%s' "$fingerprint"
+  printf 'fp3:%s' "$fingerprint"
   return 0
 }
 
@@ -9899,7 +9898,7 @@ watch_processed_cache_load() {
       continue
     fi
 
-    if [[ "$key" != fp2:* ]]
+    if [[ "$key" != fp3:* ]]
     then
       ignored=1
       continue
