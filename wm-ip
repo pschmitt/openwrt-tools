@@ -61,89 +61,140 @@ VPN="mullvad"
 # shellcheck disable=SC2206
 UCI_INTERFACES=($WAN $LTE $VPN)
 
+# Resolve via DoH *through the interface under test*, so that a dead default
+# route (eg. the primary WAN) does not break checks of the other interfaces.
 resolve() {
   local host="$1"
+  local intf="$2"
   local type="A"
+  local rrtype=1
+  local -a servers=(
+    "https://1.1.1.1/dns-query"
+    "https://8.8.8.8/resolve"
+  )
 
   if [[ -n "$IPV6" ]]
   then
     type="AAAA"
+    rrtype=28
+    servers=(
+      "https://[2606:4700:4700::1111]/dns-query"
+      "https://[2001:4860:4860::8888]/resolve"
+    )
   fi
 
-  curl --http2 -fsSL \
-    -H "accept: application/dns-json" \
-    "https://1.1.1.1/dns-query?name=${host}&type=${type}" 2>/dev/null | \
-    jq -er '.Answer[0].data'
+  local server ip_addr
+  for server in "${servers[@]}"
+  do
+    if ip_addr="$(curl -fsSL --max-time "$DOH_TIMEOUT" --interface "$intf" \
+      -H "accept: application/dns-json" \
+      "${server}?name=${host}&type=${type}" 2>/dev/null | \
+      jq -er --argjson t "$rrtype" \
+        'first(.Answer[]? | select(.type == $t) | .data)')"
+    then
+      echo "$ip_addr"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
-provider_resolve() {
-  local ip_addr
+provider_host() {
+  local provider="$1"
 
   # ipinfo.io is reachable via ipv6, but on a differnent host
   # https://ipinfo.io/faq/article/133-do-you-support-ipv6
-  case "$PROVIDER" in
-    ipinfo.io)
-      if [[ -n "$IPV6" ]]
-      then
-        PROVIDER=v6.ipinfo.io
-      fi
+  if [[ "$provider" == "ipinfo.io" && -n "$IPV6" ]]
+  then
+    echo "v6.ipinfo.io"
+    return 0
+  fi
+
+  echo "$provider"
+}
+
+provider_path() {
+  case "$1" in
+    myip.wtf|ipinfo.io)
+      echo "/json"
+      ;;
+    *)
+      echo "/"
       ;;
   esac
+}
 
-  ip_addr="$(resolve "$PROVIDER")"
+# Query a provider over HTTPS, pinning the resolved address with --resolve.
+# Unlike the former plain HTTP + Host header approach, a stale or hijacked IP
+# fails the TLS handshake instead of returning some unrelated 404 page.
+query_provider() {
+  local provider="$1"
+  local uci_intf="$2"
+  local intf="$3"
+  local host ip_addr
 
-  if [[ -n "$ip_addr" && "$ip_addr" != "null" ]]
+  host="$(provider_host "$provider")"
+
+  if ! ip_addr="$(resolve "$host" "$intf")"
   then
-    echo "$ip_addr"
-    return 0
+    echo "Failed to resolve $host via interface $intf" >&2
+    return 1
   fi
 
   if [[ -n "$IPV6" ]]
   then
-    case "$PROVIDER" in
-      ipinfo.io|v6.ipinfo.io)
-        # dig AAAA +short v6.ipinfo.io
-        ip_addr="2600:1901:0:13e0::"
-        ;;
-      ip.guide)
-        # dig AAAA +short ip.guide
-        ip_addr="2a06:98c1:3120::3"
-        ;;
-      myip.wtf)
-        # dig AAAA +short myip.wtf
-        ip_addr="2a01:4f9:6b:4b55::acab:f001"
-        ;;
-      *)
-        echo "Unknown provider: $PROVIDER" >&2
-        return 1
-        ;;
-    esac
-  else
-    case "$PROVIDER" in
-      ipinfo.io|v6.ipinfo.io)
-        # dig AAAA +short ipinfo.io
-        ip_addr="34.117.59.81"
-        ;;
-      ip.guide)
-        # dig A +short ip.guide
-        ip_addr="188.114.97.3"
-        ;;
-      myip.wtf)
-        # dig A +short myip.wtf
-        ip_addr="65.108.75.112"
-        ;;
-      *)
-        echo "Unknown provider: $PROVIDER" >&2
-        return 1
-        ;;
-    esac
+    ip_addr="[${ip_addr}]"
   fi
 
-  echo "$ip_addr"
+  # shellcheck disable=SC2086
+  ${MWAN3_ACTIVE:+mwan3 use "$uci_intf"} curl -fsSL \
+    --max-time "$CURL_TIMEOUT" \
+    --interface "$intf" \
+    "${CURL_ARGS[@]}" \
+    --resolve "${host}:443:${ip_addr}" \
+    "https://${host}$(provider_path "$provider")"
 }
 
+format_data() {
+  local provider="$1"
+  local data="$2"
+
+  case "$provider" in
+    ipinfo.io)
+      jq -er --arg provider "$provider" '
+        "isp: " + .org + "\n" +
+        "ip: " + .ip + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$data"
+      ;;
+    ip.guide)
+      jq -er --arg provider "$provider" '
+        "isp: " + .network.autonomous_system.organization + "\n" +
+        "hostname: " + .network.autonomous_system.name + "\n" +
+        "ip: " + .ip + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$data"
+      ;;
+    myip.wtf)
+      jq -er --arg provider "$provider" '
+        "isp: " + .YourFuckingISP + "\n" +
+        "ip: " + .YourFuckingIPAddress + "\n" +
+        "location: " + .YourFuckingLocation + "\n" +
+        "ip-provider: " + $provider
+      ' <<< "$data"
+      ;;
+    *)
+      echo "Unknown provider: $provider" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Providers are tried in order, the first one that answers wins.
 # NOTE as of 2024-10-25 ip.guide yields a 404 error..!
-PROVIDER="${PROVIDER:-myip.wtf}"
+# shellcheck disable=SC2206
+PROVIDERS=(${PROVIDER:-myip.wtf ipinfo.io})
 NO_COLOR="${NO_COLOR:-}"
 CURL_ARGS=()
 
@@ -154,6 +205,7 @@ then
 fi
 
 CURL_TIMEOUT=10
+DOH_TIMEOUT=5
 
 while [[ -n "$*" ]]
 do
@@ -167,7 +219,7 @@ do
       shift
       ;;
     --provider|-p)
-      PROVIDER="$2"
+      PROVIDERS=("$2")
       shift 2
       ;;
     --no-color|-nocolor)
@@ -197,27 +249,12 @@ case "$1" in
     ;;
 esac
 
-PROVIDER_IP="$(provider_resolve "$PROVIDER")"
-
-if [[ -z "$PROVIDER_IP" ]]
-then
-  echo "Failed to resolve provider $PROVIDER" >&2
-  exit 1
-fi
-
 if [[ -n "$IPV6" ]]
 then
-  PROVIDER_IP="[${PROVIDER_IP}]"
   CURL_ARGS=("-6")
 else
   CURL_ARGS=("-4")
 fi
-
-case "$PROVIDER" in
-  myip.wtf)
-    CURL_LOCATION="/json"
-    ;;
-esac
 
 RC=0
 
@@ -237,42 +274,27 @@ do
 
   echo_info "Interface: $uci_intf ($i)"
 
-  # TODO Try multiple providers!
-  # shellcheck disable=SC2086
-  if ! DATA="$(${MWAN3_ACTIVE:+mwan3 use "$uci_intf"} curl -fsSL --max-time "$CURL_TIMEOUT" --interface "$i" -H "Host:$PROVIDER" \
-    "${CURL_ARGS[@]}" "${PROVIDER_IP}${CURL_LOCATION}")" || \
-    [[ -z "$DATA" ]]
+  DATA=""
+  for provider in "${PROVIDERS[@]}"
+  do
+    if DATA="$(query_provider "$provider" "$uci_intf" "$i")" && [[ -n "$DATA" ]]
+    then
+      break
+    fi
+    echo "Failed to reach $provider on interface $i" >&2
+    DATA=""
+  done
+
+  if [[ -z "$DATA" ]]
   then
-    echo "Failed to reach $PROVIDER on interface $i" >&2
     RC=1
     continue
   fi
 
-  case "$PROVIDER" in
-    ipinfo.io)
-      jq -er --arg provider "$PROVIDER" '
-        "isp: " + .org + "\n" +
-        "ip: " + .ip + "\n" +
-        "ip-provider: " + $provider
-      ' <<< "$DATA"
-      ;;
-    ip.guide)
-      jq -er --arg provider "$PROVIDER" '
-        "isp: " + .network.autonomous_system.organization + "\n" +
-        "hostname: " + .network.autonomous_system.name + "\n" +
-        "ip: " + .ip + "\n" +
-        "ip-provider: " + $provider
-      ' <<< "$DATA"
-      ;;
-    myip.wtf)
-      jq -er --arg provider "$PROVIDER" '
-        "isp: " + .YourFuckingISP + "\n" +
-        "ip: " + .YourFuckingIPAddress + "\n" +
-        "location: " + .YourFuckingLocation + "\n" +
-        "ip-provider: " + $provider
-      ' <<< "$DATA"
-      ;;
-  esac
+  if ! format_data "$provider" "$DATA"
+  then
+    RC=1
+  fi
 done
 
 exit "$RC"
