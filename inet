@@ -32,6 +32,7 @@ usage() {
   echo "  -h, --help        Show this help"
   echo "  -n, --no-callback Disable callbacks, just do the deed"
   echo "  -N, --no-warn     Disable warnings"
+  echo "  --serial, --slow  Run per-interface actions one at a time"
   echo "  -v, --verbose     Enable verbose output"
   echo "  -y, --yes         Disable confirmation"
   echo "  -k, --dry-run     Dry run"
@@ -67,6 +68,7 @@ usage_interface_selection() {
 Interface selection:
   -4                   Limit actions to IPv4 interfaces (wan, wwan)
   -6                   Limit actions to IPv6 interfaces (wan6, wwan6)
+  --serial, --slow     Run per-interface actions one at a time
   -f, --filter REGEX   Only target interfaces whose name matches REGEX
   --iface IFACE        Only operate on the specified interface (repeatable)
   --wan, --vodafone    Prefer wired WAN interfaces (exclude LTE)
@@ -956,9 +958,8 @@ full_reboot() {
 
 intf_loop() {
   local rc=0
-  local owrt_intf l3_intf
+  local owrt_intf
   local -a args=()
-  local res
 
   local cmd_name
   local -a intf_include=()
@@ -970,6 +971,7 @@ intf_loop() {
   local -a pipe6_cmd=()
   local quiet
   local stream
+  local serial
   local matched
 
   while [[ -n "$*" ]]
@@ -1047,6 +1049,10 @@ intf_loop() {
         stream=1
         shift
         ;;
+      --serial|--slow)
+        serial=1
+        shift
+        ;;
       *)
         break
         ;;
@@ -1063,14 +1069,21 @@ intf_loop() {
   fi
 
   local -a cmd=("$@")
-  local icmd
-  local -a pipe_cmd=()
-  local filter
   cmd_name="${cmd_name:-${cmd[0]}}"
-  local upstream_dns intf_ipv4 intf_ipv6 intf_ip
 
-  for owrt_intf in "${WAN_INTERFACES[@]}"
-  do
+  # Run one interface check using the loop's parsed options and command.
+  run_interface() {
+    local owrt_intf="$1"
+    local l3_intf
+    local icmd
+    local -a args=()
+    local -a pipe_cmd=()
+    local filter
+    local matched
+    local upstream_dns intf_ipv4 intf_ipv6 intf_ip
+    local res
+    local worker_rc=0
+
     echo_debug "Processing OpenWRT interface $owrt_intf"
 
     if ((${#intf_exact_include[@]} > 0))
@@ -1088,7 +1101,7 @@ intf_loop() {
       if [[ -z "$matched" ]]
       then
         echo_debug "Skipping interface $owrt_intf (not explicitly selected)"
-        continue
+        return 0
       fi
     fi
 
@@ -1097,7 +1110,7 @@ intf_loop() {
       if [[ "$owrt_intf" != *"$filter"* ]]
       then
         echo_debug "Skipping interface $owrt_intf (not included)"
-        continue 2 # 2 = continue outer loop
+        return 0
       fi
     done
 
@@ -1106,7 +1119,7 @@ intf_loop() {
       if [[ "$owrt_intf" == *"$filter"* ]]
       then
         echo_debug "Skipping interface $owrt_intf (excluded)"
-        continue 2 # 2 = continue outer loop
+        return 0
       fi
     done
 
@@ -1122,23 +1135,22 @@ intf_loop() {
     if ! interface_is_up "$owrt_intf"
     then
       echo_warning "Interface $owrt_intf is down."
-      continue
+      return 0
     fi
 
     if interface_is_disabled "$owrt_intf"
     then
       echo_warning "Interface $owrt_intf is up, but disabled."
-      continue
+      return 0
     fi
 
     if ! l3_intf="$(interface "$owrt_intf")" || [[ -z "$l3_intf" ]]
     then
       echo_warning "Unable to determine L3 interface of $owrt_intf"
-      continue
+      return 0
     fi
 
     icmd="${cmd[0]} ${args[*]} ${cmd[*]:1}"
-    # template cmd
     icmd="${icmd//OWRT_INTF/$owrt_intf}"
     icmd="${icmd//L3_INTF/$l3_intf}"
 
@@ -1148,7 +1160,7 @@ intf_loop() {
       if [[ -z "$intf_ip" ]] || [[ "$intf_ip" == "null" ]]
       then
         echo_warning "Templating failed: No IP address for $owrt_intf"
-        continue
+        return 0
       fi
 
       if [[ "$icmd" == *INTF_IPV4* ]]
@@ -1157,7 +1169,7 @@ intf_loop() {
         if [[ -z "$intf_ipv4" ]] || [[ "$intf_ipv4" == "null" ]]
         then
           echo_warning "Templating failed: No IPv4 address for $owrt_intf"
-          continue
+          return 0
         fi
         icmd="${icmd//INTF_IPV4/${intf_ipv4}}"
       fi
@@ -1168,7 +1180,7 @@ intf_loop() {
         if [[ -z "$intf_ipv6" ]] || [[ "$intf_ipv6" == "null" ]]
         then
           echo_warning "Templating failed: No IPv6 address for $owrt_intf"
-          continue
+          return 0
         fi
         icmd="${icmd//INTF_IPV6/${intf_ipv6}}"
       fi
@@ -1183,7 +1195,7 @@ intf_loop() {
       if [[ -z "$upstream_dns" ]] || [[ "$upstream_dns" == "null" ]]
       then
         echo_warning "Templating failed: No upstream DNS server for $owrt_intf"
-        continue
+        return 0
       fi
 
       icmd="${icmd//INTF_DNS/$upstream_dns}"
@@ -1214,30 +1226,76 @@ intf_loop() {
     if [[ -n "$DRY_RUN" ]]
     then
       echo_dryrun "$icmd"
-    else
-      if [[ -n "$stream" ]]
+    elif [[ -n "$stream" ]]
+    then
+      if eval "$icmd"
       then
-        if eval "$icmd"
-        then
-          echo_success "${cmd_name} ($owrt_intf)"
-        else
-          rc=1
-          echo_error "${cmd_name} ($owrt_intf)"
-        fi
+        echo_success "${cmd_name} ($owrt_intf)"
       else
-        if res=$(eval "$icmd" 2>&1)
-        then
-          echo_success "${cmd_name} ($owrt_intf)"
-          [[ -z "$quiet" ]] && echo -e "$res"
-        else
-          rc=1
-          echo_error "${cmd_name} ($owrt_intf)"
-          [[ -z "$quiet" ]] && echo -e "$res"
-        fi
+        worker_rc=1
+        echo_error "${cmd_name} ($owrt_intf)"
+      fi
+    else
+      if res="$(eval "$icmd" 2>&1)"
+      then
+        echo_success "${cmd_name} ($owrt_intf)"
+        [[ -z "$quiet" ]] && echo -e "$res"
+      else
+        worker_rc=1
+        echo_error "${cmd_name} ($owrt_intf)"
+        [[ -z "$quiet" ]] && echo -e "$res"
       fi
     fi
 
+    return "$worker_rc"
+  }
+
+  local tmpdir
+  local index=0
+  local pid
+  local -a pids=()
+
+  if [[ -z "$serial" ]]
+  then
+    tmpdir="$(mktemp -d)" || return 1
+  fi
+
+  for owrt_intf in "${WAN_INTERFACES[@]}"
+  do
+    if [[ -n "$serial" ]]
+    then
+      if ! run_interface "$owrt_intf"
+      then
+        rc=1
+      fi
+      continue
+    fi
+
+    run_interface "$owrt_intf" >"$tmpdir/$index.stdout" 2>"$tmpdir/$index.stderr" &
+    pids+=("$!")
+    index=$((index + 1))
   done
+
+  if [[ -z "$serial" ]]
+  then
+    for index in "${!pids[@]}"
+    do
+      pid="${pids[$index]}"
+      if ! wait "$pid"
+      then
+        rc=1
+      fi
+      if [[ -n "$stream" ]]
+      then
+        cat "$tmpdir/$index.stdout"
+        cat "$tmpdir/$index.stderr" >&2
+      else
+        cat "$tmpdir/$index.stderr" >&2
+        cat "$tmpdir/$index.stdout"
+      fi
+    done
+    rm -rf -- "$tmpdir"
+  fi
 
   return "$rc"
 }
@@ -1636,3 +1694,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
   main "$@"
 fi
+
+# vim: set ft=sh et ts=2 sw=2 :
