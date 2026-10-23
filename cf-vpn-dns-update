@@ -1139,6 +1139,10 @@ then
         FALLBACK_DEFAULT="$2"
         shift 2
         ;;
+      --ttl)
+        TTL="$2"
+        shift 2
+        ;;
       -z|-zn|--zn|--zone*)
         ZONE_NAME="$2"
         shift 2
