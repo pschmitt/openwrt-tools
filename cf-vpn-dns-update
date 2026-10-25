@@ -38,6 +38,9 @@ Cloudflare auth:
 Record handling:
   --ignore REGEX            Skip hosts matching regex
   --clean                   Delete stale records
+  --clean-grace SECONDS     Only delete records stale for this long (default: 86400)
+  --clean-state-dir DIR     Where to remember since when records are stale
+                            (default: /var/lib/cf-vpn-dns-update)
   --strip                   Trim numeric suffixes from hostnames
   --wildcard                Also manage *.host records
 
@@ -499,10 +502,68 @@ record_suffix_for_type() {
   esac
 }
 
-cleanup_records() {
-  local records_to_delete
+# Print the stale records (JSON lines) that have been stale for at least
+# CLEAN_GRACE seconds. When each one was first seen stale is kept in a state
+# file per zone and subzone; records that are back (or gone) drop out of it.
+stale_records_past_grace() {
+  local stale="$1"
+  local state_file="${CLEAN_STATE_DIR}/stale-${ZONE_NAME}-${CLEAN_SUFFIX:-root}.json"
 
-  records_to_delete=$(get_hosts_to_delete)
+  local now
+  now="$(date +%s)"
+
+  local old_state
+  old_state="$(cat "$state_file" 2>/dev/null)"
+  if ! <<<"$old_state" jq -e 'type == "object"' &>/dev/null
+  then
+    old_state='{}'
+  fi
+
+  local new_state
+  new_state="$(<<<"$stale" jq -cs --argjson old "$old_state" --argjson now "$now" '
+    reduce .[] as $r ({}; .[$r.ID] = ($old[$r.ID] // $now))
+  ')"
+
+  if [[ -z "$DRY_RUN" && "$new_state" != "$(<<<"$old_state" jq -c .)" ]]
+  then
+    if ! mkdir -p "$CLEAN_STATE_DIR" || \
+       ! printf '%s\n' "$new_state" > "${state_file}.tmp" || \
+       ! mv -f "${state_file}.tmp" "$state_file"
+    then
+      # Without the state no grace period ever ends: delete nothing.
+      echo_error "Failed to write $state_file, not deleting anything" >&2
+      return 1
+    fi
+  fi
+
+  <<<"$stale" jq -c --argjson state "$new_state" --argjson now "$now" \
+    --argjson grace "$CLEAN_GRACE" '
+      select(($now - $state[.ID]) >= $grace)
+    '
+
+  # Report the ones still waiting
+  local line
+  while read -r line
+  do
+    echo_info "⏳ Keeping record within the grace period: $line" >&2
+  done < <(<<<"$stale" jq -r --argjson state "$new_state" --argjson now "$now" \
+    --argjson grace "$CLEAN_GRACE" '
+      select(($now - $state[.ID]) < $grace) |
+      "\(.Name) (\(.Type)): stale for \(($now - $state[.ID]) / 60 | floor) min"
+    ')
+}
+
+# Delete the records of hosts that are gone (see get_hosts_to_delete), once
+# they have been gone for the grace period (see stale_records_past_grace)
+cleanup_records() {
+  local stale
+  stale="$(get_hosts_to_delete | jq -c .)"
+
+  local records_to_delete
+  if ! records_to_delete="$(stale_records_past_grace "$stale")"
+  then
+    return 1
+  fi
 
   if [[ -z "$records_to_delete" ]]
   then
@@ -1016,6 +1077,8 @@ then
   DEBUG="${DEBUG:-}"
   DRY_RUN="${DRY_RUN:-}"
   CLEAN="${CLEAN:-}"
+  CLEAN_GRACE="${CLEAN_GRACE:-86400}"
+  CLEAN_STATE_DIR="${CLEAN_STATE_DIR:-/var/lib/cf-vpn-dns-update}"
   IGNORE_REGEX="${IGNORE_REGEX:-}"
   STRIP_HOSTNAMES="${STRIP_HOSTNAMES:-}"
   PTR="${PTR:-}"
@@ -1074,6 +1137,15 @@ then
       --zerotier|zt)
         VPN_TYPE=zerotier
         shift
+        ;;
+      # Before --clean*, which would match them
+      --clean-grace)
+        CLEAN_GRACE="$2"
+        shift 2
+        ;;
+      --clean-state-dir)
+        CLEAN_STATE_DIR="$2"
+        shift 2
         ;;
       --clean*)
         CLEAN=1
@@ -1160,6 +1232,12 @@ then
         ;;
     esac
   done
+
+  if [[ ! "$CLEAN_GRACE" =~ ^[0-9]+$ ]]
+  then
+    echo_error "--clean-grace takes a number of seconds: $CLEAN_GRACE" >&2
+    exit 2
+  fi
 
   case "$FALLBACK_DEFAULT" in
     none|netbird|tailscale|zerotier)
