@@ -141,7 +141,8 @@ process_devices() {
     node_data=$(jq -c '.node' <<< "$peer")
     is_self=$(jq -r '.is_self' <<< "$peer")
     hostname=$(jq -er '.HostName' <<< "$node_data")
-    dns_name=$(jq -er '.DNSName | sub("\\.$"; "")' <<< "$node_data")
+    dns_name=$(jq -er '.DNSName' <<< "$node_data")
+    dns_name=${dns_name%.}
     online=$(jq -r 'if has("Online") then .Online else true end' <<< "$node_data")
     current_dns=$(normalize_dns_label "$dns_name")
     advertised_name=$(normalize_hostname "$hostname")
