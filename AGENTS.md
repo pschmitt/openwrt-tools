@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Project and validation
+
+This repository is a collection of shell utilities intended for OpenWrt
+systems. Match each script's existing shebang and shell dialect.
+
+- Run ShellCheck on every modified script; CI uses the shared
+  [ci-workflows](https://github.com/pschmitt/ci-workflows) ShellCheck action.
+- Before changing CI, check for a reusable workflow or action there and
+  preserve the caller's existing behavior and check coverage.
+- Smoke-test changes that depend on OpenWrt commands in an isolated test
+  environment, when available.
+
 These instructions apply to the entire repository for GitHub Copilot, ChatGPT, and any other coding assistants contributing here.
 
 ## Shell scripts (bash)
