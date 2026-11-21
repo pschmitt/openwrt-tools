@@ -84,7 +84,7 @@ update_peer_name() {
 # that have no rworker CLI.
 is_worker_peer() {
   jq -e '[(.groups // [])[] | (if type == "object" then (.name // "") else . end)]
-         | any(test("-workers$"))' <<< "$1" &>/dev/null
+         | any(endswith("-workers"))' <<< "$1" &>/dev/null
 }
 
 # Fetch peers from netbird-cli and fix mismatched hostnames.
