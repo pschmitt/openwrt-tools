@@ -113,9 +113,12 @@ process_peers() {
       continue
     fi
 
-    if [[ $peer_name == adhoc-* ]]
+    # Ephemeral workers (rworker ad-hoc, nixbot and circus pools) have varying
+    # name prefixes; the reliable signal is their NetBird "*-workers" group.
+    if jq -e '[(.groups // [])[] | (if type == "object" then (.name // "") else . end)]
+              | any(test("-workers$"))' <<< "$peer" &>/dev/null
     then
-      echo_info "Skipping rworker peer: $peer_name"
+      echo_info "Skipping worker peer: $peer_name"
       continue
     fi
 
