@@ -113,6 +113,12 @@ process_peers() {
       continue
     fi
 
+    if [[ $peer_name == adhoc-* ]]
+    then
+      echo_info "Skipping rworker peer: $peer_name"
+      continue
+    fi
+
     normalized_peer_name="$(normalize_peer_name "$peer_name")"
     canonical_peer_name="$(strip_timestamp_suffix "$normalized_peer_name")"
     normalized_dns_name="$(normalize_dns_label "$peer_dns_label")"
