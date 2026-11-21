@@ -78,27 +78,13 @@ update_peer_name() {
   "$cli_bin" peer update --name "$new_name" "$peer_id" || true
 }
 
-# Names and NetBird IPs of rworker-provided machines (image rworker-*), one
-# per line. Empty when rworker is unavailable.
-fetch_worker_ids() {
-  command -v rworker &>/dev/null || return 0
-  rworker ls -o json 2>/dev/null | jq -r '
-    .[] | select((.image_name // "") | startswith("rworker-"))
-    | .name, (.ips.netbird // empty), (.ip // empty)' 2>/dev/null || true
-}
-
-# Succeed if the peer is an rworker machine.
+# Succeed if the peer is an ephemeral worker (rworker ad-hoc, nixbot or circus
+# pool). Their name prefixes vary, but the pools register them in a NetBird
+# group ending in "-workers". Only NetBird data is used: this runs on routers
+# that have no rworker CLI.
 is_worker_peer() {
-  local peer="$1" peer_name="$2" peer_ip
-
-  peer_ip="$(jq -r '.ip // ""' <<< "$peer")"
-  if [[ -n $WORKER_IDS ]] && grep -qxF -e "$peer_name" -e "${peer_ip:-@none@}" <<< "$WORKER_IDS"
-  then
-    return 0
-  fi
-
   jq -e '[(.groups // [])[] | (if type == "object" then (.name // "") else . end)]
-         | any(test("-workers$"))' <<< "$peer" &>/dev/null
+         | any(test("-workers$"))' <<< "$1" &>/dev/null
 }
 
 # Fetch peers from netbird-cli and fix mismatched hostnames.
@@ -107,7 +93,6 @@ process_peers() {
   local normalized_peer_name normalized_dns_name timestamp
 
   cli_bin="${NB_CLI_BIN:-netbird-cli}"
-  WORKER_IDS="$(fetch_worker_ids)"
 
   if ! peers_json="$("$cli_bin" peers --json)"
   then
@@ -137,10 +122,8 @@ process_peers() {
       continue
     fi
 
-    # Ephemeral workers (rworker ad-hoc, nixbot and circus pools) have varying
-    # name prefixes: skip peers that rworker lists (rworker-provided image),
-    # or that sit in a NetBird "*-workers" group.
-    if is_worker_peer "$peer" "$peer_name"
+    # Ephemeral workers (rworker ad-hoc, nixbot and circus pools)
+    if is_worker_peer "$peer"
     then
       echo_info "Skipping rworker peer: $peer_name"
       continue
